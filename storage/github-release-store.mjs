@@ -72,18 +72,26 @@ export class GitHubReleaseStore {
     this.signal = signal;
   }
 
-  async #request(path, { method = "GET", body, contentType = "application/vnd.github+json", allowNotFound = false, maximumBytes = 2_097_152 } = {}) {
+  async #request(path, {
+    method = "GET",
+    body,
+    requestContentType,
+    accept = "application/vnd.github+json",
+    allowNotFound = false,
+    maximumBytes = 2_097_152,
+  } = {}) {
     this.signal?.throwIfAborted();
     const target = path.startsWith("https://") ? path : `https://api.github.com${path}`;
+    const headers = {
+      accept,
+      authorization: `Bearer ${this.token}`,
+      "user-agent": "robinhood-stock-token-index",
+      "x-github-api-version": "2022-11-28",
+    };
+    if (requestContentType !== undefined) headers["content-type"] = requestContentType;
     const response = await this.fetch(target, {
       method,
-      headers: {
-        accept: contentType === "application/gzip" ? "application/octet-stream" : "application/vnd.github+json",
-        authorization: `Bearer ${this.token}`,
-        "content-type": contentType,
-        "user-agent": "robinhood-stock-token-index",
-        "x-github-api-version": "2022-11-28",
-      },
+      headers,
       body,
       signal: this.signal
         ? AbortSignal.any([this.signal, AbortSignal.timeout(30_000)])
@@ -104,7 +112,11 @@ export class GitHubReleaseStore {
     const existing = await this.#getRelease(tag);
     if (existing) return existing;
     const body = Buffer.from(JSON.stringify({ tag_name: tag, name: tag, draft: false, prerelease: false }), "utf8");
-    const bytes = await this.#request(`/repos/${this.repository}/releases`, { method: "POST", body });
+    const bytes = await this.#request(`/repos/${this.repository}/releases`, {
+      method: "POST",
+      body,
+      requestContentType: "application/vnd.github+json",
+    });
     return admitRelease(parseJson(bytes, "GitHub release creation response"), tag);
   }
 
@@ -131,7 +143,7 @@ export class GitHubReleaseStore {
   async #downloadAsset(asset) {
     if (asset.size > this.registry.collection.maximumArtifactBytes) throw new Error("GitHub asset exceeds the admitted byte limit.");
     return this.#request(`/repos/${this.repository}/releases/assets/${asset.id}`, {
-      contentType: "application/gzip",
+      accept: "application/octet-stream",
       maximumBytes: this.registry.collection.maximumArtifactBytes,
     });
   }
@@ -147,7 +159,7 @@ export class GitHubReleaseStore {
     const uploadedBytes = await this.#request(`https://uploads.github.com/repos/${this.repository}/releases/${release.id}/assets?name=${encodeURIComponent(name)}`, {
       method: "POST",
       body: bytes,
-      contentType: "application/gzip",
+      requestContentType: "application/octet-stream",
     });
     const uploaded = admitAsset(parseJson(uploadedBytes, "GitHub asset upload response"));
     if (uploaded.name !== name || uploaded.size !== bytes.byteLength) throw new Error("GitHub asset upload identity is invalid.");

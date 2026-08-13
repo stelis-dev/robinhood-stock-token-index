@@ -34,6 +34,7 @@ class FakeGitHub {
   fetch = async (target, init = {}) => {
     const url = new URL(target);
     const method = init.method ?? "GET";
+    const requestHeaders = new Headers(init.headers);
     const tagMatch = url.pathname.match(/^\/repos\/owner\/index\/releases\/tags\/(.+)$/);
     if (method === "GET" && tagMatch) {
       const tag = decodeURIComponent(tagMatch[1]);
@@ -41,6 +42,8 @@ class FakeGitHub {
       return release ? jsonResponse({ id: release.id, tag_name: tag }) : jsonResponse({ message: "Not Found" }, 404);
     }
     if (method === "POST" && url.pathname === "/repos/owner/index/releases") {
+      assert.equal(requestHeaders.get("accept"), "application/vnd.github+json");
+      assert.equal(requestHeaders.get("content-type"), "application/vnd.github+json");
       const request = JSON.parse(Buffer.from(init.body).toString("utf8"));
       const release = { id: this.nextReleaseId++, tag: request.tag_name, assets: new Map() };
       this.releases.set(release.tag, release);
@@ -53,6 +56,8 @@ class FakeGitHub {
       return jsonResponse([...release.assets.values()].map((asset) => ({ id: asset.id, name: asset.name, size: asset.bytes.byteLength })));
     }
     if (method === "POST" && assetListMatch && url.hostname === "uploads.github.com") {
+      assert.equal(requestHeaders.get("accept"), "application/vnd.github+json");
+      assert.equal(requestHeaders.get("content-type"), "application/octet-stream");
       const release = this.#releaseById(assetListMatch[1]);
       const name = url.searchParams.get("name");
       if (!release || !name) return jsonResponse({ message: "Not Found" }, 404);
@@ -64,6 +69,8 @@ class FakeGitHub {
     }
     const assetMatch = url.pathname.match(/^\/repos\/owner\/index\/releases\/assets\/([0-9]+)$/);
     if (assetMatch && method === "GET") {
+      assert.equal(requestHeaders.get("accept"), "application/octet-stream");
+      assert.equal(requestHeaders.get("content-type"), null);
       const asset = this.#assetById(assetMatch[1]);
       return asset ? new Response(asset.bytes) : jsonResponse({ message: "Not Found" }, 404);
     }
