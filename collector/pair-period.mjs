@@ -1,0 +1,90 @@
+import { canonicalBytes } from "./canonical.mjs";
+import { admitPairCandleSequence } from "./pair-artifact.mjs";
+import { pairById } from "./pair-registry.mjs";
+
+const instantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/;
+
+function exactKeys(value, keys, label) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} has an invalid member set.`);
+}
+
+function instant(value, label) {
+  if (typeof value !== "string" || !instantPattern.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value || Date.parse(value) % 60_000 !== 0) {
+    throw new Error(`${label} must be a minute-aligned canonical UTC instant.`);
+  }
+  return Date.parse(value);
+}
+
+function monthBounds(value) {
+  const start = `${value.slice(0, 7)}-01T00:00:00.000Z`;
+  const until = new Date(start);
+  until.setUTCMonth(until.getUTCMonth() + 1);
+  return { start, until: until.toISOString() };
+}
+
+export function admitPairPeriodInput(value, registry) {
+  exactKeys(value, ["from", "pairId", "until"], "pair period input");
+  pairById(registry, value.pairId);
+  const from = instant(value.from, "pair period from");
+  const until = instant(value.until, "pair period until");
+  const bounds = monthBounds(value.from);
+  if (from >= until || value.from < bounds.start || value.until > bounds.until) {
+    throw new Error("Pair period must be a non-empty interval in one UTC calendar month.");
+  }
+  return value;
+}
+
+function admitTimeRange(value, label, request) {
+  exactKeys(value, ["from", "until"], label);
+  const from = instant(value.from, `${label}.from`);
+  const until = instant(value.until, `${label}.until`);
+  if (from >= until || value.from < request.from || value.until > request.until) throw new Error(`${label} is outside the request.`);
+  return value;
+}
+
+function admitRangePartition(available, unavailable, request) {
+  if (!Array.isArray(available) || !Array.isArray(unavailable)) throw new Error("Pair period availability collections are invalid.");
+  for (const [label, values] of [["available", available], ["unavailable", unavailable]]) {
+    let previous = "";
+    for (let index = 0; index < values.length; index += 1) {
+      admitTimeRange(values[index], `${label}[${index}]`, request);
+      if (values[index].from < previous) throw new Error(`${label} ranges are unordered.`);
+      previous = values[index].until;
+    }
+  }
+  const partition = [
+    ...available.map((range) => ({ ...range, kind: "available" })),
+    ...unavailable.map((range) => ({ ...range, kind: "unavailable" })),
+  ].sort((left, right) => left.from.localeCompare(right.from) || left.until.localeCompare(right.until));
+  let cursor = request.from;
+  for (const range of partition) {
+    if (range.from !== cursor) throw new Error("Available and unavailable ranges do not exactly partition the request.");
+    cursor = range.until;
+  }
+  if (cursor !== request.until) throw new Error("Available and unavailable ranges do not cover the request.");
+}
+
+export function admitPairPeriodResult(value, { registry, input }) {
+  exactKeys(value, ["available", "candles", "display", "pair", "requested", "unavailable"], "pair period result");
+  exactKeys(value.requested, ["from", "until"], "pair period request projection");
+  const request = admitPairPeriodInput(input, registry);
+  if (value.pair?.pairId !== request.pairId || value.requested.from !== request.from || value.requested.until !== request.until) {
+    throw new Error("Pair period result does not match its request.");
+  }
+  const entry = pairById(registry, request.pairId);
+  if (!canonicalBytes(value.pair).equals(canonicalBytes(entry.pair)) || !canonicalBytes(value.display).equals(canonicalBytes(entry.display))) {
+    throw new Error("Pair period identity or display is invalid.");
+  }
+  admitRangePartition(value.available, value.unavailable, value.requested);
+  admitPairCandleSequence(value.candles);
+  for (const candle of value.candles) {
+    if (candle.intervalStart < value.requested.from || candle.intervalEnd > value.requested.until) {
+      throw new Error("Pair period candle is outside the request.");
+    }
+    if (!value.available.some((range) => range.from <= candle.intervalStart && range.until >= candle.intervalEnd)) {
+      throw new Error("Pair period candle is outside available coverage.");
+    }
+  }
+  return value;
+}

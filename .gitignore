@@ -1,3 +1,4 @@
 .DS_Store
+.WORK/
 .local-index/
 node_modules/
