@@ -3,7 +3,6 @@ import { pairById } from "./pair-registry.mjs";
 
 const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
 const monthPattern = /^\d{4}-\d{2}$/;
-const yearPattern = /^\d{4}$/;
 const instantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/;
 const digestPattern = /^[0-9a-f]{64}$/;
 
@@ -46,13 +45,6 @@ function month(value, label) {
   return value;
 }
 
-function year(value, label) {
-  if (typeof value !== "string" || !yearPattern.test(value) || Number(value) < 1970 || Number(value) > 9999) {
-    throw new Error(`${label} is not a canonical UTC year.`);
-  }
-  return value;
-}
-
 function pairDescriptor(value, registry) {
   const pairId = value?.pairId;
   const expected = pairById(registry, pairId).pair;
@@ -60,16 +52,15 @@ function pairDescriptor(value, registry) {
   return expected;
 }
 
-export function admitPairCoverage(value, label = "coverage", { allowEmpty = false } = {}) {
+export function admitPairCoverage(value, label = "coverage") {
   exactKeys(value, ["fromBlock", "fromTimestamp", "untilBlock", "untilTimestamp"], label);
   const fromBlock = decimalString(value.fromBlock, `${label}.fromBlock`);
   const untilBlock = decimalString(value.untilBlock, `${label}.untilBlock`);
   const fromTime = instant(value.fromTimestamp, `${label}.fromTimestamp`);
   const untilTime = instant(value.untilTimestamp, `${label}.untilTimestamp`);
-  if (fromBlock > untilBlock || fromTime > untilTime || !allowEmpty && fromTime === untilTime) {
+  if (fromBlock > untilBlock || fromTime >= untilTime) {
     throw new Error(`${label} is inverted.`);
   }
-  if (fromTime === untilTime && fromBlock !== untilBlock) throw new Error(`${label} has blocks inside an empty time range.`);
   return value;
 }
 
@@ -240,10 +231,6 @@ export function pairStateLogicalId(pairId) {
   return logicalId("", pairId);
 }
 
-export function pairYearLogicalId(pairId, value) {
-  return logicalId("years", pairId, year(value, "year"));
-}
-
 export function pairMonthLogicalId(pairId, value) {
   return logicalId("months", pairId, month(value, "month"));
 }
@@ -262,17 +249,14 @@ export function createPairReference({ encoded, context }) {
   }
   const child = decoded.value;
   let identity;
-  if (child.kind === "pair_candle_year") {
-    admitPairYear(child, context);
-    identity = pairYearLogicalId(child.pair.pairId, child.year);
-  } else if (child.kind === "pair_candle_month") {
+  if (child.kind === "pair_candle_month") {
     admitPairMonth(child, context);
     identity = pairMonthLogicalId(child.pair.pairId, child.month);
   } else if (child.kind === "pair_candle_day") {
     admitPairDay(child, context);
     identity = pairDayLogicalId(child.pair.pairId, child.day);
   } else {
-    throw new Error("Only a pair year, month, or day can be referenced.");
+    throw new Error("Only a pair month or day can be referenced.");
   }
   const reference = {
     logicalId: identity,
@@ -289,7 +273,7 @@ export function createPairReference({ encoded, context }) {
 function admitPairReference(value, { logicalId: expectedLogicalId, maximumSequence, maximumArtifactBytes }) {
   exactKeys(value, ["coverage", "gzipBytes", "gzipSha256", "jsonBytes", "jsonSha256", "logicalId", "sequence"], "artifact reference");
   positiveInteger(maximumArtifactBytes, "maximum artifact bytes");
-  const identity = typeof value.logicalId === "string" ? value.logicalId.match(/^pairs\/(0x[0-9a-f]{64})\/(years|months|days)\/(.+)$/) : null;
+  const identity = typeof value.logicalId === "string" ? value.logicalId.match(/^pairs\/(0x[0-9a-f]{64})\/(months|days)\/(.+)$/) : null;
   if (!identity) {
     throw new Error("Reference logical identity is invalid.");
   }
@@ -299,11 +283,7 @@ function admitPairReference(value, { logicalId: expectedLogicalId, maximumSequen
   admitPairCoverage(value.coverage, "reference coverage");
   let periodStart;
   let periodUntil;
-  if (identity[2] === "years") {
-    year(identity[3], "reference year");
-    periodStart = `${identity[3]}-01-01T00:00:00.000Z`;
-    periodUntil = `${String(Number(identity[3]) + 1).padStart(4, "0")}-01-01T00:00:00.000Z`;
-  } else if (identity[2] === "months") {
+  if (identity[2] === "months") {
     month(identity[3], "reference month");
     periodStart = `${identity[3]}-01T00:00:00.000Z`;
     const next = new Date(periodStart);
@@ -325,7 +305,7 @@ function admitPairReference(value, { logicalId: expectedLogicalId, maximumSequen
 
 function admitHeader(value, { registry, kind }) {
   exactKeys(value, kind.keys, kind.label);
-  if (value.contractVersion !== "2" || value.kind !== kind.value) throw new Error(`${kind.label} identity is invalid.`);
+  if (value.contractVersion !== "1" || value.kind !== kind.value) throw new Error(`${kind.label} identity is invalid.`);
   pairDescriptor(value.pair, registry);
   positiveInteger(value.sequence, `${kind.label} sequence`);
 }
@@ -335,13 +315,11 @@ function intersectedKeys(fromTimestamp, untilTimestamp, size) {
   const untilExclusive = Date.parse(untilTimestamp);
   if (Date.parse(fromTimestamp) === untilExclusive) return keys;
   const cursor = new Date(fromTimestamp);
-  if (size === "year") cursor.setUTCMonth(0, 1);
-  else if (size === "month") cursor.setUTCDate(1);
+  if (size === "month") cursor.setUTCDate(1);
   cursor.setUTCHours(0, 0, 0, 0);
   while (cursor.getTime() < untilExclusive) {
-    keys.push(size === "year" ? cursor.toISOString().slice(0, 4) : size === "month" ? cursor.toISOString().slice(0, 7) : cursor.toISOString().slice(0, 10));
-    if (size === "year") cursor.setUTCFullYear(cursor.getUTCFullYear() + 1);
-    else if (size === "month") cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+    keys.push(size === "month" ? cursor.toISOString().slice(0, 7) : cursor.toISOString().slice(0, 10));
+    if (size === "month") cursor.setUTCMonth(cursor.getUTCMonth() + 1);
     else cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return keys;
@@ -364,16 +342,19 @@ function admitOrderedReferences(references, expectedLogicalIds, ownerSequence, m
     cursorTimestamp = references[index].coverage.untilTimestamp;
   }
   if (cursorBlock !== parentCoverage.untilBlock || cursorTimestamp !== parentCoverage.untilTimestamp) throw new Error(`${label} references do not reach their owner coverage.`);
+  if (!references.some((reference) => reference.sequence === ownerSequence)) {
+    throw new Error(`${label} references do not contain an owner-generation child.`);
+  }
 }
 
 export function admitPairState(value, { registry }) {
   const kind = {
     label: "pair state",
     value: "pair_candle_state",
-    keys: ["contractVersion", "coverage", "kind", "pair", "sequence", "years"],
+    keys: ["contractVersion", "coverage", "kind", "months", "pair", "sequence"],
   };
   admitHeader(value, { registry, kind });
-  admitPairCoverage(value.coverage, "state coverage", { allowEmpty: true });
+  admitPairCoverage(value.coverage, "state coverage");
   const pair = pairById(registry, value.pair.pairId).pair;
   const fromBlock = BigInt(value.coverage.fromBlock);
   const untilBlock = BigInt(value.coverage.untilBlock);
@@ -382,38 +363,14 @@ export function admitPairState(value, { registry }) {
   if (fromBlock < historyBlock || fromBlock > activationBlock || untilBlock < activationBlock || value.coverage.fromTimestamp < pair.historyStart.timestamp || value.coverage.fromTimestamp > pair.activation.timestamp || value.coverage.untilTimestamp < pair.activation.timestamp) {
     throw new Error("State coverage is outside pair history and activation bounds.");
   }
-  const years = intersectedKeys(value.coverage.fromTimestamp, value.coverage.untilTimestamp, "year");
-  admitOrderedReferences(
-    value.years,
-    years.map((entry) => pairYearLogicalId(pair.pairId, entry)),
-    value.sequence,
-    registry.collection.maximumArtifactBytes,
-    value.coverage,
-    "State year",
-  );
-  return value;
-}
-
-export function admitPairYear(value, { registry }) {
-  const kind = {
-    label: "pair year",
-    value: "pair_candle_year",
-    keys: ["contractVersion", "coverage", "kind", "months", "pair", "sequence", "year"],
-  };
-  admitHeader(value, { registry, kind });
-  year(value.year, "pair year");
-  admitPairCoverage(value.coverage, "year coverage");
-  const yearStart = `${value.year}-01-01T00:00:00.000Z`;
-  const yearUntil = `${String(Number(value.year) + 1).padStart(4, "0")}-01-01T00:00:00.000Z`;
-  if (value.coverage.fromTimestamp < yearStart || value.coverage.untilTimestamp > yearUntil) throw new Error("Year coverage escapes its UTC year.");
   const months = intersectedKeys(value.coverage.fromTimestamp, value.coverage.untilTimestamp, "month");
   admitOrderedReferences(
     value.months,
-    months.map((entry) => pairMonthLogicalId(value.pair.pairId, entry)),
+    months.map((entry) => pairMonthLogicalId(pair.pairId, entry)),
     value.sequence,
     registry.collection.maximumArtifactBytes,
     value.coverage,
-    "Year month",
+    "State month",
   );
   return value;
 }
@@ -481,9 +438,7 @@ function decodeReferencedPairArtifact(bytes, context, reference, admission) {
   const value = admission(decoded.value, context);
   if (value.sequence !== reference.sequence) throw new Error("Artifact sequence does not match its reference.");
   if (!canonicalBytes(value.coverage).equals(canonicalBytes(reference.coverage))) throw new Error("Artifact coverage does not match its reference.");
-  const expectedLogicalId = value.kind === "pair_candle_year"
-    ? pairYearLogicalId(value.pair.pairId, value.year)
-    : value.kind === "pair_candle_month"
+  const expectedLogicalId = value.kind === "pair_candle_month"
       ? pairMonthLogicalId(value.pair.pairId, value.month)
       : pairDayLogicalId(value.pair.pairId, value.day);
   if (reference.logicalId !== expectedLogicalId) throw new Error("Artifact identity does not match its reference.");
@@ -492,10 +447,6 @@ function decodeReferencedPairArtifact(bytes, context, reference, admission) {
 
 export function encodePairState(value, context) {
   return encode(value, context, admitPairState);
-}
-
-export function encodePairYear(value, context) {
-  return encode(value, context, admitPairYear);
 }
 
 export function encodePairMonth(value, context) {
@@ -512,10 +463,6 @@ export function decodePairState(bytes, context, expectedPairId) {
   const value = admitPairState(decoded.value, context);
   if (value.pair.pairId !== expectedPairId) throw new Error("Pair state does not match its requested logical identity.");
   return value;
-}
-
-export function decodePairYear(bytes, context, reference) {
-  return decodeReferencedPairArtifact(bytes, context, reference, admitPairYear);
 }
 
 export function decodePairMonth(bytes, context, reference) {

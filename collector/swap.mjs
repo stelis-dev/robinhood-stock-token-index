@@ -30,11 +30,11 @@ function absolute(value) {
   return value < 0n ? -value : value;
 }
 
-function gcd(a, b) {
-  let x = absolute(a);
-  let y = absolute(b);
-  while (y !== 0n) [x, y] = [y, x % y];
-  return x;
+function gcd(left, right) {
+  let a = absolute(left);
+  let b = absolute(right);
+  while (b !== 0n) [a, b] = [b, a % b];
+  return a;
 }
 
 export function rational(numerator, denominator) {
@@ -79,14 +79,16 @@ export function compareSourcePosition(left, right) {
   return left.logIndex - right.logIndex;
 }
 
-export function admitSwapLog(log, { registry, group, block }) {
+export function admitSwapLog(log, { registry, pair, block }) {
   if (log === null || typeof log !== "object" || Array.isArray(log)) throw new Error("Swap log must be an object.");
   const keys = ["address", "blockHash", "blockNumber", "data", "logIndex", "removed", "topics", "transactionHash", "transactionIndex"];
   for (const key of keys) if (!(key in log)) throw new Error(`Swap log omitted ${key}.`);
-  if (log.address !== registry.deployment.poolManager || log.removed !== false) throw new Error("Swap log has an invalid source or removal state.");
-  if (!Array.isArray(log.topics) || log.topics.length !== 3 || log.topics[0] !== registry.deployment.swapTopic) throw new Error("Swap log topics are invalid.");
-  const asset = group.assets.find((entry) => entry.poolId === log.topics[1]);
-  if (!asset) throw new Error("Swap log pool is outside the admitted group.");
+  if (log.address !== pair.poolManager || pair.poolManager !== registry.deployment.poolManager || log.removed !== false) {
+    throw new Error("Swap log has an invalid source or removal state.");
+  }
+  if (!Array.isArray(log.topics) || log.topics.length !== 3 || log.topics[0] !== pair.swapTopic || pair.swapTopic !== registry.deployment.swapTopic || log.topics[1] !== pair.pairId) {
+    throw new Error("Swap log topics do not match the requested pair.");
+  }
   if (!/^0x0{24}[0-9a-f]{40}$/.test(log.topics[2])) throw new Error("Swap sender topic is invalid.");
   if (!/^0x[0-9a-f]{64}$/.test(log.blockHash) || !/^0x[0-9a-f]{64}$/.test(log.transactionHash)) throw new Error("Swap source hash is invalid.");
   const logBlockNumber = admitSwapLogBlockNumber(log);
@@ -101,22 +103,23 @@ export function admitSwapLog(log, { registry, group, block }) {
   const tick = signedWord(word(log.data, 4), 24);
   const fee = unsignedWord(word(log.data, 5), 24);
   if (amount0 === 0n || amount1 === 0n || (amount0 < 0n) === (amount1 < 0n)) throw new Error("Swap amounts do not describe an exchange.");
-  // Swap.fee is the effective LP plus protocol fee, not the PoolKey LP fee.
   if (sqrtPriceX96 === 0n || fee > 1_000_000n) throw new Error("Swap price or fee is invalid.");
 
-  const tokenAmount = absolute(asset.stockTokenIsCurrency0 ? amount0 : amount1);
-  const quoteAmount = absolute(asset.stockTokenIsCurrency0 ? amount1 : amount0);
-  const price = rational(quoteAmount * 10n ** BigInt(asset.tokenDecimals), tokenAmount * 10n ** BigInt(registry.deployment.quoteToken.decimals));
+  const baseAmount = absolute(pair.baseIsCurrency0 ? amount0 : amount1);
+  const quoteAmount = absolute(pair.baseIsCurrency0 ? amount1 : amount0);
   return {
-    asset,
+    pairId: pair.pairId,
     blockTimestamp: safeHexQuantityNumber(block.timestamp, "Block timestamp"),
     fee: fee.toString(),
     liquidity: liquidity.toString(),
-    price,
+    price: rational(
+      quoteAmount * 10n ** BigInt(pair.baseAsset.decimals),
+      baseAmount * 10n ** BigInt(pair.quoteAsset.decimals),
+    ),
     source,
     sqrtPriceX96: sqrtPriceX96.toString(),
     tick: tick.toString(),
-    tokenAmountRaw: tokenAmount.toString(),
+    baseAmountRaw: baseAmount.toString(),
     quoteAmountRaw: quoteAmount.toString(),
   };
 }

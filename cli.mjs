@@ -1,18 +1,15 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from "node:url";
-import {
-  retainIndex,
-  verifyIndex,
-} from "./collector/process.mjs";
-import { loadRegistry } from "./collector/registry.mjs";
-import { runRpcIndexOperation } from "./collector/rpc-operation.mjs";
+import { readPairPeriod, verifyPairIndex } from "./collector/pair-reader.mjs";
+import { loadPairRegistry, pairById } from "./collector/pair-registry.mjs";
+import { runRpcPairOperation } from "./collector/rpc-operation.mjs";
 import { RpcClient } from "./collector/rpc-client.mjs";
 import { admitRpcUrl, maximumRpcEndpointCount } from "./collector/rpc-endpoint.mjs";
 import { createStore } from "./storage/create-store.mjs";
 
-const operations = new Set(["collect", "repair", "retention", "verify"]);
-const flags = new Set(["--repository", "--root", "--store"]);
+const operations = new Set(["collect", "read", "repair", "verify"]);
+const flags = new Set(["--from", "--pair", "--repository", "--root", "--store", "--until"]);
 const fallbackEnvironmentNames = Object.freeze([
   "INDEX_RPC_FALLBACK_URL_0",
   "INDEX_RPC_FALLBACK_URL_1",
@@ -30,9 +27,10 @@ export function rpcEndpointSourceName(index) {
   return rpcEndpointSourceNames[index];
 }
 
-export function rpcEndpointSelectionLog(index, environment) {
+export function rpcEndpointSelectionLog(role, index, environment) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
-  return `rpc_endpoint_source=${rpcEndpointSourceName(index)}\n`;
+  if (role !== "current" && role !== "history" && role !== "repair") throw new Error("RPC operation role is invalid.");
+  return `rpc_attempt=${role} rpc_endpoint_source=${rpcEndpointSourceName(index)}\n`;
 }
 
 export function selectRpcUrls(registry, environment) {
@@ -62,7 +60,7 @@ export function selectRpcUrls(registry, environment) {
 
 export function parseArguments(argv) {
   const [operation, ...rest] = argv;
-  if (!operations.has(operation)) throw new Error("Operation must be collect, repair, retention, or verify.");
+  if (!operations.has(operation)) throw new Error("Operation must be collect, read, repair, or verify.");
   if (rest.length % 2 !== 0) throw new Error("Every command option requires one value.");
   const values = {};
   for (let index = 0; index < rest.length; index += 2) {
@@ -73,66 +71,102 @@ export function parseArguments(argv) {
   }
   const store = values["--store"];
   if (store !== "directory" && store !== "github") throw new Error("--store must be directory or github.");
+  if (!values["--pair"]) throw new Error("Every operation requires --pair.");
   if (store === "directory" && !values["--root"]) throw new Error("Directory storage requires --root.");
   if (store === "github" && !values["--repository"]) throw new Error("GitHub storage requires --repository.");
   if (store === "directory" && values["--repository"] || store === "github" && values["--root"]) throw new Error("Storage options cannot cross adapter boundaries.");
+  const hasPeriod = values["--from"] !== undefined || values["--until"] !== undefined;
+  if (operation === "read" && (!values["--from"] || !values["--until"])) throw new Error("Read requires --from and --until.");
+  if (operation !== "read" && hasPeriod) throw new Error("Only read accepts --from and --until.");
   return {
     operation,
+    pairId: values["--pair"],
     store,
     root: values["--root"],
     repository: values["--repository"],
+    from: values["--from"],
+    until: values["--until"],
   };
+}
+
+function rpcClients(registry, environment, signal) {
+  return selectRpcUrls(registry, environment).map((url) => new RpcClient({
+    url,
+    requestDelayMilliseconds: registry.collection.requestDelayMilliseconds,
+    requestTimeoutMilliseconds: registry.collection.requestTimeoutMilliseconds,
+    maximumResponseBytes: registry.collection.maximumResponseBytes,
+    maximumRpcAttempts: registry.collection.maximumRpcAttempts,
+    maximumRpcRetryDelayMilliseconds: registry.collection.maximumRpcRetryDelayMilliseconds,
+    signal,
+  }));
+}
+
+function writeSelection(role, completed, environment) {
+  const line = rpcEndpointSelectionLog(role, completed.selectedEndpointIndex, environment);
+  if (line !== null) process.stderr.write(line);
 }
 
 export async function main(argv, { environment = process.env, signal } = {}) {
   const options = parseArguments(argv);
-  const registry = await loadRegistry();
-  const rpcClients = options.operation === "collect" || options.operation === "repair"
-    ? selectRpcUrls(registry, environment).map((url) => (
-      new RpcClient({
-        url,
-        requestDelayMilliseconds: registry.collection.requestDelayMilliseconds,
-        requestTimeoutMilliseconds: registry.collection.requestTimeoutMilliseconds,
-        maximumResponseBytes: registry.collection.maximumResponseBytes,
-        maximumRpcAttempts: registry.collection.maximumRpcAttempts,
-        maximumRpcRetryDelayMilliseconds: registry.collection.maximumRpcRetryDelayMilliseconds,
-        signal,
-      })
-    ))
-    : null;
-  const results = [];
-  for (const group of registry.groups) {
-    signal?.throwIfAborted();
-    const store = createStore({
-      kind: options.store,
-      root: options.root,
-      repository: options.repository,
-      token: environment.GITHUB_TOKEN,
-      registry,
-      group,
-      signal,
-    });
-    if (options.operation === "verify") {
-      results.push(await verifyIndex({ registry, group, store }));
-      continue;
-    }
-    if (options.operation === "retention") {
-      results.push(await retainIndex({ registry, group, store }));
-      continue;
-    }
-    const completed = await runRpcIndexOperation({
-      operation: options.operation,
-      registry,
-      group,
-      store,
-      rpcClients,
-      signal,
-    });
-    const selectionLog = rpcEndpointSelectionLog(completed.selectedEndpointIndex, environment);
-    if (selectionLog !== null) process.stderr.write(selectionLog);
-    results.push(completed.result);
+  const registry = await loadPairRegistry();
+  pairById(registry, options.pairId);
+  const mutatesGitHub = options.store === "github" && (options.operation === "collect" || options.operation === "repair");
+  if (mutatesGitHub && (typeof environment.GITHUB_TOKEN !== "string" || environment.GITHUB_TOKEN.length === 0)) {
+    throw new Error("GitHub token is required for storage mutation.");
   }
-  process.stdout.write(`${JSON.stringify({ ok: true, operation: options.operation, results })}\n`);
+  const store = createStore({
+    kind: options.store,
+    root: options.root,
+    repository: options.repository,
+    token: environment.GITHUB_TOKEN,
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    signal,
+  });
+  let result;
+  if (options.operation === "verify") {
+    result = await verifyPairIndex({ registry, pairId: options.pairId, store });
+  } else if (options.operation === "read") {
+    result = await readPairPeriod({
+      registry,
+      store,
+      input: { pairId: options.pairId, from: options.from, until: options.until },
+    });
+  } else {
+    const clients = rpcClients(registry, environment, signal);
+    if (options.operation === "repair") {
+      const completed = await runRpcPairOperation({
+        operation: "repair",
+        registry,
+        pairId: options.pairId,
+        store,
+        rpcClients: clients,
+        signal,
+      });
+      writeSelection("repair", completed, environment);
+      result = completed.result;
+    } else {
+      const current = await runRpcPairOperation({
+        operation: "current",
+        registry,
+        pairId: options.pairId,
+        store,
+        rpcClients: clients,
+        signal,
+      });
+      writeSelection("current", current, environment);
+      const history = await runRpcPairOperation({
+        operation: "history",
+        registry,
+        pairId: options.pairId,
+        store,
+        rpcClients: clients,
+        signal,
+      });
+      writeSelection("history", history, environment);
+      result = { current: current.result, history: history.result };
+    }
+  }
+  process.stdout.write(`${JSON.stringify({ ok: true, operation: options.operation, pairId: options.pairId, result })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

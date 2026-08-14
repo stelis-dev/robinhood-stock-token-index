@@ -5,19 +5,15 @@ import {
   admitPairDay,
   admitPairMonth,
   admitPairState,
-  admitPairYear,
   createPairReference,
   decodePairDay,
   decodePairMonth,
   decodePairState,
-  decodePairYear,
   encodePairDay,
   encodePairMonth,
   encodePairState,
-  encodePairYear,
   pairDayLogicalId,
   pairMonthLogicalId,
-  pairYearLogicalId,
 } from "../collector/pair-artifact.mjs";
 import { canonicalBytes, encodeArtifact } from "../collector/canonical.mjs";
 import { admitPairPeriodInput, admitPairPeriodResult } from "../collector/pair-period.mjs";
@@ -132,7 +128,7 @@ function closure(registry) {
   };
   const context = { registry };
   const day = {
-    contractVersion: "2",
+    contractVersion: "1",
     kind: "pair_candle_day",
     pair,
     sequence,
@@ -143,7 +139,7 @@ function closure(registry) {
   const encodedDay = encodePairDay(day, context);
   const dayReference = createPairReference({ encoded: encodedDay, context });
   const month = {
-    contractVersion: "2",
+    contractVersion: "1",
     kind: "pair_candle_month",
     pair,
     sequence,
@@ -153,24 +149,13 @@ function closure(registry) {
   };
   const encodedMonth = encodePairMonth(month, context);
   const monthReference = createPairReference({ encoded: encodedMonth, context });
-  const year = {
-    contractVersion: "2",
-    kind: "pair_candle_year",
-    pair,
-    sequence,
-    year: "2026",
-    coverage,
-    months: [monthReference],
-  };
-  const encodedYear = encodePairYear(year, context);
-  const yearReference = createPairReference({ encoded: encodedYear, context });
   const state = {
-    contractVersion: "2",
+    contractVersion: "1",
     kind: "pair_candle_state",
     pair,
     sequence,
     coverage,
-    years: [yearReference],
+    months: [monthReference],
   };
   const encodedState = encodePairState(state, context);
   return {
@@ -180,15 +165,12 @@ function closure(registry) {
     coverage,
     day,
     month,
-    year,
     state,
     encodedDay,
     encodedMonth,
-    encodedYear,
     encodedState,
     dayReference,
     monthReference,
-    yearReference,
   };
 }
 
@@ -228,7 +210,7 @@ function multiChildIndexes(registry) {
   };
   const dayBoundary = { blockNumber: "36309000", timestamp: "2026-08-15T00:00:00.000Z" };
   const month = {
-    contractVersion: "2",
+    contractVersion: "1",
     kind: "pair_candle_month",
     pair,
     sequence,
@@ -250,65 +232,35 @@ function multiChildIndexes(registry) {
     ],
   };
 
-  const yearCoverage = {
-    fromBlock: "37000000",
-    fromTimestamp: "2026-08-31T23:59:00.000Z",
+  const monthBoundary = { blockNumber: "37000001", timestamp: "2026-09-01T00:00:00.000Z" };
+  const stateCoverage = {
+    fromBlock: pair.activation.blockNumber,
+    fromTimestamp: pair.activation.timestamp,
     untilBlock: "37000002",
     untilTimestamp: "2026-09-01T00:01:00.000Z",
   };
-  const monthBoundary = { blockNumber: "37000001", timestamp: "2026-09-01T00:00:00.000Z" };
-  const year = {
-    contractVersion: "2",
-    kind: "pair_candle_year",
+  const state = {
+    contractVersion: "1",
+    kind: "pair_candle_state",
     pair,
     sequence,
-    year: "2026",
-    coverage: yearCoverage,
+    coverage: stateCoverage,
     months: [
       fixedReference(pairMonthLogicalId(pair.pairId, "2026-08"), {
-        fromBlock: yearCoverage.fromBlock,
-        fromTimestamp: yearCoverage.fromTimestamp,
+        fromBlock: stateCoverage.fromBlock,
+        fromTimestamp: stateCoverage.fromTimestamp,
         untilBlock: monthBoundary.blockNumber,
         untilTimestamp: monthBoundary.timestamp,
       }),
       fixedReference(pairMonthLogicalId(pair.pairId, "2026-09"), {
         fromBlock: monthBoundary.blockNumber,
         fromTimestamp: monthBoundary.timestamp,
-        untilBlock: yearCoverage.untilBlock,
-        untilTimestamp: yearCoverage.untilTimestamp,
-      }),
-    ],
-  };
-
-  const stateCoverage = {
-    fromBlock: pair.activation.blockNumber,
-    fromTimestamp: pair.activation.timestamp,
-    untilBlock: "50000001",
-    untilTimestamp: "2027-01-01T00:01:00.000Z",
-  };
-  const yearBoundary = { blockNumber: "50000000", timestamp: "2027-01-01T00:00:00.000Z" };
-  const state = {
-    contractVersion: "2",
-    kind: "pair_candle_state",
-    pair,
-    sequence,
-    coverage: stateCoverage,
-    years: [
-      fixedReference(pairYearLogicalId(pair.pairId, "2026"), {
-        fromBlock: stateCoverage.fromBlock,
-        fromTimestamp: stateCoverage.fromTimestamp,
-        untilBlock: yearBoundary.blockNumber,
-        untilTimestamp: yearBoundary.timestamp,
-      }),
-      fixedReference(pairYearLogicalId(pair.pairId, "2027"), {
-        fromBlock: yearBoundary.blockNumber,
-        fromTimestamp: yearBoundary.timestamp,
         untilBlock: stateCoverage.untilBlock,
         untilTimestamp: stateCoverage.untilTimestamp,
       }),
     ],
   };
-  return { context, month, year, state };
+  return { context, month, state };
 }
 
 test("the pair registry admits nine exact sources and one neutral PoolId owner", async () => {
@@ -326,9 +278,6 @@ test("the pair registry admits nine exact sources and one neutral PoolId owner",
   assert.equal(eth.pair.poolKey.tickSpacing, 9);
   assert.equal(eth.pair.quoteAsset.address, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
   assert.equal(eth.display.quoteSymbol, "USDG");
-  assert.equal("retentionDays" in registry.collection, false);
-  assert.equal("scheduleMinutes" in registry.collection, false);
-  assert.equal("groups" in registry, false);
 
   const wrongPool = structuredClone(registry);
   wrongPool.pairs[0].pair.pairId = `0x${"0".repeat(64)}`;
@@ -501,11 +450,11 @@ test("display changes do not alter immutable pair artifact bytes", async () => {
   assert.deepEqual(admitPairRegistry(sameDisplay), sameDisplay);
 });
 
-test("a new pair can start with both durable edges at its activation boundary", async () => {
+test("an unpublished pair has no state carrier rather than an empty persisted state", async () => {
   const registry = await fixturePairRegistry();
   const pair = pairEntryBySymbol(registry, "ETH").pair;
-  const state = {
-    contractVersion: "2",
+  const emptyState = {
+    contractVersion: "1",
     kind: "pair_candle_state",
     pair,
     sequence: 1,
@@ -515,23 +464,16 @@ test("a new pair can start with both durable edges at its activation boundary", 
       untilBlock: pair.activation.blockNumber,
       untilTimestamp: pair.activation.timestamp,
     },
-    years: [],
+    months: [],
   };
-  assert.deepEqual(decodePairState(encodePairState(state, { registry }).gzipBytes, { registry }, pair.pairId), state);
-
-  const blocksInEmptyTime = structuredClone(state);
-  blocksInEmptyTime.coverage.untilBlock = (BigInt(pair.activation.blockNumber) + 1n).toString();
-  assert.throws(() => admitPairState(blocksInEmptyTime, { registry }), /empty time range/);
-  const nonMinuteBoundary = structuredClone(state);
-  nonMinuteBoundary.coverage.untilTimestamp = "2026-08-14T14:01:30.000Z";
-  assert.throws(() => admitPairState(nonMinuteBoundary, { registry }), /minute aligned/);
+  assert.throws(() => admitPairState(emptyState, { registry }), /inverted/);
+  assert.throws(() => encodePairState(emptyState, { registry }), /inverted/);
 });
 
-test("state, year, month, and day form one deterministic digest-bound closure", async () => {
+test("state, month, and day form one deterministic digest-bound closure", async () => {
   const registry = await fixturePairRegistry();
   const values = closure(registry);
   for (const [decoder, encoded] of [
-    [decodePairYear, values.encodedYear],
     [decodePairMonth, values.encodedMonth],
     [decodePairDay, values.encodedDay],
   ]) {
@@ -540,7 +482,6 @@ test("state, year, month, and day form one deterministic digest-bound closure", 
   }
   assert.deepEqual(decodePairDay(values.encodedDay.gzipBytes, values.context, values.dayReference), values.day);
   assert.deepEqual(decodePairMonth(values.encodedMonth.gzipBytes, values.context, values.monthReference), values.month);
-  assert.deepEqual(decodePairYear(values.encodedYear.gzipBytes, values.context, values.yearReference), values.year);
   assert.deepEqual(decodePairState(values.encodedState.gzipBytes, values.context, values.pair.pairId), values.state);
   const ethPair = pairEntryBySymbol(registry, "ETH").pair;
   assert.throws(() => decodePairState(values.encodedState.gzipBytes, values.context, ethPair.pairId), /requested logical identity/);
@@ -586,9 +527,6 @@ test("state, year, month, and day form one deterministic digest-bound closure", 
     logicalId: pairDayLogicalId(values.pair.pairId, values.day.day),
   };
   assert.throws(() => decodePairDay(encodedEthDay.gzipBytes, values.context, mislabeledEthReference), /identity/);
-  const physicalLocator = { ...values.dayReference, releaseTag: "pair-month" };
-  const changedMonth = { ...values.month, days: [physicalLocator] };
-  assert.throws(() => admitPairMonth(changedMonth, values.context), /member set/);
 });
 
 test("reference creation cannot exceed the registry-owned byte boundary", async () => {
@@ -605,36 +543,47 @@ test("reference creation cannot exceed the registry-owned byte boundary", async 
 test("every index level must cover all child periods named by its coverage", async () => {
   const registry = await fixturePairRegistry();
   const values = closure(registry);
-  assert.throws(() => admitPairState({ ...values.state, years: [] }, values.context), /cover/);
-  assert.throws(() => admitPairYear({ ...values.year, months: [] }, values.context), /cover/);
+  assert.throws(() => admitPairState({ ...values.state, months: [] }, values.context), /cover/);
   assert.throws(() => admitPairMonth({ ...values.month, days: [] }, values.context), /cover/);
-  const narrower = structuredClone(values.yearReference);
+  const narrower = structuredClone(values.monthReference);
   narrower.coverage.fromTimestamp = "2026-08-14T14:02:00.000Z";
-  assert.throws(() => admitPairState({ ...values.state, years: [narrower] }, values.context), /continuous/);
-  const escapedMonth = structuredClone(values.monthReference);
-  escapedMonth.coverage.untilTimestamp = "2026-09-01T00:01:00.000Z";
-  assert.throws(() => admitPairYear({ ...values.year, months: [escapedMonth] }, values.context), /logical period/);
+  assert.throws(() => admitPairState({ ...values.state, months: [narrower] }, values.context), /continuous/);
+  const escapedDay = structuredClone(values.dayReference);
+  escapedDay.coverage.untilTimestamp = "2026-09-01T00:01:00.000Z";
+  assert.throws(() => admitPairMonth({ ...values.month, days: [escapedDay] }, values.context), /logical period/);
+});
+
+test("every non-leaf generation owns at least one direct child from that generation", async () => {
+  const registry = await fixturePairRegistry();
+  const values = closure(registry);
+  assert.throws(
+    () => admitPairMonth({ ...values.month, sequence: 2 }, values.context),
+    /owner-generation child/,
+  );
+  assert.throws(
+    () => admitPairState({ ...values.state, sequence: 2 }, values.context),
+    /owner-generation child/,
+  );
 });
 
 test("multi-child indexes reject omission, duplication, reversal, gaps, and overlaps", async () => {
   const registry = await fixturePairRegistry();
   const values = multiChildIndexes(registry);
   assert.deepEqual(admitPairMonth(values.month, values.context), values.month);
-  assert.deepEqual(admitPairYear(values.year, values.context), values.year);
   assert.deepEqual(admitPairState(values.state, values.context), values.state);
 
   assert.throws(() => admitPairMonth({ ...values.month, days: values.month.days.slice(0, 1) }, values.context), /cover/);
-  assert.throws(() => admitPairYear({ ...values.year, months: [values.year.months[0], values.year.months[0]] }, values.context), /logical identity/);
-  assert.throws(() => admitPairState({ ...values.state, years: [...values.state.years].reverse() }, values.context), /logical identity/);
+  assert.throws(() => admitPairState({ ...values.state, months: [values.state.months[0], values.state.months[0]] }, values.context), /logical identity/);
+  assert.throws(() => admitPairState({ ...values.state, months: [...values.state.months].reverse() }, values.context), /logical identity/);
 
   const gap = structuredClone(values.month);
   gap.days[0].coverage.untilBlock = (BigInt(gap.days[0].coverage.untilBlock) - 1n).toString();
   assert.throws(() => admitPairMonth(gap, values.context), /continuous/);
 
-  const overlap = structuredClone(values.year);
+  const overlap = structuredClone(values.state);
   overlap.months[0].coverage.untilTimestamp = "2026-09-01T00:01:00.000Z";
   overlap.months[0].coverage.untilBlock = overlap.coverage.untilBlock;
-  assert.throws(() => admitPairYear(overlap, values.context), /logical period/);
+  assert.throws(() => admitPairState(overlap, values.context), /logical period/);
 });
 
 test("a pair-day admits covered empty time but never synthetic or unbounded candles", async () => {

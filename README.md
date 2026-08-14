@@ -1,99 +1,135 @@
 # Robinhood Stock Token Index
 
-This repository builds exact one-minute USDG executed-trade candles from
-finalized Uniswap V4 `Swap` logs on Robinhood Chain. It starts with one logical
-group containing eight initialized Stock Token/USDG pools.
+This repository builds exact one-minute executed-trade candles for nine fixed
+Uniswap V4 pairs on Robinhood Chain: eight Stock Token/USDG pairs and one
+native ETH/USDG pair. Every series is identified by its exact PoolId and
+PoolKey. USDG is an onchain token, not fiat USD.
 
-The index keeps source facts and storage separate:
+The current data path is:
 
 ```text
-finalized Robinhood Chain logs
-  -> exact Swap admission
-  -> exact one-minute candles and coverage
-  -> canonical gzip artifacts
-  -> storage port
-       -> local directory (development)
-       -> GitHub Releases (initial end-to-end testing)
+one exact pair
+  -> finalized Robinhood Chain Swap logs
+  -> exact base/quote trades
+  -> exact one-minute candles and continuous coverage
+  -> canonical pair-day, pair-month, and pair-state artifacts
+  -> raw-byte storage
+       -> local directory
+       -> GitHub Releases for development and end-to-end testing
 ```
 
-GitHub is the initial development scheduler and artifact store. It is not a
-public-production market-data service or availability guarantee. A later
-approved object store implements the same storage port without changing the
-collector or artifact contract.
+GitHub Actions and Releases are development adapters. They are not a
+public-production availability claim. The canonical artifacts contain logical
+pair and calendar references, never a GitHub repository, Release tag, URL,
+asset ID, token, workflow context, or RPC endpoint.
 
-## Cadence and partitions
+## Pair lifecycle
 
-- One-minute is the canonical candle interval.
-- Scheduled collection runs every fifteen minutes at minutes 7, 22, 37, and 52
-  UTC. A delayed or dropped job resumes from the last published finalized
-  cursor.
-- Manual dispatch runs the same command immediately.
-- Monthly Releases are storage partitions only. A month does not delay data or
-  testing.
-- Finalized day artifacts remain for 365 days. Older artifacts are removed by
-  the retention owner.
+`collect` runs two durable operations in order for one `--pair`:
 
-## Commands
+1. current collection advances the forward edge from the pair's activation or
+   last selected state;
+2. historical collection moves the other edge backward toward the fixed
+   `historyStart`, which is never more than twelve calendar months before the
+   activation boundary.
+
+The two operations publish independently. A historical RPC failure cannot undo
+an already selected current publication. `repair` replaces the configured
+recent interval without moving either coverage edge. Missing-trade minutes stay
+empty; no interpolation or zero-price candle is created.
+
+There is no scheduled or grouped collection in the current workflow. Manual
+dispatch accepts one exact pair ID and either `collect` or `repair`. There is no
+automatic age deletion: after the fixed historical edge is reached, later
+current data continues to accumulate.
+
+## Storage and reads
+
+Canonical candle data is one pair and one UTC day. A pair-month manifest refers
+to at most 31 pair-days, and selected pair state refers directly to produced
+months. Year grouping is derived from canonical `YYYY-MM` month identities; it
+is not a stored parent. Changed immutable days and months are written and
+re-downloaded before the new state is written last. The exact selected state is
+then re-read. A pair with no published data has no selected state carrier. Each
+persisted state generation contains a month from that generation, and each
+persisted month generation contains a day from that generation. Explicit full
+verification streams all selected months and days separately.
+
+The directory adapter uses:
+
+```text
+pairs/{pairId}/state/
+pairs/{pairId}/months/{YYYY-MM}/
+```
+
+The GitHub adapter keeps one selected-state Release per pair and one child
+Release per pair-month. Referenced bytes use deterministic public Release
+download paths. After a new state is selected, cleanup lists only that state
+Release and the pair-month Releases changed by the transition; it does not
+enumerate retained Releases or traverse unchanged history. Cleanup first proves
+the exact selected and retained carriers, then removes superseded generations
+only for the logical month and day identities named by that transition. An
+omitted identity is left untouched. Routine publication still reads and
+rebuilds the selected state's ordered month-reference metadata; it grows by one
+bounded reference per produced month even though unchanged month and day
+carriers are not read or listed.
+
+`read` accepts one pair and one non-empty interval inside one UTC calendar
+month. It reads only the selected month and intersecting pair-days. The
+result distinguishes unavailable time from covered time with no Swap.
+
+Example commands using the committed NVDA/USDG PoolId:
 
 ```sh
+PAIR_ID=0x3bb34a44f1b2b5f32c034c38a53065a521a47b199700fa9bd19d60985ff24bf1
+
 npm test
-npm run collect -- --store directory --root .local-index
-npm run repair -- --store directory --root .local-index
-npm run verify -- --store directory --root .local-index
-npm run retention -- --store directory --root .local-index
+npm run collect -- --pair "${PAIR_ID}" --store directory --root .local-index
+npm run repair -- --pair "${PAIR_ID}" --store directory --root .local-index
+npm run verify -- --pair "${PAIR_ID}" --store directory --root .local-index
+npm run read -- --pair "${PAIR_ID}" \
+  --from 2026-08-14T14:01:00.000Z \
+  --until 2026-08-14T15:01:00.000Z \
+  --store directory --root .local-index
 ```
 
-GitHub workflows select the GitHub Release adapter and provide the scoped
-repository token. JSON-RPC request bodies contain public chain and contract
-data only.
+Published public GitHub Releases can be read and verified without a token.
+GitHub collection, repair, upload, and cleanup require a repository token with
+contents write permission.
 
-The committed public RPC endpoint is always the primary and is a rate-limited
-development endpoint. Scheduled indexing may append two reviewed endpoints as
-`INDEX_RPC_FALLBACK_URL_0` and `INDEX_RPC_FALLBACK_URL_1`. Each endpoint must
-support `eth_chainId`, the `finalized` block tag, historical `eth_getLogs`, and
-`eth_getBlockByNumber` in JSON-RPC batches at the configured header batch size.
-Fallback positions must be contiguous and all endpoint URLs must be unique.
-Changing the primary requires changing the committed registry; there is no
-primary URL environment override.
+## RPC availability
 
-Every fallback endpoint URL, with or without a credential, must be stored as an
-individual GitHub Actions repository secret. Store the complete URL, including
-the provider token when required; the workflow does not assemble a base URL and
-token. Do not store fallback endpoints as repository variables, put multiple
-URLs in one secret, commit them to the registry, pass them as CLI arguments, or
-print them. GitHub log redaction is not a substitute for keeping credentials
-out of output.
+The committed public RPC URL is always primary. An operation may append two
+ordered complete URLs from the repository secrets
+`INDEX_RPC_FALLBACK_URL_0` and `INDEX_RPC_FALLBACK_URL_1`. Each secret contains
+the full HTTPS URL, including a provider credential when required. The workflow
+does not use repository variables, assemble URLs, or print URLs.
 
-After a successful collection or repair in GitHub Actions, the CLI writes only
-the selected configuration source name to the Actions log:
-`registry.chain.primaryRpcUrl`, `INDEX_RPC_FALLBACK_URL_0`, or
-`INDEX_RPC_FALLBACK_URL_1`. It never writes this line outside GitHub Actions and
-never writes the endpoint URL. This operational line does not change the CLI
-JSON result or any stored artifact.
+Each endpoint must support `eth_chainId`, the `finalized` block tag, historical
+`eth_getLogs`, `eth_getBlockByNumber`, and JSON-RPC header batches at the
+configured size. Every attempt also verifies the committed activation block,
+hash, and timestamp.
 
-If an endpoint denies access, lacks a required JSON-RPC method or protocol
-version, or exhausts its bounded retries after a transport failure, HTTP 408,
-HTTP 429, any HTTP 5xx response, JSON-RPC internal error, or a required resource
-being missing, unavailable, or rate-limited, the collector discards that
-unpublished attempt and restarts the complete collection or repair from durable
-state with the next endpoint. An endpoint whose finalized state does not cover
-the last durably stored block is unavailable for that attempt. The collector
-never combines providers within an attempt. Chain identity, malformed response,
-invalid request, numeric, and storage failures stop without fallback.
+After bounded local availability retries are exhausted, or an endpoint denies
+access or lacks a required RPC capability, the unpublished attempt is discarded
+and the complete operation restarts from durable state on the next endpoint.
+Providers are never mixed inside one current, historical, or repair attempt.
+Chain identity, activation identity, malformed responses, invalid requests,
+numeric errors, and storage-integrity failures stop without fallback.
 
-Provider fallback improves availability; it does not prove that a successful
-`eth_getLogs` response is complete. The collector verifies chain ID 4663 and
-the structure and source positions of every returned log, but the canonical
-JSON-RPC response does not carry a completeness proof. Coverage therefore means
-that the stated finalized block range was completely queried and admitted, not
-that an independent provider or cryptographic proof confirmed every log.
-Fallback is failure-driven: the collector does not query multiple endpoints to
-select the freshest view or establish provider consensus. A valid endpoint that
-covers the durably stored range remains authoritative for its attempt.
+In GitHub Actions only, stderr records the attempt role and one fixed source
+name: `registry.chain.primaryRpcUrl`, `INDEX_RPC_FALLBACK_URL_0`, or
+`INDEX_RPC_FALLBACK_URL_1`. It never records the endpoint URL or provider
+response. This line is not part of stdout or stored data.
 
-## Data meaning
+Fallback improves availability but does not prove that an HTTP 200
+`eth_getLogs` response is complete. Coverage means the stated finalized block
+range was queried and admitted on one endpoint; it is not provider consensus or
+a cryptographic completeness proof.
 
-Each candle contains exact rational OHLC values, exact raw Stock Token and USDG
-volume, the admitted trade count, and source positions. Empty covered minutes
-remain empty. The artifacts do not contain a quote, recommendation, executable
-price, raw RPC response, account, wallet, or transaction history.
+## Candle meaning
+
+Each candle stores exact rational OHLC values in quote-token units per one base
+token unit, exact raw base and quote volume, admitted trade count, and source
+positions. It does not contain a recommendation, executable quote, raw RPC
+response, wallet, account, or transaction history.

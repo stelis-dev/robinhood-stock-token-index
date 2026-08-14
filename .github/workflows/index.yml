@@ -1,20 +1,19 @@
 name: Stock Token index
 
 on:
-  schedule:
-    - cron: "7,22,37,52 * * * *"
-    - cron: "11 3 * * *"
-    - cron: "41 3 * * *"
   workflow_dispatch:
     inputs:
       operation:
-        description: Operation to run
+        description: Pair operation to run
         required: true
         type: choice
         options:
           - collect
           - repair
-          - retention
+      pair:
+        description: Exact pair ID from registry/pairs.json
+        required: true
+        type: string
   pull_request:
   push:
 
@@ -43,7 +42,7 @@ jobs:
         run: npm test
 
   operate:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -66,41 +65,11 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Verify source before publication
-        run: npm test
-
-      - name: Select operation
-        id: operation
-        shell: bash
+      - name: Run pair operation
         env:
-          REQUESTED_OPERATION: ${{ inputs.operation }}
-          SCHEDULE: ${{ github.event.schedule }}
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            operation="${REQUESTED_OPERATION}"
-          else
-            case "${SCHEDULE}" in
-              "7,22,37,52 * * * *") operation="collect" ;;
-              "11 3 * * *") operation="repair" ;;
-              "41 3 * * *") operation="retention" ;;
-              *)
-                echo "Unknown schedule: ${SCHEDULE}" >&2
-                exit 1
-                ;;
-            esac
-          fi
-
-          printf 'operation=%s\n' "${operation}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run operation
-        env:
-          OPERATION: ${{ steps.operation.outputs.operation }}
+          OPERATION: ${{ inputs.operation }}
+          PAIR_ID: ${{ inputs.pair }}
           GITHUB_TOKEN: ${{ github.token }}
           INDEX_RPC_FALLBACK_URL_0: ${{ secrets.INDEX_RPC_FALLBACK_URL_0 }}
           INDEX_RPC_FALLBACK_URL_1: ${{ secrets.INDEX_RPC_FALLBACK_URL_1 }}
-        run: node cli.mjs "${OPERATION}" --store github --repository "${INDEX_REPOSITORY}"
-
-      - name: Re-download and verify published state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node cli.mjs verify --store github --repository "${INDEX_REPOSITORY}"
+        run: node cli.mjs "${OPERATION}" --pair "${PAIR_ID}" --store github --repository "${INDEX_REPOSITORY}"

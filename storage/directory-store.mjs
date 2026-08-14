@@ -1,25 +1,58 @@
-import { link, mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, open, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { decodeDay, decodeState, encodeState, stateAssetName } from "../collector/artifact.mjs";
+import {
+  admitCleanupPlan,
+  admitCarriedReference,
+  admitCarrierSequence,
+  admitPairId,
+  admitPairMonth,
+  admitStateBytes,
+  parseReferencedObjectName,
+  parseStateObjectName,
+  referenceObjectName,
+  stateObjectName,
+  verifyCarriedReferenceBytes,
+} from "./carriage.mjs";
 
-async function files(path) {
+async function entries(path) {
   try {
-    return await readdir(path);
+    return await readdir(path, { withFileTypes: true });
   } catch (error) {
     if (error.code === "ENOENT") return [];
     throw error;
   }
 }
 
-async function immutableWrite(path, bytes) {
+async function readBoundedFile(path, maximumBytes) {
+  const file = await open(path, "r");
+  try {
+    const information = await file.stat();
+    if (!information.isFile() || information.size <= 0 || information.size > maximumBytes) {
+      throw new Error("Stored file exceeds the admitted byte boundary.");
+    }
+    const bytes = Buffer.alloc(information.size);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const { bytesRead } = await file.read(bytes, offset, bytes.byteLength - offset, offset);
+      if (bytesRead === 0) throw new Error("Stored file changed during its bounded read.");
+      offset += bytesRead;
+    }
+    if ((await file.stat()).size !== information.size) throw new Error("Stored file changed during its bounded read.");
+    return bytes;
+  } finally {
+    await file.close();
+  }
+}
+
+async function immutableWrite(path, bytes, maximumBytes) {
   const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(temporary, bytes, { flag: "wx" });
   try {
     await link(temporary, path);
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
-    const existing = await readFile(path);
-    if (!existing.equals(bytes)) throw new Error(`Stored immutable bytes differ: ${path}`);
+    const existing = await readBoundedFile(path, maximumBytes);
+    if (!existing.equals(bytes)) throw new Error("Stored immutable bytes differ from the requested bytes.");
   } finally {
     await unlink(temporary).catch((error) => {
       if (error.code !== "ENOENT") throw error;
@@ -27,63 +60,106 @@ async function immutableWrite(path, bytes) {
   }
 }
 
+function referenceDirectory(root, reference) {
+  const identity = admitCarriedReference(reference);
+  const pairRoot = join(root, "pairs", identity.pairId);
+  const pairMonth = identity.kind === "month" ? identity.period : identity.period.slice(0, 7);
+  return join(pairRoot, "months", pairMonth);
+}
+
+function referencePath(root, reference) {
+  return join(referenceDirectory(root, reference), referenceObjectName(reference));
+}
+
 export class DirectoryStore {
-  constructor({ root, registry, group }) {
+  constructor({ root, maximumArtifactBytes }) {
+    if (typeof root !== "string" || root.length === 0) throw new Error("Directory root is required.");
+    if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
     this.root = root;
-    this.registry = registry;
-    this.group = group;
+    this.maximumArtifactBytes = maximumArtifactBytes;
   }
 
-  async #initialize() {
-    await mkdir(join(this.root, "states"), { recursive: true });
-    await mkdir(join(this.root, "days"), { recursive: true });
-  }
-
-  async readState() {
-    await this.#initialize();
-    const pattern = new RegExp(`^${this.group.groupId}-state-g([0-9]{16})\\.json\\.gz$`);
-    const candidates = (await files(join(this.root, "states"))).map((name) => ({ name, match: name.match(pattern) })).filter((entry) => entry.match).sort((a, b) => a.name.localeCompare(b.name));
+  async readSelectedState(pairId) {
+    admitPairId(pairId);
+    const directory = join(this.root, "pairs", pairId, "state");
+    const candidates = (await entries(directory))
+      .filter((entry) => entry.isFile())
+      .map((entry) => ({ name: entry.name, sequence: parseStateObjectName(entry.name) }))
+      .filter((entry) => entry.sequence !== null)
+      .sort((left, right) => left.sequence - right.sequence);
     if (candidates.length === 0) return null;
-    return decodeState(
-      await readFile(join(this.root, "states", candidates.at(-1).name)),
-      this.group.groupId,
-      this.registry.collection.maximumArtifactBytes,
-      candidates.at(-1).match[1],
+    const selected = candidates.at(-1);
+    const gzipBytes = admitStateBytes(await readBoundedFile(join(directory, selected.name), this.maximumArtifactBytes), this.maximumArtifactBytes);
+    return { sequence: selected.sequence, gzipBytes };
+  }
+
+  async readReferenced(reference) {
+    return verifyCarriedReferenceBytes(
+      reference,
+      await readBoundedFile(referencePath(this.root, reference), this.maximumArtifactBytes),
+      this.maximumArtifactBytes,
     );
   }
 
-  async readDay(reference) {
-    const bytes = await readFile(join(this.root, "days", reference.releaseTag, reference.assetName));
-    return decodeDay(bytes, { registry: this.registry, group: this.group }, reference);
+  async resolvePairMonth(pairId, pairMonth) {
+    admitPairId(pairId);
+    admitPairMonth(pairMonth);
+    return "present";
   }
 
-  async commit({ state, encodedDays }) {
-    await this.#initialize();
-    for (const entry of encodedDays) {
-      const directory = join(this.root, "days", entry.reference.releaseTag);
-      await mkdir(directory, { recursive: true });
-      await immutableWrite(join(directory, entry.reference.assetName), entry.encoded.gzipBytes);
-    }
-    const encodedState = encodeState(state, this.group.groupId, this.registry.collection.maximumArtifactBytes);
-    await immutableWrite(join(this.root, "states", stateAssetName(this.group.groupId, state.sequence)), encodedState.gzipBytes);
-    await this.cleanup(state);
-    return encodedState;
+  async writeReferenced(reference, gzipBytes) {
+    verifyCarriedReferenceBytes(reference, gzipBytes, this.maximumArtifactBytes);
+    const directory = referenceDirectory(this.root, reference);
+    await mkdir(directory, { recursive: true });
+    await immutableWrite(join(directory, referenceObjectName(reference)), gzipBytes, this.maximumArtifactBytes);
   }
 
-  async cleanup(state) {
-    const statePattern = new RegExp(`^${this.group.groupId}-state-g([0-9]{16})\\.json\\.gz$`);
-    for (const name of await files(join(this.root, "states"))) {
-      const match = name.match(statePattern);
-      if (match && BigInt(match[1]) < BigInt(state.sequence)) await unlink(join(this.root, "states", name));
+  async writeState(pairId, sequence, gzipBytes) {
+    admitPairId(pairId);
+    admitCarrierSequence(sequence);
+    admitStateBytes(gzipBytes, this.maximumArtifactBytes);
+    const directory = join(this.root, "pairs", pairId, "state");
+    await mkdir(directory, { recursive: true });
+    await immutableWrite(join(directory, stateObjectName(sequence)), gzipBytes, this.maximumArtifactBytes);
+  }
+
+  async cleanupSelectedGeneration(input) {
+    const plan = admitCleanupPlan(input);
+    const stateDirectory = join(this.root, "pairs", plan.pairId, "state");
+    const stateEntries = await entries(stateDirectory);
+    if (!stateEntries.some((entry) => entry.isFile() && entry.name === plan.selectedStateName)) {
+      throw new Error("Selected state carrier is unavailable during cleanup.");
     }
-    const retainedDays = new Map();
-    for (const reference of state.days) retainedDays.set(`${reference.releaseTag}/${reference.assetName}`, true);
-    const dayPattern = new RegExp(`^${this.group.groupId}-[0-9]{4}-[0-9]{2}-[0-9]{2}-g([0-9]{16})-[0-9a-f]{64}\\.json\\.gz$`);
-    for (const releaseTag of await files(join(this.root, "days"))) {
-      for (const name of await files(join(this.root, "days", releaseTag))) {
-        const match = name.match(dayPattern);
-        if (match && BigInt(match[1]) <= BigInt(state.sequence) && !retainedDays.has(`${releaseTag}/${name}`)) await unlink(join(this.root, "days", releaseTag, name));
+
+    const scopes = [];
+    for (const changedMonth of plan.changedMonths) {
+      const directory = join(this.root, "pairs", plan.pairId, "months", changedMonth.month);
+      const scopeEntries = await entries(directory);
+      const names = new Set(scopeEntries.filter((entry) => entry.isFile()).map((entry) => entry.name));
+      for (const object of changedMonth.objects) {
+        if (!names.has(object.name)) throw new Error("Retained object is unavailable during cleanup.");
+      }
+      scopes.push({
+        directory,
+        entries: scopeEntries,
+        retained: new Map(changedMonth.objects.map((object) => [object.logicalId, object.name])),
+      });
+    }
+
+    for (const entry of stateEntries) {
+      const sequence = entry.isFile() ? parseStateObjectName(entry.name) : null;
+      if (sequence !== null && sequence < plan.selectedSequence) await unlink(join(stateDirectory, entry.name));
+    }
+
+    for (const scope of scopes) {
+      for (const entry of scope.entries) {
+        const parsed = entry.isFile() ? parseReferencedObjectName(plan.pairId, entry.name) : null;
+        const retainedName = parsed === null ? undefined : scope.retained.get(parsed.logicalId);
+        if (retainedName !== undefined && parsed.sequence <= plan.selectedSequence && entry.name !== retainedName) {
+          await unlink(join(scope.directory, entry.name));
+        }
       }
     }
   }
+
 }

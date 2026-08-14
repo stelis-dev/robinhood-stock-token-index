@@ -11,8 +11,8 @@
   },
   "scripts": {
     "collect": "node cli.mjs collect",
+    "read": "node cli.mjs read",
     "repair": "node cli.mjs repair",
-    "retention": "node cli.mjs retention",
     "test": "node --test test/*.test.mjs",
     "verify": "node cli.mjs verify"
   }
