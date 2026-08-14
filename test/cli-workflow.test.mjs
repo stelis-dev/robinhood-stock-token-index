@@ -79,8 +79,10 @@ test("the workflow tests source changes and keeps manual pair operations transit
   assert.doesNotMatch(source, /github\.event_name == 'schedule'/);
   assert.match(source, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
   assert.match(source, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
-  assert.match(source, /group: robinhood-stock-token-index-operation/);
-  assert.match(source, /cancel-in-progress: false/);
+  assert.match(
+    source,
+    /concurrency:\n      group: robinhood-stock-token-index-operation\n      queue: max\n      cancel-in-progress: false/,
+  );
   assert.match(source, /permissions:\n      contents: write/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_1: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_1 \}\}/);

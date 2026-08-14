@@ -49,6 +49,7 @@ jobs:
       contents: write
     concurrency:
       group: robinhood-stock-token-index-operation
+      queue: max
       cancel-in-progress: false
     env:
       INDEX_REPOSITORY: ${{ github.repository }}
