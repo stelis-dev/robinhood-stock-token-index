@@ -4,16 +4,33 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Pair operation to run
+        description: Operation to run
         required: true
         type: choice
         options:
           - collect
           - repair
-      pair:
-        description: Exact pair ID from registry/pairs.json
+      targetKind:
+        description: Exact target kind
+        required: true
+        type: choice
+        options:
+          - pair
+          - group
+      targetId:
+        description: Exact pair or collection-group ID
         required: true
         type: string
+  schedule:
+    - cron: "7,52 0-23/3 * * *"
+    - cron: "37 1-23/3 * * *"
+    - cron: "22 2-23/3 * * *"
+    - cron: "22 0-23/3 * * *"
+    - cron: "7,52 1-23/3 * * *"
+    - cron: "37 2-23/3 * * *"
+    - cron: "37 0-23/3 * * *"
+    - cron: "22 1-23/3 * * *"
+    - cron: "7,52 2-23/3 * * *"
   pull_request:
   push:
 
@@ -42,7 +59,7 @@ jobs:
         run: npm test
 
   operate:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -66,11 +83,38 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Run pair operation
+      - name: Run index operation
         env:
-          OPERATION: ${{ inputs.operation }}
-          PAIR_ID: ${{ inputs.pair }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_OPERATION: ${{ inputs.operation }}
+          MANUAL_TARGET_KIND: ${{ inputs.targetKind }}
+          MANUAL_TARGET_ID: ${{ inputs.targetId }}
+          SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
           GITHUB_TOKEN: ${{ github.token }}
           INDEX_RPC_FALLBACK_URL_0: ${{ secrets.INDEX_RPC_FALLBACK_URL_0 }}
           INDEX_RPC_FALLBACK_URL_1: ${{ secrets.INDEX_RPC_FALLBACK_URL_1 }}
-        run: node cli.mjs "${OPERATION}" --pair "${PAIR_ID}" --store github --repository "${INDEX_REPOSITORY}"
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "schedule" ]]; then
+            OPERATION=collect
+            TARGET_KIND=group
+            case "${SCHEDULE_EXPRESSION}" in
+              "7,52 0-23/3 * * *"|"37 1-23/3 * * *"|"22 2-23/3 * * *") TARGET_ID=group-1 ;;
+              "22 0-23/3 * * *"|"7,52 1-23/3 * * *"|"37 2-23/3 * * *") TARGET_ID=group-2 ;;
+              "37 0-23/3 * * *"|"22 1-23/3 * * *"|"7,52 2-23/3 * * *") TARGET_ID=group-3 ;;
+              *) echo "Scheduled collection group is invalid." >&2; exit 1 ;;
+            esac
+          else
+            OPERATION="${MANUAL_OPERATION}"
+            TARGET_KIND="${MANUAL_TARGET_KIND}"
+            TARGET_ID="${MANUAL_TARGET_ID}"
+          fi
+
+          if [[ "${TARGET_KIND}" == "pair" ]]; then
+            node cli.mjs "${OPERATION}" --pair "${TARGET_ID}" --store github --repository "${INDEX_REPOSITORY}"
+          elif [[ "${TARGET_KIND}" == "group" ]]; then
+            node group-cli.mjs "${OPERATION}" --group "${TARGET_ID}" --store github --repository "${INDEX_REPOSITORY}"
+          else
+            echo "Operation target kind is invalid." >&2
+            exit 1
+          fi

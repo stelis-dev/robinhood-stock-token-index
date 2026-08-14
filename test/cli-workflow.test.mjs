@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseArguments, rpcEndpointSelectionLog, rpcEndpointSourceName, selectRpcUrls } from "../cli.mjs";
 import { loadPairRegistry } from "../collector/pair-registry.mjs";
+import { loadCollectionGroupRegistry } from "../scheduler/collection-group-registry.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 
 test("the CLI admits one exact pair and keeps read-period and storage options on their owners", async () => {
@@ -71,12 +72,19 @@ test("Actions logging reveals only attempt role and the fixed endpoint source na
   );
 });
 
-test("the workflow tests source changes and keeps manual pair operations transition-scoped", async () => {
+test("the workflow projects every admitted group onto exact queued schedule and manual targets", async () => {
   const source = await readFile(new URL("../.github/workflows/index.yml", import.meta.url), "utf8");
+  const pairRegistry = await loadPairRegistry();
+  const groupRegistry = await loadCollectionGroupRegistry(pairRegistry);
+  const expectedSchedules = [
+    ["7,52 0-23/3 * * *", "37 1-23/3 * * *", "22 2-23/3 * * *"],
+    ["22 0-23/3 * * *", "7,52 1-23/3 * * *", "37 2-23/3 * * *"],
+    ["37 0-23/3 * * *", "22 1-23/3 * * *", "7,52 2-23/3 * * *"],
+  ];
   assert.match(source, /workflow_dispatch:/);
-  assert.match(source, /pair:\n        description: Exact pair ID/);
-  assert.match(source, /if: github\.event_name == 'workflow_dispatch'/);
-  assert.doesNotMatch(source, /github\.event_name == 'schedule'/);
+  assert.match(source, /targetKind:\n        description: Exact target kind/);
+  assert.match(source, /targetId:\n        description: Exact pair or collection-group ID/);
+  assert.match(source, /if: github\.event_name == 'workflow_dispatch' \|\| github\.event_name == 'schedule'/);
   assert.match(source, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
   assert.match(source, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
   assert.match(
@@ -86,6 +94,18 @@ test("the workflow tests source changes and keeps manual pair operations transit
   assert.match(source, /permissions:\n      contents: write/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_1: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_1 \}\}/);
+  assert.match(source, /OPERATION=collect\n            TARGET_KIND=group/);
+  assert.match(source, /node cli\.mjs "\$\{OPERATION\}" --pair "\$\{TARGET_ID\}"/);
+  assert.match(source, /node group-cli\.mjs "\$\{OPERATION\}" --group "\$\{TARGET_ID\}"/);
+  assert.deepEqual(
+    [...source.matchAll(/- cron: "([^"]+)"/g)].map((match) => match[1]),
+    expectedSchedules.flat(),
+  );
+  assert.deepEqual(groupRegistry.groups.map((group) => group.groupId), ["group-1", "group-2", "group-3"]);
+  for (const [index, schedules] of expectedSchedules.entries()) {
+    assert.ok(source.includes(`${schedules.map((schedule) => `"${schedule}"`).join("|")}) TARGET_ID=group-${index + 1} ;;`));
+  }
+  for (const entry of pairRegistry.pairs) assert.doesNotMatch(source, new RegExp(entry.pair.pairId));
   const verifyJob = source.slice(source.indexOf("  verify:"), source.indexOf("  operate:"));
   const operateJob = source.slice(source.indexOf("  operate:"));
   assert.match(verifyJob, /run: npm test/);

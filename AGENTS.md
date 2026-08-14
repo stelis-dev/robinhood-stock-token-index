@@ -12,10 +12,15 @@ Read this file before every task in this repository.
 - `collector/` owns RPC admission, finalized coverage, exact Swap decoding,
   numeric meaning, one-minute candles, pair lifecycle, canonical artifacts, and
   verified period reads.
+- `registry/collection-groups.json` owns only the ordered partition of admitted
+  pair IDs. `scheduler/` owns collection-group admission and sequential
+  execution. A collection group owns no market fact, cursor, artifact, retry,
+  or storage identity.
 - `storage/` owns raw artifact carriage and physical location only. A storage
   adapter cannot decode, reconstruct, summarize, merge, or select market facts.
-- `.github/workflows/` invokes one-pair command-line owners. Workflow YAML does
-  not duplicate collection, history, repair, publication, or read logic.
+- `.github/workflows/` invokes the pair or collection-group command-line owner
+  and owns the cron-to-group projection. Workflow YAML does not duplicate group
+  membership, collection, history, repair, publication, or read logic.
 
 ## Boundaries
 
@@ -35,6 +40,14 @@ Read this file before every task in this repository.
 - Current collection advances only the forward edge, historical collection
   decreases only the history edge to the fixed `historyStart`, and repair moves
   neither edge. Complete every RPC read before the first storage write.
+- A collection group invokes its admitted pairs sequentially. A non-abort pair
+  failure does not prevent later members from starting, and the group fails
+  after all members have been attempted. Abort stops before the next member.
+  The group layer adds no cursor, retry, artifact, or recovery state.
+- Scheduled operations run `collect` only. `repair` requires an explicit manual
+  pair or group target. One non-cancelling workflow concurrency group retains
+  pending mutations. Schedule timing is a best-effort operational projection,
+  not market-data or availability authority.
 - Publish immutable pair-day and pair-month children before the new pair-state
   generation. Re-download and admit every changed child, then re-read the exact
   selected state. Unchanged month references come only from the

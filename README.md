@@ -1,9 +1,9 @@
 # Robinhood Stock Token Index
 
 This repository builds exact one-minute executed-trade candles for nine fixed
-Uniswap V4 pairs on Robinhood Chain: eight Stock Token/USDG pairs and one
-native ETH/USDG pair. Every series is identified by its exact PoolId and
-PoolKey. USDG is an onchain token, not fiat USD.
+Uniswap V4 pairs on Robinhood Chain: eight Stock Token/USDG pairs and one native
+ETH/USDG pair. Every series is identified by its exact PoolId and PoolKey. USDG
+is an onchain token, not fiat USD, and native ETH is not WETH.
 
 The current data path is:
 
@@ -18,42 +18,140 @@ one exact pair
        -> GitHub Releases for development and end-to-end testing
 ```
 
-GitHub Actions and Releases are development adapters. They are not a
-public-production availability claim. The canonical artifacts contain logical
-pair and calendar references, never a GitHub repository, Release tag, URL,
-asset ID, token, workflow context, or RPC endpoint.
+Collection groups schedule existing pair operations. They do not create a
+group-owned cursor, candle, artifact, or read interface.
 
-## Pair lifecycle
+## Install and discover identifiers
 
-`collect` runs two durable operations in order for one `--pair`:
+Use Node.js 22 or newer, then install the pinned dependency closure without
+running package lifecycle scripts:
 
-1. current collection advances the forward edge from the pair's activation or
-   last selected state;
-2. historical collection moves the other edge backward toward the fixed
-   `historyStart`, which is never more than twelve calendar months before the
-   activation boundary.
+```sh
+npm ci --ignore-scripts
+```
 
-The two operations publish independently. A historical RPC failure cannot undo
-an already selected current publication. `repair` replaces the configured
-recent interval without moving either coverage edge. Missing-trade minutes stay
-empty; no interpolation or zero-price candle is created.
+Print every current display label and exact pair ID from the authoritative
+registry:
 
-There is no scheduled or grouped collection in the current workflow. Manual
-dispatch accepts one exact pair ID and either `collect` or `repair`. There is no
-automatic age deletion: after the fixed historical edge is reached, later
-current data continues to accumulate.
+```sh
+node --input-type=module -e '
+  import { readFile } from "node:fs/promises";
+  const registry = JSON.parse(await readFile("registry/pairs.json", "utf8"));
+  for (const entry of registry.pairs) {
+    console.log(entry.display.label + "\t" + entry.pair.pairId);
+  }
+'
+```
 
-## Storage and reads
+Print current collection-group membership:
+
+```sh
+node --input-type=module -e '
+  import { readFile } from "node:fs/promises";
+  const registry = JSON.parse(await readFile("registry/collection-groups.json", "utf8"));
+  for (const group of registry.groups) {
+    console.log(group.groupId + "\t" + group.pairIds.join(","));
+  }
+'
+```
+
+Commands accept exact IDs only. Symbols and display labels are not aliases.
+
+## Local collection and reads
+
+Choose an exact pair ID and a local storage root:
+
+```sh
+PAIR_ID=0x3bb34a44f1b2b5f32c034c38a53065a521a47b199700fa9bd19d60985ff24bf1
+INDEX_ROOT=.local-index
+
+node cli.mjs collect --pair "${PAIR_ID}" --store directory --root "${INDEX_ROOT}"
+node cli.mjs verify --pair "${PAIR_ID}" --store directory --root "${INDEX_ROOT}"
+```
+
+`collect` first advances current coverage and then independently extends
+historical coverage toward the pair's fixed `historyStart`. `repair` re-reads
+the configured recent interval without moving either coverage edge:
+
+```sh
+node cli.mjs repair --pair "${PAIR_ID}" --store directory --root "${INDEX_ROOT}"
+```
+
+The `verify` stdout envelope contains `result.coverage`. Its `fromTimestamp` and
+`untilTimestamp` are the available half-open boundary. A `read` request must be
+non-empty and stay inside one UTC calendar month. Split a coverage range at UTC
+month boundaries when it spans more than one month:
+
+```sh
+node cli.mjs read --pair "${PAIR_ID}" \
+  --from 2026-08-14T14:01:00.000Z \
+  --until 2026-08-14T15:01:00.000Z \
+  --store directory --root "${INDEX_ROOT}"
+```
+
+Local collection uses the committed primary RPC. Optional fallback RPCs are
+complete HTTPS URLs supplied as `INDEX_RPC_FALLBACK_URL_0` and then
+`INDEX_RPC_FALLBACK_URL_1`.
+
+## Anonymous public verification and reads
+
+Published GitHub Release data can be verified and read without a GitHub token:
+
+```sh
+PAIR_ID=0x3bb34a44f1b2b5f32c034c38a53065a521a47b199700fa9bd19d60985ff24bf1
+INDEX_REPOSITORY=stelis-dev/robinhood-stock-token-index
+
+node cli.mjs verify --pair "${PAIR_ID}" \
+  --store github --repository "${INDEX_REPOSITORY}"
+
+node cli.mjs read --pair "${PAIR_ID}" \
+  --from 2026-08-14T13:07:00.000Z \
+  --until 2026-08-14T14:54:00.000Z \
+  --store github --repository "${INDEX_REPOSITORY}"
+```
+
+Use the coverage returned by the first command to choose the second command's
+single-month interval. GitHub collection, repair, upload, and cleanup require a
+repository token with contents write permission.
+
+## GitHub Actions operation
+
+Manual workflow dispatch accepts:
+
+- `operation`: `collect` or `repair`;
+- `targetKind`: `pair` or `group`;
+- `targetId`: an exact ID from `registry/pairs.json` or
+  `registry/collection-groups.json` matching the selected kind.
+
+Scheduled runs execute `collect` only. The three admitted groups are staggered
+so that one group starts every fifteen minutes and each group is selected every
+forty-five minutes. All mutation jobs share one concurrency group, execute one
+at a time, retain pending jobs instead of replacing them, and never cancel an
+in-progress publication. Group members publish independently: a failed member
+does not roll back earlier success, later members are still attempted, and the
+group exits unsuccessfully after the sequence. `repair` is manual because no
+automatic repair cadence has been admitted.
+
+GitHub schedules are best effort and may be delayed or dropped. A later
+successful collection resumes from each pair's selected durable state, but a
+delay can reduce freshness while the pair catches up. This repository does not
+claim exact real-time delivery or a production availability level.
+
+## Pair lifecycle and storage
+
+Current collection advances only the forward edge. Historical collection moves
+only the other edge toward the fixed `historyStart`, which is never more than
+twelve calendar months before activation. The two operations publish
+independently. A historical RPC failure cannot undo an already selected current
+publication. Missing-trade minutes stay empty; no interpolation or zero-price
+candle is created. After the historical edge is reached, later current data
+continues to accumulate; there is no automatic age deletion.
 
 Canonical candle data is one pair and one UTC day. A pair-month manifest refers
 to at most 31 pair-days, and selected pair state refers directly to produced
-months. Year grouping is derived from canonical `YYYY-MM` month identities; it
-is not a stored parent. Changed immutable days and months are written and
-re-downloaded before the new state is written last. The exact selected state is
-then re-read. A pair with no published data has no selected state carrier. Each
-persisted state generation contains a month from that generation, and each
-persisted month generation contains a day from that generation. Explicit full
-verification streams all selected months and days separately.
+months. Year grouping is derived from canonical `YYYY-MM` month identities and
+is not stored. Changed immutable days and months are written and re-downloaded
+before state is written last, and the selected state is then re-read.
 
 The directory adapter uses:
 
@@ -62,74 +160,56 @@ pairs/{pairId}/state/
 pairs/{pairId}/months/{YYYY-MM}/
 ```
 
-The GitHub adapter keeps one selected-state Release per pair and one child
-Release per pair-month. Referenced bytes use deterministic public Release
-download paths. After a new state is selected, cleanup lists only that state
-Release and the pair-month Releases changed by the transition; it does not
-enumerate retained Releases or traverse unchanged history. Cleanup first proves
-the exact selected and retained carriers, then removes superseded generations
-only for the logical month and day identities named by that transition. An
-omitted identity is left untouched. Routine publication still reads and
-rebuilds the selected state's ordered month-reference metadata; it grows by one
-bounded reference per produced month even though unchanged month and day
-carriers are not read or listed.
+The GitHub adapter uses one selected-state Release per pair and one child
+Release per pair-month. Canonical artifacts contain no repository, Release tag,
+URL, asset ID, token, workflow context, group, schedule, or RPC endpoint.
+Cleanup proves the exact selected and retained carriers before removing only
+superseded generations named by the selected transition. Omission is never
+deletion authority.
 
-`read` accepts one pair and one non-empty interval inside one UTC calendar
-month. It reads only the selected month and intersecting pair-days. The
-result distinguishes unavailable time from covered time with no Swap.
+## Output and candle meaning
 
-Example commands using the committed NVDA/USDG PoolId:
+Every command writes a JSON stdout envelope containing `ok`, `operation`, the
+exact target ID, and `result`. Group execution leaves each pair command's
+envelope intact and adds one final group summary with ordered pair IDs and
+`success` or `failure` status.
 
-```sh
-PAIR_ID=0x3bb34a44f1b2b5f32c034c38a53065a521a47b199700fa9bd19d60985ff24bf1
+- `coverage` is the continuous finalized range queried and admitted for one
+  pair. It is not proof of agreement between RPC providers.
+- `available` and `unavailable` exactly partition the requested period.
+- A covered minute with no candle means no admitted Swap occurred; it does not
+  mean a zero price.
+- OHLC values are exact rational quote-token units per one base token unit.
+- `baseVolumeRaw` and `quoteVolumeRaw` are exact raw token amounts.
+- `tradeCount` is the number of admitted Swap logs in the candle.
 
-npm test
-npm run collect -- --pair "${PAIR_ID}" --store directory --root .local-index
-npm run repair -- --pair "${PAIR_ID}" --store directory --root .local-index
-npm run verify -- --pair "${PAIR_ID}" --store directory --root .local-index
-npm run read -- --pair "${PAIR_ID}" \
-  --from 2026-08-14T14:01:00.000Z \
-  --until 2026-08-14T15:01:00.000Z \
-  --store directory --root .local-index
-```
-
-Published public GitHub Releases can be read and verified without a token.
-GitHub collection, repair, upload, and cleanup require a repository token with
-contents write permission.
+Candles are executed-trade evidence, not recommendations or executable quotes.
+They contain no raw RPC response, wallet, account, or transaction history.
 
 ## RPC availability
 
-The committed public RPC URL is always primary. An operation may append two
-ordered complete URLs from the repository secrets
-`INDEX_RPC_FALLBACK_URL_0` and `INDEX_RPC_FALLBACK_URL_1`. Each secret contains
-the full HTTPS URL, including a provider credential when required. The workflow
-does not use repository variables, assemble URLs, or print URLs.
+The committed public RPC URL is always primary. A run may append two ordered
+complete URLs from `INDEX_RPC_FALLBACK_URL_0` and
+`INDEX_RPC_FALLBACK_URL_1`. GitHub Actions reads both from repository secrets;
+it does not assemble URLs, use repository variables, or print endpoint values.
 
 Each endpoint must support `eth_chainId`, the `finalized` block tag, historical
 `eth_getLogs`, `eth_getBlockByNumber`, and JSON-RPC header batches at the
 configured size. Every attempt also verifies the committed activation block,
 hash, and timestamp.
 
-After bounded local availability retries are exhausted, or an endpoint denies
-access or lacks a required RPC capability, the unpublished attempt is discarded
-and the complete operation restarts from durable state on the next endpoint.
-Providers are never mixed inside one current, historical, or repair attempt.
-Chain identity, activation identity, malformed responses, invalid requests,
-numeric errors, and storage-integrity failures stop without fallback.
+After bounded availability retries are exhausted, or an endpoint denies access
+or lacks a required capability, the unpublished attempt is discarded and the
+complete operation restarts from durable state on the next endpoint. Providers
+are never mixed inside one current, historical, or repair attempt. Chain
+identity, activation identity, malformed responses, invalid requests, numeric
+errors, abort, and storage-integrity failures stop without fallback.
 
 In GitHub Actions only, stderr records the attempt role and one fixed source
 name: `registry.chain.primaryRpcUrl`, `INDEX_RPC_FALLBACK_URL_0`, or
 `INDEX_RPC_FALLBACK_URL_1`. It never records the endpoint URL or provider
-response. This line is not part of stdout or stored data.
+response. Fallback improves availability but cannot prove that an HTTP 200
+`eth_getLogs` response is complete.
 
-Fallback improves availability but does not prove that an HTTP 200
-`eth_getLogs` response is complete. Coverage means the stated finalized block
-range was queried and admitted on one endpoint; it is not provider consensus or
-a cryptographic completeness proof.
-
-## Candle meaning
-
-Each candle stores exact rational OHLC values in quote-token units per one base
-token unit, exact raw base and quote volume, admitted trade count, and source
-positions. It does not contain a recommendation, executable quote, raw RPC
-response, wallet, account, or transaction history.
+GitHub Actions and Releases remain development and test adapters, not the
+market source or a public-production availability claim.
