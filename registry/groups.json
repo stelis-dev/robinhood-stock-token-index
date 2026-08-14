@@ -1,5 +1,5 @@
 {
-  "contractVersion": "1",
+  "contractVersion": "2",
   "chain": {
     "chainId": "eip155:4663",
     "numericChainId": 4663,
@@ -27,9 +27,11 @@
     "logRangeBlocks": 2000,
     "maximumBlocksPerRun": 32000,
     "headerBatchSize": 100,
-    "requestDelayMilliseconds": 750,
+    "requestDelayMilliseconds": 1500,
     "requestTimeoutMilliseconds": 30000,
     "maximumResponseBytes": 16777216,
+    "maximumRpcAttempts": 7,
+    "maximumRpcRetryDelayMilliseconds": 60000,
     "maximumArtifactBytes": 16777216,
     "retentionDays": 365
   },

@@ -57,6 +57,7 @@ export class FakeRpc {
     this.logs = logs;
     this.finalizedNumber = BigInt(finalizedNumber);
     this.logRequests = [];
+    this.blockSearches = [];
   }
 
   async verifyChain(numericChainId) {
@@ -92,8 +93,14 @@ export class FakeRpc {
     });
   }
 
-  async findFirstBlockAtOrAfterTimestamp(timestamp, minimumBlock, maximumBlock) {
+  async findFirstBlockAtOrAfterTimestamp(timestamp, minimumBlock, maximumBlock, options = {}) {
     const target = BigInt(timestamp);
+    this.blockSearches.push({
+      timestamp: target,
+      minimumBlock: BigInt(minimumBlock),
+      maximumBlock: BigInt(maximumBlock),
+      maximumBlockHeader: options.maximumBlockHeader,
+    });
     for (let number = BigInt(minimumBlock); number <= BigInt(maximumBlock); number += 1n) {
       const value = this.blocks.get(number.toString());
       if (!value) throw new Error(`Fixture block is missing: ${number}`);

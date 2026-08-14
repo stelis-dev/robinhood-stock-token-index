@@ -81,3 +81,37 @@ test("a failed range never advances the durable cursor", async () => {
   await assert.rejects(collectIndex({ registry, group, store, rpc }), /publication interrupted/);
   assert.equal(store.state, null);
 });
+
+test("backlogged collection searches only the fixed per-run block range", async () => {
+  const registry = structuredClone(await fixtureRegistry());
+  registry.collection.maximumBlocksPerRun = 100;
+  const group = registry.groups[0];
+  const base = Date.parse("2026-08-13T00:00:00.000Z") / 1000;
+  const blocks = chainBlocks(base, 1000);
+  const rpc = new FakeRpc({ registry, blocks, logs: [], finalizedNumber: 1000 });
+  const previous = {
+    contractVersion: "1",
+    kind: "stock_token_execution_state",
+    groupId: group.groupId,
+    sequence: 1,
+    nextBlock: "96",
+    coveredUntilTimestamp: "2026-08-13T00:16:00.000Z",
+    days: [],
+  };
+  const store = {
+    state: previous,
+    async readState() { return this.state; },
+    async readDay() { throw new Error("Unexpected day read."); },
+    async commit({ state }) { this.state = state; },
+  };
+
+  const result = await collectIndex({ registry, group, store, rpc });
+  assert.equal(result.status, "published");
+  assert.equal(result.fromBlock, "96");
+  assert.equal(result.untilBlock, "192");
+  assert.equal(rpc.blockSearches.length, 1);
+  assert.equal(rpc.blockSearches[0].minimumBlock, 96n);
+  assert.equal(rpc.blockSearches[0].maximumBlock, 196n);
+  assert.equal(BigInt(rpc.blockSearches[0].maximumBlockHeader.number), 196n);
+  assert.equal(rpc.logRequests.at(-1).to, 191n);
+});

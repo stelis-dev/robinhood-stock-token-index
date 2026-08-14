@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { parseArguments } from "../cli.mjs";
+import { parseArguments, selectRpcUrl } from "../cli.mjs";
 import { loadRegistry } from "../collector/registry.mjs";
 
 test("CLI selection cannot mix storage adapter configuration", () => {
@@ -15,6 +15,12 @@ test("CLI selection cannot mix storage adapter configuration", () => {
   assert.throws(() => parseArguments(["unknown", "--store", "directory", "--root", "/tmp/index"]), /Operation/);
 });
 
+test("the CLI selects one explicit RPC URL without a fallback list", () => {
+  assert.equal(selectRpcUrl("https://public.example", {}), "https://public.example/");
+  assert.equal(selectRpcUrl("https://public.example", { INDEX_RPC_URL: "https://operator.example/rpc" }), "https://operator.example/rpc");
+  assert.throws(() => selectRpcUrl("https://public.example", { INDEX_RPC_URL: " https://operator.example" }), /whitespace/);
+});
+
 test("the workflow pins actions and keeps publication permission on the serialized operation job", async () => {
   const source = await readFile(new URL("../.github/workflows/index.yml", import.meta.url), "utf8");
   const registry = await loadRegistry();
@@ -26,5 +32,6 @@ test("the workflow pins actions and keeps publication permission on the serializ
   assert.match(source, /group: robinhood-stock-token-index-operation/);
   assert.match(source, /cancel-in-progress: false/);
   assert.match(source, /permissions:\n      contents: write/);
+  assert.match(source, /INDEX_RPC_URL: \$\{\{ secrets\.INDEX_RPC_URL \}\}/);
   assert.doesNotMatch(source, /pull_request_target/);
 });

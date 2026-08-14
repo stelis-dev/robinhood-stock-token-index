@@ -96,6 +96,7 @@ jobs:
         env:
           OPERATION: ${{ steps.operation.outputs.operation }}
           GITHUB_TOKEN: ${{ github.token }}
+          INDEX_RPC_URL: ${{ secrets.INDEX_RPC_URL }}
         run: node cli.mjs "${OPERATION}" --store github --repository "${INDEX_REPOSITORY}"
 
       - name: Re-download and verify published state

@@ -4,8 +4,10 @@ Read this file before every task in this repository.
 
 ## Ownership
 
-- `registry/groups.json` is the sole owner of chain, deployment, PoolKey, pool,
-  collection-limit, and group membership configuration.
+- `registry/groups.json` is the sole owner of chain identity, the public
+  development RPC default, deployment, PoolKey, pool, collection-limit, and
+  group membership configuration. `cli.mjs` may select one operator-supplied
+  RPC URL without changing chain identity or adding provider fallback.
 - `collector/` owns RPC admission, finalized coverage, Swap decoding, exact
   numeric values, one-minute candles, and canonical data artifacts.
 - `storage/` owns artifact carriage only. A storage adapter cannot alter,

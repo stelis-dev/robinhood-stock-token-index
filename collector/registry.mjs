@@ -46,7 +46,7 @@ export function derivePoolId({ currency0, currency1, fee, tickSpacing, hooks }) 
 
 export function admitRegistry(candidate) {
   exactKeys(candidate, ["chain", "collection", "contractVersion", "deployment", "groups"], "registry");
-  if (candidate.contractVersion !== "1") throw new Error("Unsupported registry contract version.");
+  if (candidate.contractVersion !== "2") throw new Error("Unsupported registry contract version.");
 
   exactKeys(candidate.chain, ["chainId", "defaultRpcUrl", "finalityTag", "numericChainId"], "chain");
   if (candidate.chain.chainId !== "eip155:4663" || candidate.chain.numericChainId !== 4663) {
@@ -68,11 +68,12 @@ export function admitRegistry(candidate) {
     throw new Error("Unexpected quote token.");
   }
 
-  const collectionKeys = ["candleSeconds", "headerBatchSize", "initialLookbackSeconds", "logRangeBlocks", "maximumArtifactBytes", "maximumBlocksPerRun", "maximumResponseBytes", "repairLookbackSeconds", "requestDelayMilliseconds", "requestTimeoutMilliseconds", "retentionDays", "scheduleMinutes"];
+  const collectionKeys = ["candleSeconds", "headerBatchSize", "initialLookbackSeconds", "logRangeBlocks", "maximumArtifactBytes", "maximumBlocksPerRun", "maximumResponseBytes", "maximumRpcAttempts", "maximumRpcRetryDelayMilliseconds", "repairLookbackSeconds", "requestDelayMilliseconds", "requestTimeoutMilliseconds", "retentionDays", "scheduleMinutes"];
   exactKeys(candidate.collection, collectionKeys, "collection");
   for (const key of collectionKeys.filter((key) => key !== "scheduleMinutes")) positiveInteger(candidate.collection[key], `collection.${key}`);
   if (candidate.collection.candleSeconds !== 60 || candidate.collection.retentionDays !== 365) throw new Error("Unexpected candle or retention boundary.");
   if (candidate.collection.maximumArtifactBytes > 16_777_216) throw new Error("Artifact byte limit exceeds the admitted boundary.");
+  if (candidate.collection.maximumRpcAttempts > 10 || candidate.collection.maximumRpcRetryDelayMilliseconds > 300_000) throw new Error("RPC retry boundary exceeds the admitted limit.");
   if (JSON.stringify(candidate.collection.scheduleMinutes) !== "[7,22,37,52]") throw new Error("Unexpected schedule minutes.");
 
   if (!Array.isArray(candidate.groups) || candidate.groups.length === 0 || candidate.groups.length > maximumGroups) throw new Error("Registry group count is invalid.");

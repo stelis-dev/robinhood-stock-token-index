@@ -18,6 +18,7 @@ import { block, fixtureRegistry, swapLog } from "./fixtures.mjs";
 test("the registry closes the one common PoolKey rule", async () => {
   const registry = await fixtureRegistry();
   assert.deepEqual(admitRegistry(structuredClone(registry)), registry);
+  assert.equal(registry.contractVersion, "2");
   assert.equal(registry.groups.length, 1);
   assert.equal(registry.groups[0].assets.length, 8);
   const changed = structuredClone(registry);

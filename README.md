@@ -43,8 +43,15 @@ npm run verify -- --store directory --root .local-index
 npm run retention -- --store directory --root .local-index
 ```
 
-GitHub workflows select the GitHub Release adapter and provide only the scoped
-repository token. The RPC request contains public chain and contract data only.
+GitHub workflows select the GitHub Release adapter and provide the scoped
+repository token. RPC requests contain public chain and contract data only.
+
+The committed public RPC endpoint is a rate-limited development default. For
+scheduled indexing, set the `INDEX_RPC_URL` repository secret to one reviewed
+Robinhood Chain endpoint that supports historical `eth_getLogs` and
+`eth_getBlockByNumber` requests. The collector verifies chain ID 4663 before
+reading market data. It retries bounded transient HTTP failures, including 429,
+and never falls back to a second provider automatically.
 
 ## Data meaning
 

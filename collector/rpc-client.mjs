@@ -1,4 +1,7 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 const allowedMethods = new Set(["eth_chainId", "eth_getBlockByNumber", "eth_getLogs"]);
+const retryableHttpStatuses = new Set([408, 429, 500, 502, 503, 504]);
 
 function hexQuantity(value, label) {
   if (typeof value !== "string" || !/^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(value)) {
@@ -15,70 +18,129 @@ function exactBlock(candidate) {
   return { hash: candidate.hash, number: candidate.number, timestamp: candidate.timestamp };
 }
 
+async function readBoundedResponse(response, maximumResponseBytes) {
+  const contentLength = response.headers?.get?.("content-length");
+  if (contentLength !== null && contentLength !== undefined && Number(contentLength) > maximumResponseBytes) {
+    throw new Error("RPC response exceeds the admitted byte limit.");
+  }
+  const chunks = [];
+  let byteLength = 0;
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      byteLength += value.byteLength;
+      if (byteLength > maximumResponseBytes) {
+        await reader.cancel();
+        throw new Error("RPC response exceeds the admitted byte limit.");
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } else {
+    const value = Buffer.from(await response.arrayBuffer());
+    byteLength = value.byteLength;
+    chunks.push(value);
+  }
+  const bytes = Buffer.concat(chunks, byteLength);
+  if (bytes.byteLength > maximumResponseBytes) throw new Error("RPC response exceeds the admitted byte limit.");
+  return bytes;
+}
+
+function retryAfterMilliseconds(value, nowMilliseconds) {
+  if (value === null || value === undefined) return null;
+  if (/^[0-9]+$/.test(value)) {
+    const milliseconds = Number(value) * 1000;
+    return Number.isSafeInteger(milliseconds) ? milliseconds : null;
+  }
+  const target = Date.parse(value);
+  return Number.isFinite(target) ? Math.max(0, target - nowMilliseconds) : null;
+}
+
+async function sleep(milliseconds, signal) {
+  await delay(milliseconds, undefined, signal ? { signal } : undefined);
+}
+
 export class RpcClient {
   #id = 0;
   #lastRequestAt = 0;
 
-  constructor({ url, requestDelayMilliseconds, requestTimeoutMilliseconds, maximumResponseBytes, fetchImplementation = fetch, signal }) {
+  constructor({
+    url,
+    requestDelayMilliseconds,
+    requestTimeoutMilliseconds,
+    maximumResponseBytes,
+    maximumRpcAttempts,
+    maximumRpcRetryDelayMilliseconds,
+    fetchImplementation = fetch,
+    sleepImplementation = sleep,
+    nowImplementation = Date.now,
+    signal,
+  }) {
     this.url = new URL(url).toString();
+    for (const [label, value] of [
+      ["request delay", requestDelayMilliseconds],
+      ["request timeout", requestTimeoutMilliseconds],
+      ["maximum response bytes", maximumResponseBytes],
+      ["maximum RPC attempts", maximumRpcAttempts],
+      ["maximum RPC retry delay", maximumRpcRetryDelayMilliseconds],
+    ]) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`RPC ${label} must be a positive safe integer.`);
+    }
     this.requestDelayMilliseconds = requestDelayMilliseconds;
     this.requestTimeoutMilliseconds = requestTimeoutMilliseconds;
     this.maximumResponseBytes = maximumResponseBytes;
+    this.maximumRpcAttempts = maximumRpcAttempts;
+    this.maximumRpcRetryDelayMilliseconds = maximumRpcRetryDelayMilliseconds;
     this.fetch = fetchImplementation;
+    this.sleep = sleepImplementation;
+    this.now = nowImplementation;
     this.signal = signal;
   }
 
   async #pace() {
-    const remaining = this.requestDelayMilliseconds - (Date.now() - this.#lastRequestAt);
-    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
-    this.#lastRequestAt = Date.now();
+    const remaining = this.requestDelayMilliseconds - (this.now() - this.#lastRequestAt);
+    if (remaining > 0) await this.sleep(remaining, this.signal);
+    this.#lastRequestAt = this.now();
   }
 
   async #post(payload) {
-    this.signal?.throwIfAborted();
-    await this.#pace();
     const body = JSON.stringify(payload);
-    const response = await this.fetch(this.url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
-      signal: this.signal
-        ? AbortSignal.any([this.signal, AbortSignal.timeout(this.requestTimeoutMilliseconds)])
-        : AbortSignal.timeout(this.requestTimeoutMilliseconds),
-    });
-    const contentLength = response.headers?.get?.("content-length");
-    if (contentLength !== null && contentLength !== undefined && Number(contentLength) > this.maximumResponseBytes) {
-      throw new Error("RPC response exceeds the admitted byte limit.");
-    }
-    const chunks = [];
-    let byteLength = 0;
-    if (response.body?.getReader) {
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        byteLength += value.byteLength;
-        if (byteLength > this.maximumResponseBytes) {
-          await reader.cancel();
-          throw new Error("RPC response exceeds the admitted byte limit.");
+    for (let attempt = 1; attempt <= this.maximumRpcAttempts; attempt += 1) {
+      this.signal?.throwIfAborted();
+      await this.#pace();
+      const response = await this.fetch(this.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: this.signal
+          ? AbortSignal.any([this.signal, AbortSignal.timeout(this.requestTimeoutMilliseconds)])
+          : AbortSignal.timeout(this.requestTimeoutMilliseconds),
+      });
+      const bytes = await readBoundedResponse(response, this.maximumResponseBytes);
+      if (!response.ok) {
+        if (!retryableHttpStatuses.has(response.status) || attempt === this.maximumRpcAttempts) {
+          const suffix = attempt > 1 ? ` after ${attempt} attempts` : "";
+          throw new Error(`RPC HTTP ${response.status}${suffix}.`);
         }
-        chunks.push(Buffer.from(value));
+        const retryAfter = retryAfterMilliseconds(response.headers?.get?.("retry-after"), this.now());
+        const backoff = Math.max(1000, this.requestDelayMilliseconds) * (2 ** (attempt - 1));
+        const retryDelay = retryAfter ?? Math.min(backoff, this.maximumRpcRetryDelayMilliseconds);
+        if (retryDelay > this.maximumRpcRetryDelayMilliseconds) {
+          throw new Error("RPC retry delay exceeds the admitted boundary.");
+        }
+        await this.sleep(retryDelay, this.signal);
+        continue;
       }
-    } else {
-      const value = Buffer.from(await response.arrayBuffer());
-      byteLength = value.byteLength;
-      chunks.push(value);
+      let value;
+      try {
+        value = JSON.parse(bytes.toString("utf8"));
+      } catch {
+        throw new Error("RPC response is not JSON.");
+      }
+      return value;
     }
-    const bytes = Buffer.concat(chunks, byteLength);
-    if (bytes.byteLength > this.maximumResponseBytes) throw new Error("RPC response exceeds the admitted byte limit.");
-    if (!response.ok) throw new Error(`RPC HTTP ${response.status}.`);
-    let value;
-    try {
-      value = JSON.parse(bytes.toString("utf8"));
-    } catch {
-      throw new Error("RPC response is not JSON.");
-    }
-    return value;
+    throw new Error("RPC attempts were exhausted.");
   }
 
   async call(method, params) {
@@ -152,12 +214,14 @@ export class RpcClient {
     return result;
   }
 
-  async findFirstBlockAtOrAfterTimestamp(timestamp, minimumBlock, maximumBlock) {
+  async findFirstBlockAtOrAfterTimestamp(timestamp, minimumBlock, maximumBlock, { maximumBlockHeader } = {}) {
     let low = BigInt(minimumBlock);
     let high = BigInt(maximumBlock);
     if (low < 0n || low > high) throw new Error("Block search bounds are invalid.");
     const target = BigInt(timestamp);
-    if (hexQuantity((await this.getBlock(high)).timestamp, "block timestamp") < target) return high + 1n;
+    const highBlock = maximumBlockHeader ?? await this.getBlock(high);
+    if (BigInt(highBlock.number) !== high) throw new Error("Block search header does not match its upper bound.");
+    if (hexQuantity(highBlock.timestamp, "block timestamp") < target) return high + 1n;
     while (low < high) {
       const middle = (low + high) >> 1n;
       const block = await this.getBlock(middle);

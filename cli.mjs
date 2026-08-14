@@ -14,6 +14,13 @@ import { createStore } from "./storage/create-store.mjs";
 const operations = new Set(["collect", "repair", "retention", "verify"]);
 const flags = new Set(["--repository", "--root", "--store"]);
 
+export function selectRpcUrl(defaultRpcUrl, environment) {
+  const configured = environment.INDEX_RPC_URL;
+  if (configured === undefined || configured === "") return new URL(defaultRpcUrl).toString();
+  if (configured.trim() !== configured) throw new Error("INDEX_RPC_URL must not contain surrounding whitespace.");
+  return new URL(configured).toString();
+}
+
 export function parseArguments(argv) {
   const [operation, ...rest] = argv;
   if (!operations.has(operation)) throw new Error("Operation must be collect, repair, retention, or verify.");
@@ -62,10 +69,12 @@ export async function main(argv, { environment = process.env, signal } = {}) {
       continue;
     }
     const rpc = new RpcClient({
-      url: registry.chain.defaultRpcUrl,
+      url: selectRpcUrl(registry.chain.defaultRpcUrl, environment),
       requestDelayMilliseconds: registry.collection.requestDelayMilliseconds,
       requestTimeoutMilliseconds: registry.collection.requestTimeoutMilliseconds,
       maximumResponseBytes: registry.collection.maximumResponseBytes,
+      maximumRpcAttempts: registry.collection.maximumRpcAttempts,
+      maximumRpcRetryDelayMilliseconds: registry.collection.maximumRpcRetryDelayMilliseconds,
       signal,
     });
     results.push(options.operation === "collect"

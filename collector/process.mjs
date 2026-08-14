@@ -210,19 +210,23 @@ async function collectionBoundary({ registry, rpc, previous, finalized }) {
   }
 
   const finalizedBoundarySeconds = minuteFloor(finalizedSeconds, candleSeconds);
-  let untilBlock = await rpc.findFirstBlockAtOrAfterTimestamp(
-    finalizedBoundarySeconds,
-    fromBlock <= finalizedNumber ? fromBlock : finalizedNumber,
-    finalizedNumber,
-  );
-  let untilSeconds = finalizedBoundarySeconds;
   const workLimit = fromBlock + BigInt(registry.collection.maximumBlocksPerRun);
-  if (untilBlock > workLimit) {
-    const limitHeader = await rpc.getBlock(workLimit);
-    untilSeconds = minuteFloor(blockTimestamp(limitHeader), candleSeconds);
-    untilBlock = await rpc.findFirstBlockAtOrAfterTimestamp(untilSeconds, fromBlock, workLimit);
+  const searchHigh = minimum(workLimit, finalizedNumber);
+  const searchHighHeader = searchHigh === finalizedNumber
+    ? finalized
+    : await rpc.getBlock(searchHigh);
+  const untilSeconds = searchHigh === finalizedNumber
+    ? finalizedBoundarySeconds
+    : minuteFloor(blockTimestamp(searchHighHeader), candleSeconds);
+  if (fromBlock > finalizedNumber) {
+    return { fromBlock, fromSeconds, untilBlock: finalizedNumber, untilSeconds };
   }
-  if (untilBlock > finalizedNumber) untilBlock = finalizedNumber;
+  const untilBlock = await rpc.findFirstBlockAtOrAfterTimestamp(
+    untilSeconds,
+    fromBlock,
+    searchHigh,
+    { maximumBlockHeader: searchHighHeader },
+  );
   return { fromBlock, fromSeconds, untilBlock, untilSeconds };
 }
 
