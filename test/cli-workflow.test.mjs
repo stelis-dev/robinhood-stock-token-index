@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { parseArguments, selectRpcUrls } from "../cli.mjs";
+import { parseArguments, rpcEndpointSelectionLog, rpcEndpointSourceName, selectRpcUrls } from "../cli.mjs";
 import { loadRegistry } from "../collector/registry.mjs";
 
 test("CLI selection cannot mix storage adapter configuration", () => {
@@ -33,6 +33,18 @@ test("the CLI fixes the registry primary and admits only fallback slots zero and
   assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "http://two.example" }), /HTTPS/);
   assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://user:token@two.example" }), /user information/);
   assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://two.example/#token" }), /fragment/);
+});
+
+test("the CLI reports only the fixed source name for the selected RPC endpoint", () => {
+  assert.equal(rpcEndpointSourceName(0), "registry.chain.primaryRpcUrl");
+  assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
+  assert.equal(rpcEndpointSourceName(2), "INDEX_RPC_FALLBACK_URL_1");
+  assert.throws(() => rpcEndpointSourceName(3), /selection/);
+  assert.equal(rpcEndpointSelectionLog(1, {}), null);
+  assert.equal(
+    rpcEndpointSelectionLog(1, { GITHUB_ACTIONS: "true" }),
+    "rpc_endpoint_source=INDEX_RPC_FALLBACK_URL_0\n",
+  );
 });
 
 test("the workflow pins actions and keeps publication permission on the serialized operation job", async () => {

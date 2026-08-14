@@ -64,6 +64,13 @@ URLs in one secret, commit them to the registry, pass them as CLI arguments, or
 print them. GitHub log redaction is not a substitute for keeping credentials
 out of output.
 
+After a successful collection or repair in GitHub Actions, the CLI writes only
+the selected configuration source name to the Actions log:
+`registry.chain.primaryRpcUrl`, `INDEX_RPC_FALLBACK_URL_0`, or
+`INDEX_RPC_FALLBACK_URL_1`. It never writes this line outside GitHub Actions and
+never writes the endpoint URL. This operational line does not change the CLI
+JSON result or any stored artifact.
+
 If an endpoint denies access, lacks a required JSON-RPC method or protocol
 version, or exhausts its bounded retries after a transport failure, HTTP 408,
 HTTP 429, any HTTP 5xx response, JSON-RPC internal error, or a required resource

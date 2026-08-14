@@ -41,7 +41,8 @@ test("availability failover discards the unpublished attempt and restarts the co
     rpcClients: [primary, fallback],
   });
 
-  assert.equal(completed.status, "published");
+  assert.equal(completed.selectedEndpointIndex, 1);
+  assert.equal(completed.result.status, "published");
   assert.equal(fallback.logRequests[0].from, primary.logRequests[0].from);
   const state = await store.readState();
   const day = await store.readDay(state.days[0]);
@@ -132,8 +133,9 @@ test("an endpoint that does not cover the last stored block restarts collection"
     ],
   });
 
-  assert.equal(completed.status, "published");
-  assert.equal(completed.fromBlock, "96");
+  assert.equal(completed.selectedEndpointIndex, 1);
+  assert.equal(completed.result.status, "published");
+  assert.equal(completed.result.fromBlock, "96");
   assert.equal(store.state.sequence, 2);
 });
 
@@ -182,8 +184,9 @@ test("a missing finalized block restarts collection on the next endpoint", async
     rpcClients: [primary, new FakeRpc({ registry, blocks, logs: [], finalizedNumber: 120 })],
   });
 
-  assert.equal(completed.status, "published");
-  assert.equal(completed.fromBlock, "96");
+  assert.equal(completed.selectedEndpointIndex, 1);
+  assert.equal(completed.result.status, "published");
+  assert.equal(completed.result.fromBlock, "96");
 });
 
 test("the last covered block is the exact stale-endpoint boundary", async () => {
@@ -215,7 +218,8 @@ test("the last covered block is the exact stale-endpoint boundary", async () => 
     store,
     rpcClients: [new FakeRpc({ registry, blocks, logs: [], finalizedNumber: 95 }), fallback],
   });
-  assert.equal(completed.status, "current");
+  assert.equal(completed.selectedEndpointIndex, 0);
+  assert.equal(completed.result.status, "current");
   assert.equal(fallbackUsed, false);
 });
 
@@ -248,7 +252,8 @@ test("repair falls back from a stale endpoint and never reads beyond the last co
     rpcClients: [stale, repair],
   });
 
-  assert.equal(completed.status, "published");
+  assert.equal(completed.selectedEndpointIndex, 1);
+  assert.equal(completed.result.status, "published");
   assert.equal(stale.logRequests.length, 0);
   assert.ok(repair.blockSearches.length >= 2);
   assert.ok(repair.blockSearches.every((search) => search.maximumBlock <= lastCoveredBlock));

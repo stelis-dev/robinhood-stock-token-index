@@ -13,10 +13,14 @@ export async function runRpcIndexOperation({ operation, registry, group, store, 
     throw new Error("RPC endpoint set is invalid.");
   }
 
-  for (const rpc of rpcClients) {
+  for (let endpointIndex = 0; endpointIndex < rpcClients.length; endpointIndex += 1) {
+    const rpc = rpcClients[endpointIndex];
     signal?.throwIfAborted();
     try {
-      return await owner({ registry, group, store, rpc, signal });
+      return {
+        result: await owner({ registry, group, store, rpc, signal }),
+        selectedEndpointIndex: endpointIndex,
+      };
     } catch (error) {
       if (!(error instanceof RpcEndpointUnavailableError)) throw error;
     }

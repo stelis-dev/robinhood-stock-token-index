@@ -17,7 +17,23 @@ const fallbackEnvironmentNames = Object.freeze([
   "INDEX_RPC_FALLBACK_URL_0",
   "INDEX_RPC_FALLBACK_URL_1",
 ]);
+const rpcEndpointSourceNames = Object.freeze([
+  "registry.chain.primaryRpcUrl",
+  ...fallbackEnvironmentNames,
+]);
 if (fallbackEnvironmentNames.length + 1 !== maximumRpcEndpointCount) throw new Error("RPC endpoint configuration is inconsistent.");
+
+export function rpcEndpointSourceName(index) {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= rpcEndpointSourceNames.length) {
+    throw new Error("RPC endpoint selection is invalid.");
+  }
+  return rpcEndpointSourceNames[index];
+}
+
+export function rpcEndpointSelectionLog(index, environment) {
+  if (environment?.GITHUB_ACTIONS !== "true") return null;
+  return `rpc_endpoint_source=${rpcEndpointSourceName(index)}\n`;
+}
 
 export function selectRpcUrls(registry, environment) {
   if (environment === null || typeof environment !== "object" || Array.isArray(environment)) throw new Error("RPC environment is invalid.");
@@ -104,14 +120,17 @@ export async function main(argv, { environment = process.env, signal } = {}) {
       results.push(await retainIndex({ registry, group, store }));
       continue;
     }
-    results.push(await runRpcIndexOperation({
+    const completed = await runRpcIndexOperation({
       operation: options.operation,
       registry,
       group,
       store,
       rpcClients,
       signal,
-    }));
+    });
+    const selectionLog = rpcEndpointSelectionLog(completed.selectedEndpointIndex, environment);
+    if (selectionLog !== null) process.stderr.write(selectionLog);
+    results.push(completed.result);
   }
   process.stdout.write(`${JSON.stringify({ ok: true, operation: options.operation, results })}\n`);
 }
