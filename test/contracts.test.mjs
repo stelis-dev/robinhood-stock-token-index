@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   admitDayArtifact,
@@ -15,10 +16,14 @@ import { admitRegistry } from "../collector/registry.mjs";
 import { admitSwapLog } from "../collector/swap.mjs";
 import { block, fixtureRegistry, swapLog } from "./fixtures.mjs";
 
+async function storedFixture(name) {
+  return Buffer.from((await readFile(new URL(name, import.meta.url), "utf8")).trim(), "base64");
+}
+
 test("the registry closes the one common PoolKey rule", async () => {
   const registry = await fixtureRegistry();
   assert.deepEqual(admitRegistry(structuredClone(registry)), registry);
-  assert.equal(registry.contractVersion, "2");
+  assert.equal(registry.chain.primaryRpcUrl, "https://rpc.mainnet.chain.robinhood.com");
   assert.equal(registry.groups.length, 1);
   assert.equal(registry.groups[0].assets.length, 8);
   const changed = structuredClone(registry);
@@ -32,6 +37,14 @@ test("the registry closes the one common PoolKey rule", async () => {
   duplicate.groups[1].assets.push(structuredClone(duplicate.groups[0].assets[0]));
   duplicate.groups[1].assets.sort((left, right) => left.symbol.localeCompare(right.symbol));
   assert.throws(() => admitRegistry(duplicate), /Duplicate asset identity/);
+
+  const unsafePrimary = structuredClone(registry);
+  unsafePrimary.chain.primaryRpcUrl = "https://user:token@rpc.example/#secret";
+  assert.throws(() => admitRegistry(unsafePrimary), /user information or a fragment/);
+
+  const oversizedBatch = structuredClone(registry);
+  oversizedBatch.collection.headerBatchSize = 101;
+  assert.throws(() => admitRegistry(oversizedBatch), /batch boundary/);
 });
 
 test("Swap admission decodes signed ABI words and exact execution values", async () => {
@@ -73,6 +86,13 @@ test("Swap admission decodes signed ABI words and exact execution values", async
     fee: 1_000_001n,
   });
   assert.throws(() => admitSwapLog(invalidFeeLog, { registry, group, block: sourceBlock }), /price or fee/);
+
+  const unsafeTimestampBlock = { ...sourceBlock, timestamp: "0x20000000000000" };
+  const unsafeTimestampLog = { ...log, blockHash: unsafeTimestampBlock.hash };
+  assert.throws(
+    () => admitSwapLog(unsafeTimestampLog, { registry, group, block: unsafeTimestampBlock }),
+    /safe integer boundary/,
+  );
 });
 
 test("one-minute candles preserve every trade and do not create empty candles", async () => {
@@ -152,4 +172,20 @@ test("multi-asset candle ordering is admitted by the same identity comparator", 
   }];
   artifact.candles = buildCandles(trades);
   assert.equal(admitDayArtifact(artifact, { registry, group }), artifact);
+});
+
+test("the persisted v1 contract is independent of RPC implementation", async () => {
+  const registry = await fixtureRegistry();
+  const group = registry.groups[0];
+  const state = decodeState(await storedFixture("./stored-v1-state.base64"), group.groupId, registry.collection.maximumArtifactBytes, "2");
+  const day = decodeDay(
+    await storedFixture("./stored-v1-day.base64"),
+    { registry, group },
+    state.days[0],
+  );
+
+  assert.equal(state.contractVersion, "1");
+  assert.equal(state.nextBlock, "35124203");
+  assert.equal(day.contractVersion, "1");
+  assert.equal(day.candles.length, 49);
 });

@@ -61,11 +61,13 @@ function admitAsset(value) {
 }
 
 export class GitHubReleaseStore {
+  #token;
+
   constructor({ repository, token, registry, group, fetchImplementation = fetch, signal }) {
     if (!repositoryPattern.test(repository)) throw new Error("GitHub repository identity is invalid.");
     if (typeof token !== "string" || token.length === 0) throw new Error("GitHub token is required.");
     this.repository = repository;
-    this.token = token;
+    this.#token = token;
     this.registry = registry;
     this.group = group;
     this.fetch = fetchImplementation;
@@ -84,7 +86,7 @@ export class GitHubReleaseStore {
     const target = path.startsWith("https://") ? path : `https://api.github.com${path}`;
     const headers = {
       accept,
-      authorization: `Bearer ${this.token}`,
+      authorization: `Bearer ${this.#token}`,
       "user-agent": "robinhood-stock-token-index",
       "x-github-api-version": "2022-11-28",
     };

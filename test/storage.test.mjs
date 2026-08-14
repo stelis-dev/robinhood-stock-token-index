@@ -96,6 +96,19 @@ function chainBlocks(baseSeconds, maximum) {
   return Array.from({ length: maximum + 1 }, (_, number) => block(number, baseSeconds + number * 10));
 }
 
+test("the GitHub store does not expose its bearer token through object serialization", async () => {
+  const registry = await fixtureRegistry();
+  const token = "private-github-token";
+  const store = new GitHubReleaseStore({
+    repository: "owner/index",
+    token,
+    registry,
+    group: registry.groups[0],
+    fetchImplementation: async () => { throw new Error("Network must not be used."); },
+  });
+  assert.doesNotMatch(JSON.stringify(store), new RegExp(token));
+});
+
 test("directory and GitHub adapters preserve the same admitted state and day bytes", async () => {
   const registry = await fixtureRegistry();
   const group = registry.groups[0];

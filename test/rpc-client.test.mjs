@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RpcEndpointUnavailableError } from "../collector/rpc-endpoint.mjs";
 import { RpcClient } from "../collector/rpc-client.mjs";
 
 function clientOptions(overrides = {}) {
@@ -14,20 +15,29 @@ function clientOptions(overrides = {}) {
   };
 }
 
+function rpcBlock(number) {
+  const value = BigInt(number);
+  return {
+    hash: `0x${(value + 1n).toString(16).padStart(64, "0")}`,
+    number: `0x${value.toString(16)}`,
+    timestamp: `0x${(value + 100n).toString(16)}`,
+  };
+}
+
 test("the RPC client correlates batch IDs rather than response order", async () => {
   const fetchImplementation = async (_url, init) => {
     const requests = JSON.parse(init.body);
     return new Response(JSON.stringify([...requests].reverse().map((request) => ({
       jsonrpc: "2.0",
       id: request.id,
-      result: request.params[0],
+      result: rpcBlock(request.params[0]),
     }))));
   };
   const client = new RpcClient(clientOptions({ fetchImplementation }));
   assert.deepEqual(await client.batch([
     { method: "eth_getBlockByNumber", params: ["0x1", false] },
     { method: "eth_getBlockByNumber", params: ["0x2", false] },
-  ]), ["0x1", "0x2"]);
+  ]), [rpcBlock(1), rpcBlock(2)]);
 });
 
 test("the RPC client stops reading beyond the response byte boundary", async () => {
@@ -59,6 +69,53 @@ test("the RPC client retries a 429 with the same request and honors Retry-After"
   assert.deepEqual(waits, [2000, 1500]);
 });
 
+test("the RPC client retries bounded transport failures", async () => {
+  let attempts = 0;
+  const waits = [];
+  const client = new RpcClient(clientOptions({
+    url: "https://rpc.example/secret-token",
+    fetchImplementation: async () => {
+      attempts += 1;
+      if (attempts < 3) throw new TypeError("network unavailable for https://rpc.example/secret-token");
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x1237" }));
+    },
+    sleepImplementation: async (milliseconds) => { waits.push(milliseconds); },
+    nowImplementation: () => 10_000,
+  }));
+  assert.equal(await client.call("eth_chainId", []), "0x1237");
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [1000, 1, 2000, 1]);
+});
+
+test("RPC failures do not expose endpoint or untrusted provider text", async () => {
+  const endpointToken = "private-endpoint-token";
+  const transport = new RpcClient(clientOptions({
+    url: `https://rpc.example/${endpointToken}`,
+    maximumRpcAttempts: 1,
+    fetchImplementation: async () => { throw new TypeError(`failed ${endpointToken}`); },
+  }));
+  await assert.rejects(transport.call("eth_chainId", []), (error) => {
+    assert.ok(error instanceof RpcEndpointUnavailableError);
+    assert.equal(error.message, "RPC endpoint is unavailable.");
+    assert.doesNotMatch(error.message, new RegExp(endpointToken));
+    return true;
+  });
+  assert.doesNotMatch(JSON.stringify(transport), new RegExp(endpointToken));
+
+  const provider = new RpcClient(clientOptions({
+    fetchImplementation: async () => new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32000, message: `provider echoed ${endpointToken}`, data: endpointToken },
+    })),
+  }));
+  await assert.rejects(provider.call("eth_chainId", []), (error) => {
+    assert.equal(error.message, "RPC eth_chainId failed with code -32000.");
+    assert.doesNotMatch(error.message, new RegExp(endpointToken));
+    return true;
+  });
+});
+
 test("the RPC client does not retry a non-transient HTTP failure", async () => {
   let attempts = 0;
   const client = new RpcClient(clientOptions({
@@ -69,6 +126,40 @@ test("the RPC client does not retry a non-transient HTTP failure", async () => {
   }));
   await assert.rejects(client.call("eth_chainId", []), /RPC HTTP 400\./);
   assert.equal(attempts, 1);
+});
+
+test("endpoint access denial skips local retries without exposing provider text", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async () => {
+      attempts += 1;
+      return new Response("credential details", { status: 403 });
+    },
+  }));
+  await assert.rejects(client.call("eth_chainId", []), (error) => {
+    assert.ok(error instanceof RpcEndpointUnavailableError);
+    assert.equal(error.message, "RPC endpoint is unavailable.");
+    return true;
+  });
+  assert.equal(attempts, 1);
+});
+
+test("an endpoint without a required RPC capability skips local retries", async () => {
+  for (const code of [-32601, -32004, -32006]) {
+    let attempts = 0;
+    const client = new RpcClient(clientOptions({
+      fetchImplementation: async () => {
+        attempts += 1;
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code, message: "provider capability details" },
+        }));
+      },
+    }));
+    await assert.rejects(client.call("eth_chainId", []), (error) => error instanceof RpcEndpointUnavailableError);
+    assert.equal(attempts, 1);
+  }
 });
 
 test("the RPC client bounds repeated transient failures", async () => {
@@ -82,7 +173,194 @@ test("the RPC client bounds repeated transient failures", async () => {
     sleepImplementation: async (milliseconds) => { waits.push(milliseconds); },
     nowImplementation: () => 10_000,
   }));
-  await assert.rejects(client.call("eth_chainId", []), /RPC HTTP 503 after 3 attempts\./);
+  await assert.rejects(client.call("eth_chainId", []), (error) => {
+    assert.ok(error instanceof RpcEndpointUnavailableError);
+    return true;
+  });
   assert.equal(attempts, 3);
   assert.deepEqual(waits, [1000, 1, 2000, 1]);
+});
+
+test("all server-side HTTP failures use the bounded availability path", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    maximumRpcAttempts: 2,
+    fetchImplementation: async () => {
+      attempts += 1;
+      return new Response("upstream timed out", { status: 524 });
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  }));
+  await assert.rejects(client.call("eth_chainId", []), (error) => error instanceof RpcEndpointUnavailableError);
+  assert.equal(attempts, 2);
+});
+
+test("the RPC client retries HTTP 200 limit errors with the identical request", async () => {
+  const bodies = [];
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async (_url, init) => {
+      bodies.push(init.body);
+      attempts += 1;
+      if (attempts < 3) {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32005, message: "provider limit text must remain private" },
+        }));
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x1237" }));
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  }));
+  assert.equal(await client.call("eth_chainId", []), "0x1237");
+  assert.equal(attempts, 3);
+  assert.equal(new Set(bodies).size, 1);
+});
+
+test("a missing required block is retried by the endpoint before it is admitted", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async () => {
+      attempts += 1;
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: attempts === 1 ? null : rpcBlock(1),
+      }));
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  }));
+  assert.equal((await client.getBlock("finalized")).number, "0x1");
+  assert.equal(attempts, 2);
+});
+
+test("a batch retries as one request and never admits partial success", async () => {
+  const bodies = [];
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async (_url, init) => {
+      bodies.push(init.body);
+      attempts += 1;
+      const requests = JSON.parse(init.body);
+      if (attempts === 1) {
+        return new Response(JSON.stringify([
+          { jsonrpc: "2.0", id: requests[0].id, result: rpcBlock(1) },
+          { jsonrpc: "2.0", id: requests[1].id, error: { code: -32002, message: "resource unavailable" } },
+        ]));
+      }
+      return new Response(JSON.stringify(requests.map((request) => ({
+        jsonrpc: "2.0",
+        id: request.id,
+        result: rpcBlock(request.params[0]),
+      }))));
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  }));
+  assert.deepEqual(await client.batch([
+    { method: "eth_getBlockByNumber", params: ["0x1", false] },
+    { method: "eth_getBlockByNumber", params: ["0x2", false] },
+  ]), [rpcBlock(1), rpcBlock(2)]);
+  assert.equal(attempts, 2);
+  assert.equal(bodies[0], bodies[1]);
+});
+
+test("fatal batch errors take precedence over availability errors", async () => {
+  for (const availabilityCode of [-32005, -32601]) {
+    let attempts = 0;
+    const client = new RpcClient(clientOptions({
+      fetchImplementation: async (_url, init) => {
+        attempts += 1;
+        const requests = JSON.parse(init.body);
+        return new Response(JSON.stringify([
+          { jsonrpc: "2.0", id: requests[0].id, error: { code: availabilityCode, message: "availability details" } },
+          { jsonrpc: "2.0", id: requests[1].id, result: rpcBlock(3) },
+        ]));
+      },
+      sleepImplementation: async () => {},
+    }));
+    await assert.rejects(client.batch([
+      { method: "eth_getBlockByNumber", params: ["0x1", false] },
+      { method: "eth_getBlockByNumber", params: ["0x2", false] },
+    ]), /requested number/);
+    assert.equal(attempts, 1);
+  }
+});
+
+test("repeated JSON-RPC resource-not-found errors exhaust to the endpoint availability signal", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async () => {
+      attempts += 1;
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32001, message: "missing resource with provider details" },
+      }));
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  }));
+  await assert.rejects(client.call("eth_chainId", []), (error) => {
+    assert.ok(error instanceof RpcEndpointUnavailableError);
+    assert.equal(error.message, "RPC endpoint is unavailable.");
+    return true;
+  });
+  assert.equal(attempts, 3);
+});
+
+test("JSON-RPC internal errors use the bounded availability path", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    maximumRpcAttempts: 2,
+    fetchImplementation: async () => {
+      attempts += 1;
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32603, message: "provider internal details" },
+      }));
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  }));
+  await assert.rejects(client.call("eth_chainId", []), (error) => error instanceof RpcEndpointUnavailableError);
+  assert.equal(attempts, 2);
+});
+
+test("an oversized 429 is retried without admitting its body", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    maximumResponseBytes: 64,
+    fetchImplementation: async () => {
+      attempts += 1;
+      if (attempts === 1) return new Response("x".repeat(1000), { status: 429 });
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x1237" }));
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  }));
+  assert.equal(await client.call("eth_chainId", []), "0x1237");
+  assert.equal(attempts, 2);
+});
+
+test("malformed success responses remain fatal and are not retried", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async () => {
+      attempts += 1;
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: "0x1237",
+        error: { code: -32005, message: "limit" },
+      }));
+    },
+  }));
+  await assert.rejects(client.call("eth_chainId", []), /exactly one result or error/);
+  assert.equal(attempts, 1);
 });

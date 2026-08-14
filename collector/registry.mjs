@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { keccak_256 } from "@noble/hashes/sha3.js";
+import { admitRpcUrl, maximumRpcBatchSize } from "./rpc-endpoint.mjs";
 
 const addressPattern = /^0x[0-9a-f]{40}$/;
 const bytes32Pattern = /^0x[0-9a-f]{64}$/;
@@ -45,15 +46,14 @@ export function derivePoolId({ currency0, currency1, fee, tickSpacing, hooks }) 
 }
 
 export function admitRegistry(candidate) {
-  exactKeys(candidate, ["chain", "collection", "contractVersion", "deployment", "groups"], "registry");
-  if (candidate.contractVersion !== "2") throw new Error("Unsupported registry contract version.");
+  exactKeys(candidate, ["chain", "collection", "deployment", "groups"], "registry");
 
-  exactKeys(candidate.chain, ["chainId", "defaultRpcUrl", "finalityTag", "numericChainId"], "chain");
+  exactKeys(candidate.chain, ["chainId", "finalityTag", "numericChainId", "primaryRpcUrl"], "chain");
   if (candidate.chain.chainId !== "eip155:4663" || candidate.chain.numericChainId !== 4663) {
     throw new Error("Unexpected chain identity.");
   }
   if (candidate.chain.finalityTag !== "finalized") throw new Error("The cursor must use finalized blocks.");
-  new URL(candidate.chain.defaultRpcUrl);
+  admitRpcUrl(candidate.chain.primaryRpcUrl, "Primary RPC URL");
 
   exactKeys(candidate.deployment, ["fee", "hooks", "poolManager", "quoteToken", "stateView", "swapTopic", "tickSpacing"], "deployment");
   for (const [key, value] of [["poolManager", candidate.deployment.poolManager], ["stateView", candidate.deployment.stateView], ["hooks", candidate.deployment.hooks]]) {
@@ -72,6 +72,7 @@ export function admitRegistry(candidate) {
   exactKeys(candidate.collection, collectionKeys, "collection");
   for (const key of collectionKeys.filter((key) => key !== "scheduleMinutes")) positiveInteger(candidate.collection[key], `collection.${key}`);
   if (candidate.collection.candleSeconds !== 60 || candidate.collection.retentionDays !== 365) throw new Error("Unexpected candle or retention boundary.");
+  if (candidate.collection.headerBatchSize > maximumRpcBatchSize) throw new Error("Header batch size exceeds the RPC batch boundary.");
   if (candidate.collection.maximumArtifactBytes > 16_777_216) throw new Error("Artifact byte limit exceeds the admitted boundary.");
   if (candidate.collection.maximumRpcAttempts > 10 || candidate.collection.maximumRpcRetryDelayMilliseconds > 300_000) throw new Error("RPC retry boundary exceeds the admitted limit.");
   if (JSON.stringify(candidate.collection.scheduleMinutes) !== "[7,22,37,52]") throw new Error("Unexpected schedule minutes.");

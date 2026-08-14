@@ -1,5 +1,5 @@
-const hexPattern = /^0x[0-9a-f]+$/;
-const hexQuantityPattern = /^0x(?:0|[1-9a-f][0-9a-f]*)$/;
+import { parseHexQuantity, safeHexQuantityNumber } from "./hex-quantity.mjs";
+
 const uint256Limit = 1n << 256n;
 
 function word(data, index) {
@@ -46,6 +46,11 @@ export function rational(numerator, denominator) {
   return { numerator: (n / divisor).toString(), denominator: (d / divisor).toString() };
 }
 
+export function admitSwapLogBlockNumber(log) {
+  if (log === null || typeof log !== "object" || Array.isArray(log)) throw new Error("Swap log must be an object.");
+  return parseHexQuantity(log.blockNumber, "Swap block number");
+}
+
 export function compareRational(left, right) {
   const a = BigInt(left.numerator) * BigInt(right.denominator);
   const b = BigInt(right.numerator) * BigInt(left.denominator);
@@ -53,13 +58,13 @@ export function compareRational(left, right) {
 }
 
 export function sourcePosition(log) {
-  const transactionIndex = BigInt(log.transactionIndex);
-  const logIndex = BigInt(log.logIndex);
+  const transactionIndex = parseHexQuantity(log.transactionIndex, "Swap transaction index");
+  const logIndex = parseHexQuantity(log.logIndex, "Swap log index");
   if (transactionIndex > BigInt(Number.MAX_SAFE_INTEGER) || logIndex > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Swap source index exceeds the safe integer boundary.");
   }
   return {
-    blockNumber: BigInt(log.blockNumber).toString(),
+    blockNumber: admitSwapLogBlockNumber(log).toString(),
     blockHash: log.blockHash,
     transactionIndex: Number(transactionIndex),
     transactionHash: log.transactionHash,
@@ -84,10 +89,9 @@ export function admitSwapLog(log, { registry, group, block }) {
   if (!asset) throw new Error("Swap log pool is outside the admitted group.");
   if (!/^0x0{24}[0-9a-f]{40}$/.test(log.topics[2])) throw new Error("Swap sender topic is invalid.");
   if (!/^0x[0-9a-f]{64}$/.test(log.blockHash) || !/^0x[0-9a-f]{64}$/.test(log.transactionHash)) throw new Error("Swap source hash is invalid.");
-  for (const key of ["blockNumber", "transactionIndex", "logIndex"]) {
-    if (!hexPattern.test(log[key]) || !hexQuantityPattern.test(log[key])) throw new Error(`Swap ${key} is invalid.`);
-  }
-  if (BigInt(log.blockNumber) !== BigInt(block.number) || log.blockHash !== block.hash) throw new Error("Swap log does not match its block header.");
+  const logBlockNumber = admitSwapLogBlockNumber(log);
+  const source = sourcePosition(log);
+  if (logBlockNumber !== BigInt(block.number) || log.blockHash !== block.hash) throw new Error("Swap log does not match its block header.");
   if (!/^0x[0-9a-f]{384}$/.test(log.data)) throw new Error("Swap data must contain six ABI words.");
 
   const amount0 = signedWord(word(log.data, 0), 128);
@@ -105,11 +109,11 @@ export function admitSwapLog(log, { registry, group, block }) {
   const price = rational(quoteAmount * 10n ** BigInt(asset.tokenDecimals), tokenAmount * 10n ** BigInt(registry.deployment.quoteToken.decimals));
   return {
     asset,
-    blockTimestamp: Number(BigInt(block.timestamp)),
+    blockTimestamp: safeHexQuantityNumber(block.timestamp, "Block timestamp"),
     fee: fee.toString(),
     liquidity: liquidity.toString(),
     price,
-    source: sourcePosition(log),
+    source,
     sqrtPriceX96: sqrtPriceX96.toString(),
     tick: tick.toString(),
     tokenAmountRaw: tokenAmount.toString(),

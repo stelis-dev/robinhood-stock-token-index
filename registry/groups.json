@@ -1,9 +1,8 @@
 {
-  "contractVersion": "2",
   "chain": {
     "chainId": "eip155:4663",
     "numericChainId": 4663,
-    "defaultRpcUrl": "https://rpc.mainnet.chain.robinhood.com",
+    "primaryRpcUrl": "https://rpc.mainnet.chain.robinhood.com",
     "finalityTag": "finalized"
   },
   "deployment": {

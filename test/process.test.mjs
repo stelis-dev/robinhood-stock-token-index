@@ -115,3 +115,36 @@ test("backlogged collection searches only the fixed per-run block range", async 
   assert.equal(BigInt(rpc.blockSearches[0].maximumBlockHeader.number), 196n);
   assert.equal(rpc.logRequests.at(-1).to, 191n);
 });
+
+test("a multi-day block gap preserves empty date coverage without reading the exclusive block", async () => {
+  const registry = await fixtureRegistry();
+  const group = registry.groups[0];
+  const blocks = [
+    block(0, Date.parse("2026-08-10T22:59:00.000Z") / 1000),
+    block(1, Date.parse("2026-08-10T23:10:00.000Z") / 1000),
+    block(2, Date.parse("2026-08-13T01:00:00.000Z") / 1000),
+  ];
+  const rpc = new FakeRpc({ registry, blocks, logs: [], finalizedNumber: 2 });
+  const store = {
+    state: {
+      contractVersion: "1",
+      kind: "stock_token_execution_state",
+      groupId: group.groupId,
+      sequence: 1,
+      nextBlock: "1",
+      coveredUntilTimestamp: "2026-08-10T23:00:00.000Z",
+      days: [],
+    },
+    async readState() { return this.state; },
+    async readDay() { throw new Error("Unexpected day read."); },
+    async commit({ state }) { this.state = state; },
+  };
+
+  const result = await collectIndex({ registry, group, store, rpc });
+
+  assert.equal(result.status, "published");
+  assert.equal(store.state.nextBlock, "2");
+  assert.equal(store.state.days.length, 4);
+  assert.equal(rpc.blockSearches.length, 2);
+  assert.equal(rpc.blockSearches[1].maximumBlock, 1n);
+});

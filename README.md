@@ -44,14 +44,45 @@ npm run retention -- --store directory --root .local-index
 ```
 
 GitHub workflows select the GitHub Release adapter and provide the scoped
-repository token. RPC requests contain public chain and contract data only.
+repository token. JSON-RPC request bodies contain public chain and contract
+data only.
 
-The committed public RPC endpoint is a rate-limited development default. For
-scheduled indexing, set the `INDEX_RPC_URL` repository secret to one reviewed
-Robinhood Chain endpoint that supports historical `eth_getLogs` and
-`eth_getBlockByNumber` requests. The collector verifies chain ID 4663 before
-reading market data. It retries bounded transient HTTP failures, including 429,
-and never falls back to a second provider automatically.
+The committed public RPC endpoint is always the primary and is a rate-limited
+development endpoint. Scheduled indexing may append two reviewed endpoints as
+`INDEX_RPC_FALLBACK_URL_0` and `INDEX_RPC_FALLBACK_URL_1`. Each endpoint must
+support `eth_chainId`, the `finalized` block tag, historical `eth_getLogs`, and
+`eth_getBlockByNumber` in JSON-RPC batches at the configured header batch size.
+Fallback positions must be contiguous and all endpoint URLs must be unique.
+Changing the primary requires changing the committed registry; there is no
+primary URL environment override.
+
+Every fallback endpoint URL, with or without a credential, must be stored as an
+individual GitHub Actions repository secret. Store the complete URL, including
+the provider token when required; the workflow does not assemble a base URL and
+token. Do not store fallback endpoints as repository variables, put multiple
+URLs in one secret, commit them to the registry, pass them as CLI arguments, or
+print them. GitHub log redaction is not a substitute for keeping credentials
+out of output.
+
+If an endpoint denies access, lacks a required JSON-RPC method or protocol
+version, or exhausts its bounded retries after a transport failure, HTTP 408,
+HTTP 429, any HTTP 5xx response, JSON-RPC internal error, or a required resource
+being missing, unavailable, or rate-limited, the collector discards that
+unpublished attempt and restarts the complete collection or repair from durable
+state with the next endpoint. An endpoint whose finalized state does not cover
+the last durably stored block is unavailable for that attempt. The collector
+never combines providers within an attempt. Chain identity, malformed response,
+invalid request, numeric, and storage failures stop without fallback.
+
+Provider fallback improves availability; it does not prove that a successful
+`eth_getLogs` response is complete. The collector verifies chain ID 4663 and
+the structure and source positions of every returned log, but the canonical
+JSON-RPC response does not carry a completeness proof. Coverage therefore means
+that the stated finalized block range was completely queried and admitted, not
+that an independent provider or cryptographic proof confirmed every log.
+Fallback is failure-driven: the collector does not query multiple endpoints to
+select the freshest view or establish provider consensus. A valid endpoint that
+covers the durably stored range remains authoritative for its attempt.
 
 ## Data meaning
 

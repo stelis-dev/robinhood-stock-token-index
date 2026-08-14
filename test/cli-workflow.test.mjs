@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { parseArguments, selectRpcUrl } from "../cli.mjs";
+import { parseArguments, selectRpcUrls } from "../cli.mjs";
 import { loadRegistry } from "../collector/registry.mjs";
 
 test("CLI selection cannot mix storage adapter configuration", () => {
@@ -15,10 +15,24 @@ test("CLI selection cannot mix storage adapter configuration", () => {
   assert.throws(() => parseArguments(["unknown", "--store", "directory", "--root", "/tmp/index"]), /Operation/);
 });
 
-test("the CLI selects one explicit RPC URL without a fallback list", () => {
-  assert.equal(selectRpcUrl("https://public.example", {}), "https://public.example/");
-  assert.equal(selectRpcUrl("https://public.example", { INDEX_RPC_URL: "https://operator.example/rpc" }), "https://operator.example/rpc");
-  assert.throws(() => selectRpcUrl("https://public.example", { INDEX_RPC_URL: " https://operator.example" }), /whitespace/);
+test("the CLI fixes the registry primary and admits only fallback slots zero and one", async () => {
+  const registry = await loadRegistry();
+  assert.deepEqual(selectRpcUrls(registry, {}), ["https://rpc.mainnet.chain.robinhood.com/"]);
+  assert.deepEqual(selectRpcUrls(registry, {
+    INDEX_RPC_FALLBACK_URL_0: "https://second.example/key",
+    INDEX_RPC_FALLBACK_URL_1: "https://third.example/key",
+  }), [
+    "https://rpc.mainnet.chain.robinhood.com/",
+    "https://second.example/key",
+    "https://third.example/key",
+  ]);
+  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_1: "https://third.example" }), /contiguous/);
+  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://rpc.mainnet.chain.robinhood.com" }), /unique/);
+  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://two.example", INDEX_RPC_FALLBACK_URL_2: "https://four.example" }), /unsupported/);
+  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: " https://two.example" }), /whitespace/);
+  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "http://two.example" }), /HTTPS/);
+  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://user:token@two.example" }), /user information/);
+  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://two.example/#token" }), /fragment/);
 });
 
 test("the workflow pins actions and keeps publication permission on the serialized operation job", async () => {
@@ -32,6 +46,9 @@ test("the workflow pins actions and keeps publication permission on the serializ
   assert.match(source, /group: robinhood-stock-token-index-operation/);
   assert.match(source, /cancel-in-progress: false/);
   assert.match(source, /permissions:\n      contents: write/);
-  assert.match(source, /INDEX_RPC_URL: \$\{\{ secrets\.INDEX_RPC_URL \}\}/);
+  assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
+  assert.match(source, /INDEX_RPC_FALLBACK_URL_1: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_1 \}\}/);
+  assert.doesNotMatch(source, /vars\.INDEX_RPC_FALLBACK_URL/);
+  assert.doesNotMatch(source, /INDEX_RPC_FALLBACK_URL_2/);
   assert.doesNotMatch(source, /pull_request_target/);
 });

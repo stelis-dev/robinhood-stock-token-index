@@ -95,6 +95,10 @@ export class FakeRpc {
 
   async findFirstBlockAtOrAfterTimestamp(timestamp, minimumBlock, maximumBlock, options = {}) {
     const target = BigInt(timestamp);
+    if (BigInt(minimumBlock) > BigInt(maximumBlock)) throw new Error("Fixture block search bounds are invalid.");
+    if (options.maximumBlockHeader && BigInt(options.maximumBlockHeader.number) !== BigInt(maximumBlock)) {
+      throw new Error("Fixture block search header does not match its upper bound.");
+    }
     this.blockSearches.push({
       timestamp: target,
       minimumBlock: BigInt(minimumBlock),

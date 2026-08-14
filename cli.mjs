@@ -2,23 +2,46 @@
 
 import { pathToFileURL } from "node:url";
 import {
-  collectIndex,
-  repairIndex,
   retainIndex,
   verifyIndex,
 } from "./collector/process.mjs";
 import { loadRegistry } from "./collector/registry.mjs";
+import { runRpcIndexOperation } from "./collector/rpc-operation.mjs";
 import { RpcClient } from "./collector/rpc-client.mjs";
+import { admitRpcUrl, maximumRpcEndpointCount } from "./collector/rpc-endpoint.mjs";
 import { createStore } from "./storage/create-store.mjs";
 
 const operations = new Set(["collect", "repair", "retention", "verify"]);
 const flags = new Set(["--repository", "--root", "--store"]);
+const fallbackEnvironmentNames = Object.freeze([
+  "INDEX_RPC_FALLBACK_URL_0",
+  "INDEX_RPC_FALLBACK_URL_1",
+]);
+if (fallbackEnvironmentNames.length + 1 !== maximumRpcEndpointCount) throw new Error("RPC endpoint configuration is inconsistent.");
 
-export function selectRpcUrl(defaultRpcUrl, environment) {
-  const configured = environment.INDEX_RPC_URL;
-  if (configured === undefined || configured === "") return new URL(defaultRpcUrl).toString();
-  if (configured.trim() !== configured) throw new Error("INDEX_RPC_URL must not contain surrounding whitespace.");
-  return new URL(configured).toString();
+export function selectRpcUrls(registry, environment) {
+  if (environment === null || typeof environment !== "object" || Array.isArray(environment)) throw new Error("RPC environment is invalid.");
+  const admittedNames = new Set(fallbackEnvironmentNames);
+  for (const [name, value] of Object.entries(environment)) {
+    if (name.startsWith("INDEX_RPC_") && value !== undefined && value !== "" && !admittedNames.has(name)) {
+      throw new Error("RPC environment contains an unsupported setting.");
+    }
+  }
+  const primary = admitRpcUrl(registry?.chain?.primaryRpcUrl, "Registry primary RPC URL");
+  const fallbackValues = [];
+  let missingFallback = false;
+  for (const name of fallbackEnvironmentNames) {
+    const value = environment[name];
+    if (value === undefined || value === "") {
+      missingFallback = true;
+      continue;
+    }
+    if (missingFallback) throw new Error("RPC fallback endpoint positions must be contiguous.");
+    fallbackValues.push(admitRpcUrl(value, name));
+  }
+  const urls = [primary, ...fallbackValues];
+  if (new Set(urls).size !== urls.length) throw new Error("RPC endpoint URLs must be unique.");
+  return urls;
 }
 
 export function parseArguments(argv) {
@@ -48,6 +71,19 @@ export function parseArguments(argv) {
 export async function main(argv, { environment = process.env, signal } = {}) {
   const options = parseArguments(argv);
   const registry = await loadRegistry();
+  const rpcClients = options.operation === "collect" || options.operation === "repair"
+    ? selectRpcUrls(registry, environment).map((url) => (
+      new RpcClient({
+        url,
+        requestDelayMilliseconds: registry.collection.requestDelayMilliseconds,
+        requestTimeoutMilliseconds: registry.collection.requestTimeoutMilliseconds,
+        maximumResponseBytes: registry.collection.maximumResponseBytes,
+        maximumRpcAttempts: registry.collection.maximumRpcAttempts,
+        maximumRpcRetryDelayMilliseconds: registry.collection.maximumRpcRetryDelayMilliseconds,
+        signal,
+      })
+    ))
+    : null;
   const results = [];
   for (const group of registry.groups) {
     signal?.throwIfAborted();
@@ -68,18 +104,14 @@ export async function main(argv, { environment = process.env, signal } = {}) {
       results.push(await retainIndex({ registry, group, store }));
       continue;
     }
-    const rpc = new RpcClient({
-      url: selectRpcUrl(registry.chain.defaultRpcUrl, environment),
-      requestDelayMilliseconds: registry.collection.requestDelayMilliseconds,
-      requestTimeoutMilliseconds: registry.collection.requestTimeoutMilliseconds,
-      maximumResponseBytes: registry.collection.maximumResponseBytes,
-      maximumRpcAttempts: registry.collection.maximumRpcAttempts,
-      maximumRpcRetryDelayMilliseconds: registry.collection.maximumRpcRetryDelayMilliseconds,
+    results.push(await runRpcIndexOperation({
+      operation: options.operation,
+      registry,
+      group,
+      store,
+      rpcClients,
       signal,
-    });
-    results.push(options.operation === "collect"
-      ? await collectIndex({ registry, group, store, rpc, signal })
-      : await repairIndex({ registry, group, store, rpc, signal }));
+    }));
   }
   process.stdout.write(`${JSON.stringify({ ok: true, operation: options.operation, results })}\n`);
 }

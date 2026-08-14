@@ -9,8 +9,9 @@ import {
   mergeCandles,
   replaceCoverage,
 } from "./candles.mjs";
+import { RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
 import { blockTimestamp } from "./rpc-client.mjs";
-import { admitSwapLog } from "./swap.mjs";
+import { admitSwapLog, admitSwapLogBlockNumber } from "./swap.mjs";
 
 function throwIfAborted(signal) {
   signal?.throwIfAborted();
@@ -30,6 +31,15 @@ function minuteFloor(seconds, candleSeconds) {
 
 function minimum(left, right) {
   return left < right ? left : right;
+}
+
+function assertFinalizedCoversStoredRange(previous, finalized) {
+  if (previous === null) return;
+  const nextBlock = BigInt(previous.nextBlock);
+  if (nextBlock === 0n) return;
+  if (BigInt(finalized.number) < nextBlock - 1n) {
+    throw new RpcEndpointUnavailableError();
+  }
 }
 
 function stateReferenceByDay(state) {
@@ -55,16 +65,17 @@ async function readReferencedDays(store, state, days) {
 async function coveragePartitions({ rpc, fromBlock, untilBlock, fromTimestamp, untilTimestamp, signal }) {
   const output = [];
   let cursorBlock = BigInt(fromBlock);
+  const exclusiveBlock = BigInt(untilBlock);
   let cursorSeconds = Math.floor(Date.parse(fromTimestamp) / 1000);
   const untilSeconds = Math.floor(Date.parse(untilTimestamp) / 1000);
   while (cursorSeconds < untilSeconds) {
     throwIfAborted(signal);
     const nextDaySeconds = Math.floor(cursorSeconds / 86_400) * 86_400 + 86_400;
     const segmentUntilSeconds = Math.min(untilSeconds, nextDaySeconds);
-    const segmentUntilBlock = segmentUntilSeconds === untilSeconds
-      ? BigInt(untilBlock)
-      : await rpc.findFirstBlockAtOrAfterTimestamp(segmentUntilSeconds, cursorBlock, untilBlock);
-    if (segmentUntilBlock < cursorBlock || segmentUntilBlock > BigInt(untilBlock)) {
+    const segmentUntilBlock = segmentUntilSeconds === untilSeconds || cursorBlock === exclusiveBlock
+      ? exclusiveBlock
+      : await rpc.findFirstBlockAtOrAfterTimestamp(segmentUntilSeconds, cursorBlock, exclusiveBlock - 1n);
+    if (segmentUntilBlock < cursorBlock || segmentUntilBlock > exclusiveBlock) {
       throw new Error("Coverage block boundary is outside the collected range.");
     }
     output.push({
@@ -104,18 +115,15 @@ async function collectRange({ registry, group, rpc, fromBlock, untilBlock, fromT
     });
     const blockNumbers = [];
     for (const log of logs) {
-      if (log === null || typeof log !== "object" || Array.isArray(log) || typeof log.blockNumber !== "string") {
-        throw new Error("RPC returned a malformed log identity.");
-      }
-      const blockNumber = BigInt(log.blockNumber);
+      const blockNumber = admitSwapLogBlockNumber(log);
       if (blockNumber < cursor || blockNumber >= rangeUntil) throw new Error("RPC returned a log outside the requested range.");
       blockNumbers.push(blockNumber);
     }
     const headers = logs.length === 0
       ? new Map()
       : await rpc.getBlockHeaders(blockNumbers, registry.collection.headerBatchSize);
-    const trades = logs.map((log) => {
-      const header = headers.get(BigInt(log.blockNumber).toString());
+    const trades = logs.map((log, index) => {
+      const header = headers.get(blockNumbers[index].toString());
       if (!header) throw new Error("RPC omitted a block header for a Swap log.");
       return admitSwapLog(log, { registry, group, block: header });
     });
@@ -235,6 +243,7 @@ export async function collectIndex({ registry, group, store, rpc, signal }) {
   await rpc.verifyChain(registry.chain.numericChainId);
   const previous = await store.readState();
   const finalized = await rpc.getBlock(registry.chain.finalityTag);
+  assertFinalizedCoversStoredRange(previous, finalized);
   const boundary = await collectionBoundary({ registry, rpc, previous, finalized });
   if (boundary.untilBlock <= boundary.fromBlock || boundary.untilSeconds <= boundary.fromSeconds) {
     return { status: "current", groupId: group.groupId, sequence: previous?.sequence ?? null };
@@ -306,7 +315,7 @@ export async function repairIndex({ registry, group, store, rpc, signal }) {
   const verified = await verifyIndex({ group, store });
   if (previous.days.length === 0) return { ...verified, status: "empty" };
   const finalized = await rpc.getBlock(registry.chain.finalityTag);
-  if (BigInt(previous.nextBlock) > BigInt(finalized.number)) throw new Error("Stored cursor is ahead of the finalized chain boundary.");
+  assertFinalizedCoversStoredRange(previous, finalized);
 
   const targetSeconds = minuteFloor(
     Math.floor(Date.parse(previous.coveredUntilTimestamp) / 1000) - registry.collection.repairLookbackSeconds,
@@ -317,8 +326,9 @@ export async function repairIndex({ registry, group, store, rpc, signal }) {
   const firstCoverage = firstDay.coverage[0];
   const earliestSeconds = Math.floor(Date.parse(firstCoverage.fromTimestamp) / 1000);
   const fromSeconds = Math.max(targetSeconds, earliestSeconds);
-  const fromBlock = await rpc.findFirstBlockAtOrAfterTimestamp(fromSeconds, BigInt(firstCoverage.fromBlock), BigInt(previous.nextBlock));
-  if (fromBlock >= BigInt(previous.nextBlock)) return { ...verified, status: "current" };
+  const nextBlock = BigInt(previous.nextBlock);
+  const fromBlock = await rpc.findFirstBlockAtOrAfterTimestamp(fromSeconds, BigInt(firstCoverage.fromBlock), nextBlock - 1n);
+  if (fromBlock >= nextBlock) return { ...verified, status: "current" };
   return publishRange({
     registry,
     group,
@@ -326,7 +336,7 @@ export async function repairIndex({ registry, group, store, rpc, signal }) {
     rpc,
     previous,
     fromBlock,
-    untilBlock: BigInt(previous.nextBlock),
+    untilBlock: nextBlock,
     fromTimestamp: instant(fromSeconds),
     untilTimestamp: previous.coveredUntilTimestamp,
     signal,
