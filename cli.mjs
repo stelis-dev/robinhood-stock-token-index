@@ -33,6 +33,13 @@ export function rpcEndpointSelectionLog(role, index, environment) {
   return `rpc_attempt=${role} rpc_endpoint_source=${rpcEndpointSourceName(index)}\n`;
 }
 
+export function pairOperationFailureLog(role, pairId, environment) {
+  if (environment?.GITHUB_ACTIONS !== "true") return null;
+  if (role !== "current" && role !== "history" && role !== "repair") throw new Error("Pair operation role is invalid.");
+  if (typeof pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Pair operation identity is invalid.");
+  return `pair_operation=${role} status=failed pair_id=${pairId}\n`;
+}
+
 export function selectRpcUrls(registry, environment) {
   if (environment === null || typeof environment !== "object" || Array.isArray(environment)) throw new Error("RPC environment is invalid.");
   const admittedNames = new Set(fallbackEnvironmentNames);
@@ -106,6 +113,29 @@ function writeSelection(role, completed, environment) {
   if (line !== null) process.stderr.write(line);
 }
 
+function writeOperationFailure(role, pairId, environment) {
+  const line = pairOperationFailureLog(role, pairId, environment);
+  if (line !== null) process.stderr.write(line);
+}
+
+async function runPairOperation({ role, registry, pairId, store, clients, signal, environment }) {
+  try {
+    const completed = await runRpcPairOperation({
+      operation: role,
+      registry,
+      pairId,
+      store,
+      rpcClients: clients,
+      signal,
+    });
+    writeSelection(role, completed, environment);
+    return completed.result;
+  } catch (error) {
+    writeOperationFailure(role, pairId, environment);
+    throw error;
+  }
+}
+
 export async function main(argv, { environment = process.env, signal } = {}) {
   const options = parseArguments(argv);
   const registry = await loadPairRegistry();
@@ -121,6 +151,9 @@ export async function main(argv, { environment = process.env, signal } = {}) {
     token: environment.GITHUB_TOKEN,
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     signal,
+    writeOperationalLog: environment.GITHUB_ACTIONS === "true"
+      ? (line) => process.stderr.write(line)
+      : undefined,
   });
   let result;
   if (options.operation === "verify") {
@@ -134,36 +167,17 @@ export async function main(argv, { environment = process.env, signal } = {}) {
   } else {
     const clients = rpcClients(registry, environment, signal);
     if (options.operation === "repair") {
-      const completed = await runRpcPairOperation({
-        operation: "repair",
-        registry,
-        pairId: options.pairId,
-        store,
-        rpcClients: clients,
-        signal,
+      result = await runPairOperation({
+        role: "repair", registry, pairId: options.pairId, store, clients, signal, environment,
       });
-      writeSelection("repair", completed, environment);
-      result = completed.result;
     } else {
-      const current = await runRpcPairOperation({
-        operation: "current",
-        registry,
-        pairId: options.pairId,
-        store,
-        rpcClients: clients,
-        signal,
+      const current = await runPairOperation({
+        role: "current", registry, pairId: options.pairId, store, clients, signal, environment,
       });
-      writeSelection("current", current, environment);
-      const history = await runRpcPairOperation({
-        operation: "history",
-        registry,
-        pairId: options.pairId,
-        store,
-        rpcClients: clients,
-        signal,
+      const history = await runPairOperation({
+        role: "history", registry, pairId: options.pairId, store, clients, signal, environment,
       });
-      writeSelection("history", history, environment);
-      result = { current: current.result, history: history.result };
+      result = { current, history };
     }
   }
   process.stdout.write(`${JSON.stringify({ ok: true, operation: options.operation, pairId: options.pairId, result })}\n`);

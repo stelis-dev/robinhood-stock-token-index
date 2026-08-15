@@ -217,8 +217,13 @@ errors, abort, and storage-integrity failures stop without fallback.
 In GitHub Actions only, stderr records the attempt role and one fixed source
 name: `registry.chain.primaryRpcUrl`, `INDEX_RPC_FALLBACK_URL_0`, or
 `INDEX_RPC_FALLBACK_URL_1`. It never records the endpoint URL or provider
-response. Fallback improves availability but cannot prove that an HTTP 200
-`eth_getLogs` response is complete.
+response. A failed pair records only its `current`, `history`, or `repair` role.
+If GitHub cleanup fails, stderr also records the fixed cleanup phase, pair ID,
+selected sequence, and affected month. These operational records never contain
+an endpoint URL, token, response body, exception message, or stack trace. This
+fixed diagnostic record is separate from the command's existing terminal error.
+Fallback improves availability but cannot prove that an HTTP 200 `eth_getLogs`
+response is complete.
 
 GitHub Actions and Releases remain development and test adapters, not the
 market source or a public-production availability claim.

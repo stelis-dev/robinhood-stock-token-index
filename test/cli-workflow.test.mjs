@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { parseArguments, rpcEndpointSelectionLog, rpcEndpointSourceName, selectRpcUrls } from "../cli.mjs";
+import {
+  pairOperationFailureLog,
+  parseArguments,
+  rpcEndpointSelectionLog,
+  rpcEndpointSourceName,
+  selectRpcUrls,
+} from "../cli.mjs";
 import { loadPairRegistry } from "../collector/pair-registry.mjs";
 import { loadCollectionGroupRegistry } from "../scheduler/collection-group-registry.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
@@ -61,6 +67,7 @@ test("the CLI fixes the registry primary and admits only two contiguous secret U
 });
 
 test("Actions logging reveals only attempt role and the fixed endpoint source name", () => {
+  const pairId = `0x${"1".repeat(64)}`;
   assert.equal(rpcEndpointSourceName(0), "registry.chain.primaryRpcUrl");
   assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
   assert.equal(rpcEndpointSourceName(2), "INDEX_RPC_FALLBACK_URL_1");
@@ -69,6 +76,11 @@ test("Actions logging reveals only attempt role and the fixed endpoint source na
   assert.equal(
     rpcEndpointSelectionLog("history", 1, { GITHUB_ACTIONS: "true" }),
     "rpc_attempt=history rpc_endpoint_source=INDEX_RPC_FALLBACK_URL_0\n",
+  );
+  assert.equal(pairOperationFailureLog("current", pairId, {}), null);
+  assert.equal(
+    pairOperationFailureLog("current", pairId, { GITHUB_ACTIONS: "true" }),
+    `pair_operation=current status=failed pair_id=${pairId}\n`,
   );
 });
 

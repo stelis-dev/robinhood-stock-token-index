@@ -10,7 +10,7 @@ import {
   encodePairState,
 } from "../collector/pair-artifact.mjs";
 import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
-import { admitCleanupPlan } from "../storage/carriage.mjs";
+import { admitCleanupPlan, referenceObjectName } from "../storage/carriage.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { GitHubReleaseStore } from "../storage/github-release-store.mjs";
 import { fixturePairRegistry, pairCandle, pairEntryBySymbol } from "./pair-fixtures.mjs";
@@ -26,6 +26,7 @@ class FakeGitHub {
     this.nextAssetId = 1;
     this.requests = [];
     this.failStateUpload = false;
+    this.failDeleteAssetName = null;
   }
 
   #releaseById(id) {
@@ -85,6 +86,7 @@ class FakeGitHub {
       for (const release of this.releases.values()) {
         for (const [name, asset] of release.assets) {
           if (asset.id === Number(assetMatch[1])) {
+            if (name === this.failDeleteAssetName) return jsonResponse({ message: "failure" }, 503);
             release.assets.delete(name);
             return new Response(null, { status: 204 });
           }
@@ -332,6 +334,39 @@ test("cleanup proves the selected carrier and omission cannot authorize child de
     assert.equal((await readPairState({ registry, pairId: closure.state.pair.pairId, store })).sequence, 2);
     assert.equal((await verifyPairIndex({ registry, pairId: closure.state.pair.pairId, store })).status, "verified");
   }
+});
+
+test("GitHub cleanup reports only its fixed failed boundary while the selected closure remains readable", async () => {
+  const registry = await fixturePairRegistry();
+  const previous = pairClosure(registry, 1);
+  const selected = pairClosure(registry, 2);
+  const githubApi = new FakeGitHub();
+  const operationalLogs = [];
+  const github = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+    writeOperationalLog: (line) => operationalLogs.push(line),
+  });
+  await publishClosure(github, previous);
+  await publishClosure(github, selected);
+  const previousMonth = previous.children.find((child) => child.reference.logicalId.includes("/months/"));
+  githubApi.failDeleteAssetName = referenceObjectName(previousMonth.reference);
+
+  await assert.rejects(
+    github.cleanupSelectedGeneration(selected.cleanupPlan),
+    /GitHub API DELETE request failed with HTTP 503/,
+  );
+  assert.deepEqual(operationalLogs, [
+    `github_cleanup status=failed phase=superseded_child_removal pair_id=${selected.state.pair.pairId} selected_sequence=2 pair_month=2026-08 object_kind=month\n`,
+  ]);
+  assert.doesNotMatch(operationalLogs[0], /test-token|HTTP 503|failure/);
+  assert.equal((await verifyPairIndex({
+    registry,
+    pairId: selected.state.pair.pairId,
+    store: github,
+  })).sequence, 2);
 });
 
 test("cleanup plan admission closes pair, generation, and logical-identity scope", async () => {

@@ -88,16 +88,28 @@ export class GitHubReleaseStore {
   #maximumArtifactBytes;
   #releases = new Map();
   #assets = new Map();
+  #writeOperationalLog;
 
-  constructor({ repository, token, maximumArtifactBytes, fetchImplementation = fetch, signal }) {
+  constructor({ repository, token, maximumArtifactBytes, fetchImplementation = fetch, signal, writeOperationalLog }) {
     if (!repositoryPattern.test(repository)) throw new Error("GitHub repository identity is invalid.");
     if (token !== undefined && (typeof token !== "string" || token.length === 0)) throw new Error("GitHub token is invalid.");
     if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
+    if (writeOperationalLog !== undefined && typeof writeOperationalLog !== "function") throw new Error("Operational log writer is invalid.");
     this.repository = repository;
     this.#token = token;
     this.#maximumArtifactBytes = maximumArtifactBytes;
+    this.#writeOperationalLog = writeOperationalLog;
     this.fetch = fetchImplementation;
     this.signal = signal;
+  }
+
+  #writeCleanupFailure(plan, phase, pairMonth, objectKind) {
+    if (this.#writeOperationalLog === undefined) return;
+    const month = pairMonth === undefined ? "" : ` pair_month=${pairMonth}`;
+    const kind = objectKind === undefined ? "" : ` object_kind=${objectKind}`;
+    this.#writeOperationalLog(
+      `github_cleanup status=failed phase=${phase} pair_id=${plan.pairId} selected_sequence=${plan.selectedSequence}${month}${kind}\n`,
+    );
   }
 
   #requireWriteToken() {
@@ -304,44 +316,60 @@ export class GitHubReleaseStore {
   async cleanupSelectedGeneration(input) {
     this.#requireWriteToken();
     const plan = admitCleanupPlan(input);
-
-    const stateRelease = await this.#getRelease(stateTag(plan.pairId));
-    if (!stateRelease) throw new Error("Selected-state Release is unavailable during cleanup.");
-    const stateAssets = [...await this.#listAssets(stateRelease.id)];
-    if (!stateAssets.some((asset) => asset.name === plan.selectedStateName)) {
-      throw new Error("Selected state carrier is unavailable during cleanup.");
-    }
-
-    const scopes = [];
-    for (const changedMonth of plan.changedMonths) {
-      const tag = monthTag(plan.pairId, changedMonth.month);
-      const release = await this.#getRelease(tag);
-      if (!release) throw new Error("Referenced pair-month Release is unavailable during cleanup.");
-      const assets = [...await this.#listAssets(release.id)];
-      const names = new Set(assets.map((asset) => asset.name));
-      for (const object of changedMonth.objects) {
-        if (!names.has(object.name)) throw new Error("Retained object is unavailable during cleanup.");
+    let phase = "selected_state_proof";
+    let pairMonth;
+    let objectKind;
+    try {
+      const stateRelease = await this.#getRelease(stateTag(plan.pairId));
+      if (!stateRelease) throw new Error("Selected-state Release is unavailable during cleanup.");
+      const stateAssets = [...await this.#listAssets(stateRelease.id)];
+      if (!stateAssets.some((asset) => asset.name === plan.selectedStateName)) {
+        throw new Error("Selected state carrier is unavailable during cleanup.");
       }
-      scopes.push({
-        release,
-        assets,
-        retained: new Map(changedMonth.objects.map((object) => [object.logicalId, object.name])),
-      });
-    }
 
-    for (const asset of stateAssets) {
-      const sequence = parseStateObjectName(asset.name);
-      if (sequence !== null && sequence < plan.selectedSequence) await this.#deleteAsset(stateRelease.id, asset);
-    }
+      phase = "changed_month_proof";
+      const scopes = [];
+      for (const changedMonth of plan.changedMonths) {
+        pairMonth = changedMonth.month;
+        const tag = monthTag(plan.pairId, changedMonth.month);
+        const release = await this.#getRelease(tag);
+        if (!release) throw new Error("Referenced pair-month Release is unavailable during cleanup.");
+        const assets = [...await this.#listAssets(release.id)];
+        const names = new Set(assets.map((asset) => asset.name));
+        for (const object of changedMonth.objects) {
+          if (!names.has(object.name)) throw new Error("Retained object is unavailable during cleanup.");
+        }
+        scopes.push({
+          pairMonth: changedMonth.month,
+          release,
+          assets,
+          retained: new Map(changedMonth.objects.map((object) => [object.logicalId, object.name])),
+        });
+      }
 
-    for (const scope of scopes) {
-      for (const asset of scope.assets) {
-        const parsed = parseReferencedObjectName(plan.pairId, asset.name);
-        const retainedName = parsed === null ? undefined : scope.retained.get(parsed.logicalId);
-        if (retainedName !== undefined && parsed.sequence <= plan.selectedSequence && asset.name !== retainedName) {
-          await this.#deleteAsset(scope.release.id, asset);
+      phase = "superseded_state_removal";
+      pairMonth = undefined;
+      objectKind = undefined;
+      for (const asset of stateAssets) {
+        const sequence = parseStateObjectName(asset.name);
+        if (sequence !== null && sequence < plan.selectedSequence) await this.#deleteAsset(stateRelease.id, asset);
+      }
+
+      phase = "superseded_child_removal";
+      for (const scope of scopes) {
+        pairMonth = scope.pairMonth;
+        for (const asset of scope.assets) {
+          const parsed = parseReferencedObjectName(plan.pairId, asset.name);
+          const retainedName = parsed === null ? undefined : scope.retained.get(parsed.logicalId);
+          if (retainedName !== undefined && parsed.sequence <= plan.selectedSequence && asset.name !== retainedName) {
+            objectKind = parsed.kind;
+            await this.#deleteAsset(scope.release.id, asset);
+          }
         }
       }
+    } catch (error) {
+      this.#writeCleanupFailure(plan, phase, pairMonth, objectKind);
+      throw error;
     }
   }
 }
