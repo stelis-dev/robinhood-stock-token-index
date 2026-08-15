@@ -42,8 +42,11 @@ scheduled job. Reading one pair never requires a collection group.
   from which current collection moves forward and historical collection moves
   backward.
 - A **candle** contains open, high, low, close, base volume, quote volume, and
-  trade count calculated from actual `Swap` events in one UTC minute. A minute
-  with no trade has no candle.
+  trade count calculated from `Swap` events with non-zero pool balance deltas
+  of opposite signs for both assets in one UTC minute. A structurally valid
+  `Swap` with a zero delta for either asset remains inside queried coverage but
+  does not supply an exchange ratio or contribute to a candle. A minute with no
+  contributing `Swap` has no candle.
 - An **RPC endpoint** is a JSON-RPC server used to read blockchain data. A
   **finalized block** is the block returned by that endpoint for Ethereum's
   `finalized` tag; the collector does not publish data from a newer unfinalized
@@ -376,14 +379,16 @@ IDs and a `success` or `failure` status.
   does not prove that two RPC providers returned the same logs.
 - `available` and `unavailable` are non-overlapping lists that together cover
   the requested period.
-- A covered minute with no candle means that no valid `Swap` event occurred in
-  that minute. It does not mean a zero price.
+- A covered minute with no candle means that no validated `Swap` with a
+  non-zero amount for both assets occurred in that minute. It does not mean a
+  zero price.
 - Each OHLC value is an exact rational number in quote-token units per one
   base-token unit, stored as reduced decimal-string `numerator` and `denominator`
   fields rather than a rounded floating-point number.
 - `baseVolumeRaw` and `quoteVolumeRaw` are integer token amounts before decimal
   display conversion.
-- `tradeCount` is the number of valid `Swap` events in the candle.
+- `tradeCount` is the number of validated `Swap` events with non-zero amounts
+  of opposite signs for both assets that contribute to the candle.
 - `firstSource` and `lastSource` identify the first and last contributing `Swap`
   by block number and hash, transaction index and hash, and log index. `source`
   in these field names means an event position, not an RPC provider.

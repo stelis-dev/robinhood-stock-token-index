@@ -79,7 +79,7 @@ export function compareSwapPosition(left, right) {
   return left.logIndex - right.logIndex;
 }
 
-export function validateSwapLog(log, { registry, pair, block }) {
+export function decodeSwapLog(log, { registry, pair, block }) {
   if (log === null || typeof log !== "object" || Array.isArray(log)) throw new Error("Swap log must be an object.");
   const keys = ["address", "blockHash", "blockNumber", "data", "logIndex", "removed", "topics", "transactionHash", "transactionIndex"];
   for (const key of keys) if (!(key in log)) throw new Error(`Swap log omitted ${key}.`);
@@ -102,24 +102,29 @@ export function validateSwapLog(log, { registry, pair, block }) {
   const liquidity = unsignedWord(word(log.data, 3), 128);
   const tick = signedWord(word(log.data, 4), 24);
   const fee = unsignedWord(word(log.data, 5), 24);
-  if (amount0 === 0n || amount1 === 0n || (amount0 < 0n) === (amount1 < 0n)) throw new Error("Swap amounts do not describe an exchange.");
   if (sqrtPriceX96 === 0n || fee > 1_000_000n) throw new Error("Swap price or fee is invalid.");
+  if (amount0 !== 0n && amount1 !== 0n && (amount0 < 0n) === (amount1 < 0n)) {
+    throw new Error("Non-zero Swap amounts must have opposite signs.");
+  }
+
+  const blockTimestamp = safeHexQuantityNumber(block.timestamp, "Block timestamp");
+  const decoded = {
+    pairId: pair.pairId,
+    blockTimestamp,
+    swapPosition: swapPositionValue,
+    trade: null,
+  };
+  if (amount0 === 0n || amount1 === 0n) return decoded;
 
   const baseAmount = absolute(pair.baseIsCurrency0 ? amount0 : amount1);
   const quoteAmount = absolute(pair.baseIsCurrency0 ? amount1 : amount0);
-  return {
-    pairId: pair.pairId,
-    blockTimestamp: safeHexQuantityNumber(block.timestamp, "Block timestamp"),
-    fee: fee.toString(),
-    liquidity: liquidity.toString(),
+  decoded.trade = {
     price: rational(
       quoteAmount * 10n ** BigInt(pair.baseAsset.decimals),
       baseAmount * 10n ** BigInt(pair.quoteAsset.decimals),
     ),
-    swapPosition: swapPositionValue,
-    sqrtPriceX96: sqrtPriceX96.toString(),
-    tick: tick.toString(),
     baseAmountRaw: baseAmount.toString(),
     quoteAmountRaw: quoteAmount.toString(),
   };
+  return decoded;
 }

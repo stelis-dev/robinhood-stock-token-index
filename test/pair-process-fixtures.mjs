@@ -53,11 +53,32 @@ export async function compactPairRegistry({
   return validatePairRegistry(registry);
 }
 
-export function pairSwapLog({ registry, pair, block, baseAmountRaw, quoteAmountRaw, transactionIndex = 0, logIndex = 0 }) {
-  const base = BigInt(baseAmountRaw);
-  const quote = BigInt(quoteAmountRaw);
-  const amount0 = pair.baseIsCurrency0 ? -base : quote;
-  const amount1 = pair.baseIsCurrency0 ? quote : -base;
+export function pairSwapLog({
+  registry,
+  pair,
+  block,
+  baseAmountRaw,
+  quoteAmountRaw,
+  amount0: directAmount0,
+  amount1: directAmount1,
+  transactionIndex = 0,
+  logIndex = 0,
+}) {
+  const directAmounts = directAmount0 !== undefined || directAmount1 !== undefined;
+  const pairAmounts = baseAmountRaw !== undefined || quoteAmountRaw !== undefined;
+  let amount0;
+  let amount1;
+  if (directAmounts) {
+    if (pairAmounts || directAmount0 === undefined || directAmount1 === undefined) throw new Error("Fixture Swap amounts are invalid.");
+    amount0 = BigInt(directAmount0);
+    amount1 = BigInt(directAmount1);
+  } else {
+    if (!pairAmounts || baseAmountRaw === undefined || quoteAmountRaw === undefined) throw new Error("Fixture Swap amounts are invalid.");
+    const base = BigInt(baseAmountRaw);
+    const quote = BigInt(quoteAmountRaw);
+    amount0 = pair.baseIsCurrency0 ? -base : quote;
+    amount1 = pair.baseIsCurrency0 ? quote : -base;
+  }
   return {
     address: registry.deployment.poolManager,
     blockHash: block.hash,

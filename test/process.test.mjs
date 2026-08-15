@@ -207,6 +207,87 @@ test("native ETH and stock-token pairs use the same base-to-USDG candle calculat
   assert.equal(state.pair.quoteAsset.address, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
 });
 
+test("a Swap with a zero amount does not block history or contribute a candle price or volume", async () => {
+  const registry = await compactPairRegistry();
+  const pair = pairEntryBySymbol(registry, "ETH").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const rpc = new FakePairRpc({ registry, pair, finalizedNumber: activation + 1n });
+  rpc.logs.push(
+    pairSwapLog({
+      registry,
+      pair,
+      block: rpc.block(activation - 65n),
+      baseAmountRaw: 1_000_000_000_000_000_000n,
+      quoteAmountRaw: 3_000_000_000n,
+      transactionIndex: 0,
+    }),
+    pairSwapLog({
+      registry,
+      pair,
+      block: rpc.block(activation - 64n),
+      amount0: 0n,
+      amount1: -1n,
+      transactionIndex: 1,
+    }),
+    pairSwapLog({
+      registry,
+      pair,
+      block: rpc.block(activation - 63n),
+      baseAmountRaw: 1_000_000_000_000_000_000n,
+      quoteAmountRaw: 3_200_000_000n,
+      transactionIndex: 2,
+    }),
+  );
+  const store = await directoryStore(registry, "pair-zero-amount-swap-");
+
+  const collected = await collectPairHistory({ registry, pairId: pair.pairId, store, rpc });
+  const state = await readPairState({ registry, pairId: pair.pairId, store });
+  const period = await readPairPeriod({
+    registry,
+    store,
+    input: {
+      pairId: pair.pairId,
+      from: state.coverage.fromTimestamp,
+      until: state.coverage.untilTimestamp,
+    },
+  });
+
+  assert.equal(collected.status, "published");
+  assert.equal(collected.phase, "history");
+  assert.equal(state.coverage.fromTimestamp, "2026-08-14T13:01:00.000Z");
+  assert.equal(state.coverage.untilTimestamp, pair.activation.timestamp);
+  assert.equal(period.candles.length, 1);
+  assert.deepEqual(period.candles[0].open, { numerator: "3000", denominator: "1" });
+  assert.deepEqual(period.candles[0].close, { numerator: "3200", denominator: "1" });
+  assert.equal(period.candles[0].baseVolumeRaw, "2000000000000000000");
+  assert.equal(period.candles[0].quoteVolumeRaw, "6200000000");
+  assert.equal(period.candles[0].tradeCount, 2);
+  assert.equal(period.candles[0].firstSource.transactionIndex, 0);
+  assert.equal(period.candles[0].lastSource.transactionIndex, 2);
+});
+
+test("duplicate zero-amount Swap positions are rejected before candle eligibility is considered", async () => {
+  const registry = await compactPairRegistry();
+  const pair = pairEntryBySymbol(registry, "ETH").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const rpc = new FakePairRpc({ registry, pair, finalizedNumber: activation + 1n });
+  const duplicate = pairSwapLog({
+    registry,
+    pair,
+    block: rpc.block(activation - 64n),
+    amount0: 0n,
+    amount1: -1n,
+  });
+  rpc.logs.push(duplicate, structuredClone(duplicate));
+  const store = await directoryStore(registry, "pair-duplicate-zero-amount-swap-");
+
+  await assert.rejects(
+    collectPairHistory({ registry, pairId: pair.pairId, store, rpc }),
+    /Swap source positions are duplicated or unordered across ranges/,
+  );
+  assert.equal(await readPairState({ registry, pairId: pair.pairId, store }), null);
+});
+
 test("one replacement data set remains continuous across UTC month and year boundaries", async () => {
   const registry = await compactPairRegistry({ activationTimestamp: "2026-12-31T23:30:00.000Z" });
   const pair = pairEntryBySymbol(registry, "NVDA").pair;

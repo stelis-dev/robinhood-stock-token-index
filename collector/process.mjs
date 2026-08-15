@@ -17,7 +17,7 @@ import {
 import { pairById } from "./pair-registry.mjs";
 import { RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
 import { blockTimestamp } from "./rpc-client.mjs";
-import { validateSwapLog, validateSwapLogBlockNumber } from "./swap.mjs";
+import { decodeSwapLog, validateSwapLogBlockNumber } from "./swap.mjs";
 
 function throwIfAborted(signal) {
   signal?.throwIfAborted();
@@ -171,15 +171,18 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
     const headers = logs.length === 0
       ? new Map()
       : await rpc.getBlockHeaders(blockNumbers, registry.collection.headerBatchSize);
-    accumulator.addTrades(logs.map((log, index) => {
+    const swaps = [];
+    for (let index = 0; index < logs.length; index += 1) {
+      const log = logs[index];
       const header = headers.get(blockNumbers[index].toString());
       if (!header) throw new Error("RPC omitted a block header for a Swap log.");
-      const trade = validateSwapLog(log, { registry, pair, block: header });
-      if (trade.blockTimestamp < rangeFromSeconds || trade.blockTimestamp >= rangeUntilSeconds) {
+      const decoded = decodeSwapLog(log, { registry, pair, block: header });
+      if (decoded.blockTimestamp < rangeFromSeconds || decoded.blockTimestamp >= rangeUntilSeconds) {
         throw new Error("Swap block timestamp is outside the fixed collection range.");
       }
-      return trade;
-    }));
+      swaps.push(decoded);
+    }
+    accumulator.addSwaps(swaps);
     cursor = rangeUntil;
   }
   return {

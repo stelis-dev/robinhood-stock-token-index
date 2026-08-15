@@ -26,7 +26,10 @@ Terms used in this file:
   boundary from which current collection moves forward and historical
   collection moves backward.
 - A **candle** is the open, high, low, close, volume, and trade count calculated
-  from actual `Swap` events in one UTC minute. A minute with no trade has no
+  from `Swap` events whose two pool balance deltas are non-zero and have
+  opposite signs. A structurally valid `Swap` with a zero delta for either
+  asset remains part of queried coverage but supplies no exchange ratio and
+  does not contribute to a candle. A minute with no contributing `Swap` has no
   candle. Its `firstSource` and `lastSource` fields identify the first and last
   contributing `Swap`; `source` here means an event position, not an RPC
   provider.
@@ -158,6 +161,10 @@ Terms used in this file:
 - Store processed candles and continuous coverage. Do not store raw RPC
   responses, invented candles, a general transaction index, the RPC provider
   used, or a storage URL.
+- Validate every returned `Swap` event before using or excluding it. When either
+  pool balance delta is zero, advance coverage without adding price, volume,
+  trade count, or source positions to a candle. Do not substitute the event's
+  post-swap `sqrtPriceX96` for an executed exchange ratio.
 - Change a state, month, or day `contractVersion` only when that file's stored
   schema or meaning changes. When stored schema and meaning remain the same,
   runtime, RPC, retry, fallback, registry, CLI, workflow, and storage changes do

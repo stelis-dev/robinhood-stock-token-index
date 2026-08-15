@@ -22,40 +22,41 @@ export class CandleAccumulator {
     this.maximumBuckets = maximumBuckets;
   }
 
-  addTrades(trades) {
-    if (!Array.isArray(trades)) throw new Error("Candle trades must be an array.");
-    const ordered = [...trades].sort((left, right) => compareSwapPosition(left.swapPosition, right.swapPosition));
-    for (const trade of ordered) {
-      if (trade.pairId !== this.pairId) throw new Error("A trade belongs to another pair.");
-      if (this.#lastSwapPosition && compareSwapPosition(this.#lastSwapPosition, trade.swapPosition) >= 0) {
+  addSwaps(swaps) {
+    if (!Array.isArray(swaps)) throw new Error("Decoded Swaps must be an array.");
+    const ordered = [...swaps].sort((left, right) => compareSwapPosition(left.swapPosition, right.swapPosition));
+    for (const swap of ordered) {
+      if (swap.pairId !== this.pairId) throw new Error("A Swap belongs to another pair.");
+      if (this.#lastSwapPosition && compareSwapPosition(this.#lastSwapPosition, swap.swapPosition) >= 0) {
         throw new Error("Swap source positions are duplicated or unordered across ranges.");
       }
-      this.#lastSwapPosition = trade.swapPosition;
-      const start = Math.floor(trade.blockTimestamp / this.candleSeconds) * this.candleSeconds;
+      this.#lastSwapPosition = swap.swapPosition;
+      if (swap.trade === null) continue;
+      const start = Math.floor(swap.blockTimestamp / this.candleSeconds) * this.candleSeconds;
       const existing = this.#buckets.get(start);
       if (existing) {
-        if (compareRational(trade.price, existing.high) > 0) existing.high = trade.price;
-        if (compareRational(trade.price, existing.low) < 0) existing.low = trade.price;
-        existing.close = trade.price;
-        existing.baseVolume += BigInt(trade.baseAmountRaw);
-        existing.quoteVolume += BigInt(trade.quoteAmountRaw);
+        if (compareRational(swap.trade.price, existing.high) > 0) existing.high = swap.trade.price;
+        if (compareRational(swap.trade.price, existing.low) < 0) existing.low = swap.trade.price;
+        existing.close = swap.trade.price;
+        existing.baseVolume += BigInt(swap.trade.baseAmountRaw);
+        existing.quoteVolume += BigInt(swap.trade.quoteAmountRaw);
         existing.tradeCount += 1;
-        existing.lastSource = trade.swapPosition;
+        existing.lastSource = swap.swapPosition;
         continue;
       }
       if (this.#buckets.size >= this.maximumBuckets) throw new Error("Candle bucket limit exceeded.");
       this.#buckets.set(start, {
         intervalStart: start,
         intervalEnd: start + this.candleSeconds,
-        open: trade.price,
-        high: trade.price,
-        low: trade.price,
-        close: trade.price,
-        baseVolume: BigInt(trade.baseAmountRaw),
-        quoteVolume: BigInt(trade.quoteAmountRaw),
+        open: swap.trade.price,
+        high: swap.trade.price,
+        low: swap.trade.price,
+        close: swap.trade.price,
+        baseVolume: BigInt(swap.trade.baseAmountRaw),
+        quoteVolume: BigInt(swap.trade.quoteAmountRaw),
         tradeCount: 1,
-        firstSource: trade.swapPosition,
-        lastSource: trade.swapPosition,
+        firstSource: swap.swapPosition,
+        lastSource: swap.swapPosition,
       });
     }
   }
