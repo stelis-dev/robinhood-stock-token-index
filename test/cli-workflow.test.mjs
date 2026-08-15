@@ -9,15 +9,15 @@ import {
   selectRpcUrls,
 } from "../cli.mjs";
 import { loadPairRegistry } from "../collector/pair-registry.mjs";
-import { loadCollectionGroupRegistry } from "../scheduler/collection-group-registry.mjs";
+import { loadCollectionPlan } from "../scheduler/collection-plan.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 
-test("the CLI admits one exact pair and keeps read-period and storage options on their owners", async () => {
+test("the CLI validates one PoolId and sends read and storage options to their responsible components", async () => {
   const registry = await loadPairRegistry();
   const pairId = pairEntryBySymbol(registry, "NVDA").pair.pairId;
   assert.deepEqual(parseArguments(["verify", "--pair", pairId, "--store", "directory", "--root", "/tmp/index"]), {
     operation: "verify",
-    pairId,
+    target: { kind: "pair", id: pairId },
     store: "directory",
     root: "/tmp/index",
     repository: undefined,
@@ -33,20 +33,20 @@ test("the CLI admits one exact pair and keeps read-period and storage options on
     "--repository", "owner/repo",
   ]), {
     operation: "read",
-    pairId,
+    target: { kind: "pair", id: pairId },
     store: "github",
     root: undefined,
     repository: "owner/repo",
     from: "2026-08-14T14:01:00.000Z",
     until: "2026-08-14T15:01:00.000Z",
   });
-  assert.throws(() => parseArguments(["verify", "--store", "directory", "--root", "/tmp/index"]), /--pair/);
+  assert.throws(() => parseArguments(["verify", "--store", "directory", "--root", "/tmp/index"]), /exactly one/);
   assert.throws(() => parseArguments(["read", "--pair", pairId, "--store", "directory", "--root", "/tmp/index"]), /--from and --until/);
   assert.throws(() => parseArguments(["collect", "--pair", pairId, "--from", "2026-08-14T14:01:00.000Z", "--store", "directory", "--root", "/tmp/index"]), /Only read/);
   assert.throws(() => parseArguments(["collect", "--pair", pairId, "--store", "github", "--repository", "owner/repo", "--root", "/tmp/index"]), /cannot cross/);
 });
 
-test("the CLI fixes the registry primary and admits only two contiguous secret URLs", async () => {
+test("the CLI fixes the registry primary and validates only two contiguous secret URLs", async () => {
   const registry = await loadPairRegistry();
   assert.deepEqual(selectRpcUrls(registry, {}), ["https://rpc.mainnet.chain.robinhood.com/"]);
   assert.deepEqual(selectRpcUrls(registry, {
@@ -66,7 +66,7 @@ test("the CLI fixes the registry primary and admits only two contiguous secret U
   assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://two.example/#token" }), /fragment/);
 });
 
-test("Actions logging reveals only attempt role and the fixed endpoint source name", () => {
+test("Actions logging reveals only the operation part and fixed endpoint source name", () => {
   const pairId = `0x${"1".repeat(64)}`;
   assert.equal(rpcEndpointSourceName(0), "registry.chain.primaryRpcUrl");
   assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
@@ -84,15 +84,11 @@ test("Actions logging reveals only attempt role and the fixed endpoint source na
   );
 });
 
-test("the workflow projects every admitted group onto exact queued schedule and manual targets", async () => {
+test("the workflow copies every configured cron and preserves queued and manual execution", async () => {
   const source = await readFile(new URL("../.github/workflows/index.yml", import.meta.url), "utf8");
   const pairRegistry = await loadPairRegistry();
-  const groupRegistry = await loadCollectionGroupRegistry(pairRegistry);
-  const expectedSchedules = [
-    ["7,52 0-23/3 * * *", "37 1-23/3 * * *", "22 2-23/3 * * *"],
-    ["22 0-23/3 * * *", "7,52 1-23/3 * * *", "37 2-23/3 * * *"],
-    ["37 0-23/3 * * *", "22 1-23/3 * * *", "7,52 2-23/3 * * *"],
-  ];
+  const collectionPlan = await loadCollectionPlan(pairRegistry);
+  const expectedSchedules = collectionPlan.groups.flatMap((group) => group.schedules);
   assert.match(source, /workflow_dispatch:/);
   assert.match(source, /targetKind:\n        description: Exact target kind/);
   assert.match(source, /targetId:\n        description: Exact pair or collection-group ID/);
@@ -106,17 +102,16 @@ test("the workflow projects every admitted group onto exact queued schedule and 
   assert.match(source, /permissions:\n      contents: write/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_1: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_1 \}\}/);
-  assert.match(source, /OPERATION=collect\n            TARGET_KIND=group/);
-  assert.match(source, /node cli\.mjs "\$\{OPERATION\}" --pair "\$\{TARGET_ID\}"/);
-  assert.match(source, /node group-cli\.mjs "\$\{OPERATION\}" --group "\$\{TARGET_ID\}"/);
+  assert.match(source, /OPERATION=collect\n            TARGET_FLAG=--schedule\n            TARGET_ID="\$\{SCHEDULE_EXPRESSION\}"/);
+  assert.match(source, /node cli\.mjs "\$\{OPERATION\}" "\$\{TARGET_FLAG\}" "\$\{TARGET_ID\}"/);
+  assert.deepEqual(
+    [...source.slice(source.indexOf("  operate:")).matchAll(/node ([^\s]+\.mjs)/g)].map((match) => match[1]),
+    ["cli.mjs"],
+  );
   assert.deepEqual(
     [...source.matchAll(/- cron: "([^"]+)"/g)].map((match) => match[1]),
-    expectedSchedules.flat(),
+    expectedSchedules,
   );
-  assert.deepEqual(groupRegistry.groups.map((group) => group.groupId), ["group-1", "group-2", "group-3"]);
-  for (const [index, schedules] of expectedSchedules.entries()) {
-    assert.ok(source.includes(`${schedules.map((schedule) => `"${schedule}"`).join("|")}) TARGET_ID=group-${index + 1} ;;`));
-  }
   for (const entry of pairRegistry.pairs) assert.doesNotMatch(source, new RegExp(entry.pair.pairId));
   const verifyJob = source.slice(source.indexOf("  verify:"), source.indexOf("  operate:"));
   const operateJob = source.slice(source.indexOf("  operate:"));

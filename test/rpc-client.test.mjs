@@ -45,7 +45,7 @@ test("the RPC client stops reading beyond the response byte boundary", async () 
     maximumResponseBytes: 16,
     fetchImplementation: async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "x".repeat(100) })),
   }));
-  await assert.rejects(client.call("eth_chainId", []), /byte limit/);
+  await assert.rejects(client.call("eth_chainId", []), /maximum byte size/);
 });
 
 test("the RPC client retries a 429 with the same request and honors Retry-After", async () => {
@@ -181,7 +181,7 @@ test("the RPC client bounds repeated transient failures", async () => {
   assert.deepEqual(waits, [1000, 1, 2000, 1]);
 });
 
-test("all server-side HTTP failures use the bounded availability path", async () => {
+test("all server-side HTTP failures receive the configured retries", async () => {
   let attempts = 0;
   const client = new RpcClient(clientOptions({
     maximumRpcAttempts: 2,
@@ -220,7 +220,7 @@ test("the RPC client retries HTTP 200 limit errors with the identical request", 
   assert.equal(new Set(bodies).size, 1);
 });
 
-test("a missing required block is retried by the endpoint before it is admitted", async () => {
+test("a missing required block is retried by the endpoint before it is validated", async () => {
   let attempts = 0;
   const client = new RpcClient(clientOptions({
     fetchImplementation: async () => {
@@ -238,7 +238,7 @@ test("a missing required block is retried by the endpoint before it is admitted"
   assert.equal(attempts, 2);
 });
 
-test("a batch retries as one request and never admits partial success", async () => {
+test("a batch retries as one request and never validates partial success", async () => {
   const bodies = [];
   let attempts = 0;
   const client = new RpcClient(clientOptions({
@@ -313,7 +313,7 @@ test("repeated JSON-RPC resource-not-found errors exhaust to the endpoint availa
   assert.equal(attempts, 3);
 });
 
-test("JSON-RPC internal errors use the bounded availability path", async () => {
+test("JSON-RPC internal errors receive the configured retries", async () => {
   let attempts = 0;
   const client = new RpcClient(clientOptions({
     maximumRpcAttempts: 2,
@@ -332,7 +332,7 @@ test("JSON-RPC internal errors use the bounded availability path", async () => {
   assert.equal(attempts, 2);
 });
 
-test("an oversized 429 is retried without admitting its body", async () => {
+test("an oversized 429 is retried without validating its body", async () => {
   let attempts = 0;
   const client = new RpcClient(clientOptions({
     maximumResponseBytes: 64,

@@ -222,7 +222,7 @@ test("repair rejects an endpoint behind the stored range and never reads past th
   assert.ok(fallback.blockSearches.every((search) => search.maximumBlock <= activation + 359n));
 });
 
-test("the endpoint runner admits only the fixed topology and exposes a static aggregate failure", async () => {
+test("the endpoint runner accepts at most three clients and returns one generic final error", async () => {
   const registry = await compactPairRegistry();
   const pairId = pairEntryBySymbol(registry, "NVDA").pair.pairId;
   let used = false;

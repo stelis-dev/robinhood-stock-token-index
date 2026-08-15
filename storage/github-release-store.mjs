@@ -1,23 +1,23 @@
 import {
-  admitCleanupPlan,
-  admitCarriedReference,
-  admitCarrierSequence,
-  admitPairId,
-  admitPairMonth,
-  admitStateBytes,
+  validateCleanupPlan,
+  validateStoredReference,
+  validateGeneration,
+  validatePairId,
+  validatePairMonth,
+  validateStateBytes,
   parseReferencedObjectName,
   parseStateObjectName,
   referenceObjectName,
   stateObjectName,
-  verifyCarriedReferenceBytes,
-} from "./carriage.mjs";
+  verifyStoredReferenceBytes,
+} from "./stored-files.mjs";
 
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 async function readBounded(response, maximumBytes) {
   const contentLength = response.headers?.get?.("content-length");
   if (contentLength && (!/^[0-9]+$/.test(contentLength) || BigInt(contentLength) > BigInt(maximumBytes))) {
-    throw new Error("GitHub response exceeds the admitted byte limit.");
+    throw new Error("GitHub response exceeds the maximum byte size.");
   }
   const chunks = [];
   let byteLength = 0;
@@ -29,7 +29,7 @@ async function readBounded(response, maximumBytes) {
       byteLength += value.byteLength;
       if (byteLength > maximumBytes) {
         await reader.cancel();
-        throw new Error("GitHub response exceeds the admitted byte limit.");
+        throw new Error("GitHub response exceeds the maximum byte size.");
       }
       chunks.push(Buffer.from(value));
     }
@@ -39,7 +39,7 @@ async function readBounded(response, maximumBytes) {
     chunks.push(value);
   }
   const bytes = Buffer.concat(chunks, byteLength);
-  if (bytes.byteLength > maximumBytes) throw new Error("GitHub response exceeds the admitted byte limit.");
+  if (bytes.byteLength > maximumBytes) throw new Error("GitHub response exceeds the maximum byte size.");
   return bytes;
 }
 
@@ -51,14 +51,14 @@ function parseJson(bytes, label) {
   }
 }
 
-function admitRelease(value, tag) {
+function validateRelease(value, tag) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || !Number.isSafeInteger(value.id) || value.id <= 0 || value.tag_name !== tag) {
     throw new Error("GitHub release response is invalid.");
   }
   return { id: value.id, tag };
 }
 
-function admitAsset(value) {
+function validateAsset(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || !Number.isSafeInteger(value.id) || value.id <= 0 || typeof value.name !== "string" || !Number.isSafeInteger(value.size) || value.size < 0) {
     throw new Error("GitHub release asset response is invalid.");
   }
@@ -66,15 +66,15 @@ function admitAsset(value) {
 }
 
 function stateTag(pairId) {
-  return `pair-${admitPairId(pairId)}-state`;
+  return `pair-${validatePairId(pairId)}-state`;
 }
 
 function monthTag(pairId, pairMonth) {
-  return `pair-${admitPairId(pairId)}-month-${admitPairMonth(pairMonth)}`;
+  return `pair-${validatePairId(pairId)}-month-${validatePairMonth(pairMonth)}`;
 }
 
 function referenceTag(reference) {
-  const identity = admitCarriedReference(reference);
+  const identity = validateStoredReference(reference);
   const pairMonth = identity.kind === "month" ? identity.period : identity.period.slice(0, 7);
   return monthTag(identity.pairId, pairMonth);
 }
@@ -187,7 +187,7 @@ export class GitHubReleaseStore {
   async #getRelease(tag) {
     if (this.#releases.has(tag)) return this.#releases.get(tag);
     const bytes = await this.#apiRequest(`/repos/${this.repository}/releases/tags/${encodeURIComponent(tag)}`, { allowNotFound: true });
-    const release = bytes === null ? null : admitRelease(parseJson(bytes, "GitHub release response"), tag);
+    const release = bytes === null ? null : validateRelease(parseJson(bytes, "GitHub release response"), tag);
     this.#releases.set(tag, release);
     return release;
   }
@@ -202,7 +202,7 @@ export class GitHubReleaseStore {
       body: requestBody,
       requestContentType: "application/vnd.github+json",
     });
-    const release = admitRelease(parseJson(bytes, "GitHub release creation response"), tag);
+    const release = validateRelease(parseJson(bytes, "GitHub release creation response"), tag);
     this.#releases.set(tag, release);
     return release;
   }
@@ -214,11 +214,11 @@ export class GitHubReleaseStore {
       const bytes = await this.#apiRequest(`/repos/${this.repository}/releases/${releaseId}/assets?per_page=100&page=${page}`);
       const values = parseJson(bytes, "GitHub release asset list");
       if (!Array.isArray(values)) throw new Error("GitHub release asset list is invalid.");
-      const part = values.map(admitAsset);
+      const part = values.map(validateAsset);
       output.push(...part);
-      if (output.length > 1_000) throw new Error("GitHub release asset list exceeds the admitted asset limit.");
+      if (output.length > 1_000) throw new Error("GitHub Release contains more than 1,000 assets.");
       if (part.length < 100) break;
-      if (page === 11) throw new Error("GitHub release asset list exceeds the admitted page limit.");
+      if (page === 11) throw new Error("GitHub Release asset listing exceeds 10 pages.");
     }
     const names = new Set();
     for (const asset of output) {
@@ -230,7 +230,7 @@ export class GitHubReleaseStore {
   }
 
   async #downloadAsset(asset) {
-    if (asset.size > this.#maximumArtifactBytes) throw new Error("GitHub asset exceeds the admitted byte limit.");
+    if (asset.size > this.#maximumArtifactBytes) throw new Error("GitHub asset exceeds the maximum byte size.");
     return this.#apiRequest(`/repos/${this.repository}/releases/assets/${asset.id}`, {
       accept: "application/octet-stream",
       maximumBytes: this.#maximumArtifactBytes,
@@ -246,9 +246,9 @@ export class GitHubReleaseStore {
       if (!stored.equals(bytes)) throw new Error("GitHub immutable asset differs from the requested bytes.");
       return existing;
     }
-    if (assets.length >= 1_000) throw new Error("GitHub release has reached the admitted asset limit.");
+    if (assets.length >= 1_000) throw new Error("GitHub Release has reached 1,000 assets.");
     const uploadedBytes = await this.#uploadRequest(release.id, name, bytes);
-    const uploaded = admitAsset(parseJson(uploadedBytes, "GitHub asset upload response"));
+    const uploaded = validateAsset(parseJson(uploadedBytes, "GitHub asset upload response"));
     if (uploaded.name !== name || uploaded.size !== bytes.byteLength) throw new Error("GitHub asset upload identity is invalid.");
     const stored = await this.#downloadAsset(uploaded);
     if (!stored.equals(bytes)) throw new Error("GitHub uploaded asset differs from the requested bytes.");
@@ -278,7 +278,7 @@ export class GitHubReleaseStore {
       .sort((left, right) => left.sequence - right.sequence);
     if (candidates.length === 0) return null;
     const selected = candidates.at(-1);
-    const gzipBytes = admitStateBytes(
+    const gzipBytes = validateStateBytes(
       await this.#downloadPublic(release.tag, selected.asset.name),
       this.#maximumArtifactBytes,
     );
@@ -288,34 +288,34 @@ export class GitHubReleaseStore {
   async readReferenced(reference) {
     const tag = referenceTag(reference);
     const name = referenceObjectName(reference);
-    return verifyCarriedReferenceBytes(reference, await this.#downloadPublic(tag, name), this.#maximumArtifactBytes);
+    return verifyStoredReferenceBytes(reference, await this.#downloadPublic(tag, name), this.#maximumArtifactBytes);
   }
 
   async resolvePairMonth(pairId, pairMonth) {
-    admitPairId(pairId);
-    admitPairMonth(pairMonth);
+    validatePairId(pairId);
+    validatePairMonth(pairMonth);
     return "present";
   }
 
   async writeReferenced(reference, gzipBytes) {
     this.#requireWriteToken();
-    verifyCarriedReferenceBytes(reference, gzipBytes, this.#maximumArtifactBytes);
+    verifyStoredReferenceBytes(reference, gzipBytes, this.#maximumArtifactBytes);
     const release = await this.#ensureRelease(referenceTag(reference));
     await this.#uploadImmutable(release, referenceObjectName(reference), gzipBytes);
   }
 
   async writeState(pairId, sequence, gzipBytes) {
     this.#requireWriteToken();
-    admitPairId(pairId);
-    admitCarrierSequence(sequence);
-    admitStateBytes(gzipBytes, this.#maximumArtifactBytes);
+    validatePairId(pairId);
+    validateGeneration(sequence);
+    validateStateBytes(gzipBytes, this.#maximumArtifactBytes);
     const release = await this.#ensureRelease(stateTag(pairId));
     await this.#uploadImmutable(release, stateObjectName(sequence), gzipBytes);
   }
 
   async cleanupSelectedGeneration(input) {
     this.#requireWriteToken();
-    const plan = admitCleanupPlan(input);
+    const plan = validateCleanupPlan(input);
     let phase = "selected_state_proof";
     let pairMonth;
     let objectKind;
@@ -324,7 +324,7 @@ export class GitHubReleaseStore {
       if (!stateRelease) throw new Error("Selected-state Release is unavailable during cleanup.");
       const stateAssets = [...await this.#listAssets(stateRelease.id)];
       if (!stateAssets.some((asset) => asset.name === plan.selectedStateName)) {
-        throw new Error("Selected state carrier is unavailable during cleanup.");
+        throw new Error("Selected state file is unavailable during cleanup.");
       }
 
       phase = "changed_month_proof";

@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { isCanonicalHexQuantity, parseHexQuantity, safeHexQuantityNumber } from "./hex-quantity.mjs";
-import { admitRpcUrl, maximumRpcBatchSize, RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
+import { validateRpcUrl, maximumRpcBatchSize, RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
 
 const allowedMethods = new Set(["eth_chainId", "eth_getBlockByNumber", "eth_getLogs"]);
 const accessDeniedHttpStatuses = new Set([401, 403]);
@@ -17,7 +17,7 @@ function exactBlock(candidate) {
   return { hash: candidate.hash, number: candidate.number, timestamp: candidate.timestamp };
 }
 
-function admitRpcResult(result, request) {
+function validateRpcResult(result, request) {
   if (request.method === "eth_chainId") {
     parseHexQuantity(result, "chain ID");
     return { result };
@@ -35,17 +35,17 @@ function admitRpcResult(result, request) {
     if (!Array.isArray(result)) throw new Error("RPC log result is not an array.");
     return { result };
   }
-  throw new Error("RPC response method is not admitted.");
+  throw new Error("RPC response method is unsupported.");
 }
 
-function admitRpcEntry(entry, request) {
+function validateRpcEntry(entry, request) {
   if (entry === null || typeof entry !== "object" || Array.isArray(entry) || entry.jsonrpc !== "2.0" || entry.id !== request.id) {
     throw new Error("RPC response envelope is invalid.");
   }
   const hasResult = Object.hasOwn(entry, "result");
   const hasError = Object.hasOwn(entry, "error");
   if (hasResult === hasError) throw new Error("RPC response must contain exactly one result or error.");
-  if (hasResult) return admitRpcResult(entry.result, request);
+  if (hasResult) return validateRpcResult(entry.result, request);
   if (entry.error === null || typeof entry.error !== "object" || Array.isArray(entry.error) || !Number.isSafeInteger(entry.error.code) || typeof entry.error.message !== "string") {
     throw new Error("RPC error response is invalid.");
   }
@@ -54,7 +54,7 @@ function admitRpcEntry(entry, request) {
   throw new Error(`RPC ${request.method} failed with code ${entry.error.code}.`);
 }
 
-function admitRpcResponse(value, requests, batch) {
+function validateRpcResponse(value, requests, batch) {
   const entries = batch ? value : [value];
   if (!Array.isArray(entries) || entries.length !== requests.length) {
     throw new Error(batch ? "RPC batch response count is invalid." : "RPC response envelope is invalid.");
@@ -73,10 +73,10 @@ function admitRpcResponse(value, requests, batch) {
   for (const request of requests) {
     const entry = byId.get(request.id);
     if (entry === undefined) throw new Error(batch ? "RPC batch response omitted an ID." : "RPC response envelope is invalid.");
-    const admitted = admitRpcEntry(entry, request);
-    if (admitted.unavailable === true) unavailable = true;
-    if (admitted.retryable === true) retryable = true;
-    results.push(admitted.result);
+    const validated = validateRpcEntry(entry, request);
+    if (validated.unavailable === true) unavailable = true;
+    if (validated.retryable === true) retryable = true;
+    results.push(validated.result);
   }
   if (unavailable) return { unavailable };
   return retryable ? { retryable } : { results };
@@ -85,7 +85,7 @@ function admitRpcResponse(value, requests, batch) {
 async function readBoundedResponse(response, maximumResponseBytes) {
   const contentLength = response.headers?.get?.("content-length");
   if (contentLength !== null && contentLength !== undefined && Number(contentLength) > maximumResponseBytes) {
-    throw new RpcResponseBoundaryError("RPC response exceeds the admitted byte limit.");
+    throw new RpcResponseBoundaryError("RPC response exceeds the maximum byte size.");
   }
   const chunks = [];
   let byteLength = 0;
@@ -101,7 +101,7 @@ async function readBoundedResponse(response, maximumResponseBytes) {
         } catch {
           // The response-size boundary remains authoritative over stream cleanup.
         }
-        throw new RpcResponseBoundaryError("RPC response exceeds the admitted byte limit.");
+        throw new RpcResponseBoundaryError("RPC response exceeds the maximum byte size.");
       }
       chunks.push(Buffer.from(value));
     }
@@ -111,7 +111,7 @@ async function readBoundedResponse(response, maximumResponseBytes) {
     chunks.push(value);
   }
   const bytes = Buffer.concat(chunks, byteLength);
-  if (bytes.byteLength > maximumResponseBytes) throw new RpcResponseBoundaryError("RPC response exceeds the admitted byte limit.");
+  if (bytes.byteLength > maximumResponseBytes) throw new RpcResponseBoundaryError("RPC response exceeds the maximum byte size.");
   return bytes;
 }
 
@@ -158,7 +158,7 @@ export class RpcClient {
     nowImplementation = Date.now,
     signal,
   }) {
-    this.#url = admitRpcUrl(url);
+    this.#url = validateRpcUrl(url);
     for (const [label, value] of [
       ["request delay", requestDelayMilliseconds],
       ["request timeout", requestTimeoutMilliseconds],
@@ -245,19 +245,19 @@ export class RpcClient {
       } catch {
         throw new Error("RPC response is not JSON.");
       }
-      const admitted = admitRpcResponse(value, requests, batch);
-      if (admitted.unavailable === true) throw new RpcEndpointUnavailableError();
-      if (admitted.retryable === true) {
+      const validated = validateRpcResponse(value, requests, batch);
+      if (validated.unavailable === true) throw new RpcEndpointUnavailableError();
+      if (validated.retryable === true) {
         await this.#retry(attempt);
         continue;
       }
-      return admitted.results;
+      return validated.results;
     }
     throw new Error("RPC attempts were exhausted.");
   }
 
   async call(method, params) {
-    if (!allowedMethods.has(method)) throw new Error(`RPC method is not admitted: ${method}`);
+    if (!allowedMethods.has(method)) throw new Error(`RPC method is unsupported: ${method}`);
     const id = ++this.#id;
     const [result] = await this.#execute([{ jsonrpc: "2.0", id, method, params }], false);
     return result;
@@ -266,7 +266,7 @@ export class RpcClient {
   async batch(calls) {
     if (!Array.isArray(calls) || calls.length === 0 || calls.length > maximumRpcBatchSize) throw new Error("RPC batch size is invalid.");
     const requests = calls.map(({ method, params }) => {
-      if (!allowedMethods.has(method)) throw new Error(`RPC method is not admitted: ${method}`);
+      if (!allowedMethods.has(method)) throw new Error(`RPC method is unsupported: ${method}`);
       return { jsonrpc: "2.0", id: ++this.#id, method, params };
     });
     return this.#execute(requests, true);

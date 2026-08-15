@@ -1,18 +1,18 @@
 import { link, mkdir, open, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  admitCleanupPlan,
-  admitCarriedReference,
-  admitCarrierSequence,
-  admitPairId,
-  admitPairMonth,
-  admitStateBytes,
+  validateCleanupPlan,
+  validateStoredReference,
+  validateGeneration,
+  validatePairId,
+  validatePairMonth,
+  validateStateBytes,
   parseReferencedObjectName,
   parseStateObjectName,
   referenceObjectName,
   stateObjectName,
-  verifyCarriedReferenceBytes,
-} from "./carriage.mjs";
+  verifyStoredReferenceBytes,
+} from "./stored-files.mjs";
 
 async function entries(path) {
   try {
@@ -28,7 +28,7 @@ async function readBoundedFile(path, maximumBytes) {
   try {
     const information = await file.stat();
     if (!information.isFile() || information.size <= 0 || information.size > maximumBytes) {
-      throw new Error("Stored file exceeds the admitted byte boundary.");
+      throw new Error("Stored file exceeds the maximum byte size.");
     }
     const bytes = Buffer.alloc(information.size);
     let offset = 0;
@@ -61,7 +61,7 @@ async function immutableWrite(path, bytes, maximumBytes) {
 }
 
 function referenceDirectory(root, reference) {
-  const identity = admitCarriedReference(reference);
+  const identity = validateStoredReference(reference);
   const pairRoot = join(root, "pairs", identity.pairId);
   const pairMonth = identity.kind === "month" ? identity.period : identity.period.slice(0, 7);
   return join(pairRoot, "months", pairMonth);
@@ -80,7 +80,7 @@ export class DirectoryStore {
   }
 
   async readSelectedState(pairId) {
-    admitPairId(pairId);
+    validatePairId(pairId);
     const directory = join(this.root, "pairs", pairId, "state");
     const candidates = (await entries(directory))
       .filter((entry) => entry.isFile())
@@ -89,12 +89,12 @@ export class DirectoryStore {
       .sort((left, right) => left.sequence - right.sequence);
     if (candidates.length === 0) return null;
     const selected = candidates.at(-1);
-    const gzipBytes = admitStateBytes(await readBoundedFile(join(directory, selected.name), this.maximumArtifactBytes), this.maximumArtifactBytes);
+    const gzipBytes = validateStateBytes(await readBoundedFile(join(directory, selected.name), this.maximumArtifactBytes), this.maximumArtifactBytes);
     return { sequence: selected.sequence, gzipBytes };
   }
 
   async readReferenced(reference) {
-    return verifyCarriedReferenceBytes(
+    return verifyStoredReferenceBytes(
       reference,
       await readBoundedFile(referencePath(this.root, reference), this.maximumArtifactBytes),
       this.maximumArtifactBytes,
@@ -102,33 +102,33 @@ export class DirectoryStore {
   }
 
   async resolvePairMonth(pairId, pairMonth) {
-    admitPairId(pairId);
-    admitPairMonth(pairMonth);
+    validatePairId(pairId);
+    validatePairMonth(pairMonth);
     return "present";
   }
 
   async writeReferenced(reference, gzipBytes) {
-    verifyCarriedReferenceBytes(reference, gzipBytes, this.maximumArtifactBytes);
+    verifyStoredReferenceBytes(reference, gzipBytes, this.maximumArtifactBytes);
     const directory = referenceDirectory(this.root, reference);
     await mkdir(directory, { recursive: true });
     await immutableWrite(join(directory, referenceObjectName(reference)), gzipBytes, this.maximumArtifactBytes);
   }
 
   async writeState(pairId, sequence, gzipBytes) {
-    admitPairId(pairId);
-    admitCarrierSequence(sequence);
-    admitStateBytes(gzipBytes, this.maximumArtifactBytes);
+    validatePairId(pairId);
+    validateGeneration(sequence);
+    validateStateBytes(gzipBytes, this.maximumArtifactBytes);
     const directory = join(this.root, "pairs", pairId, "state");
     await mkdir(directory, { recursive: true });
     await immutableWrite(join(directory, stateObjectName(sequence)), gzipBytes, this.maximumArtifactBytes);
   }
 
   async cleanupSelectedGeneration(input) {
-    const plan = admitCleanupPlan(input);
+    const plan = validateCleanupPlan(input);
     const stateDirectory = join(this.root, "pairs", plan.pairId, "state");
     const stateEntries = await entries(stateDirectory);
     if (!stateEntries.some((entry) => entry.isFile() && entry.name === plan.selectedStateName)) {
-      throw new Error("Selected state carrier is unavailable during cleanup.");
+      throw new Error("Selected state file is unavailable during cleanup.");
     }
 
     const scopes = [];

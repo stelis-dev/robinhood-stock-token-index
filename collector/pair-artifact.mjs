@@ -52,7 +52,7 @@ function pairDescriptor(value, registry) {
   return expected;
 }
 
-export function admitPairCoverage(value, label = "coverage") {
+export function validatePairCoverage(value, label = "coverage") {
   exactKeys(value, ["fromBlock", "fromTimestamp", "untilBlock", "untilTimestamp"], label);
   const fromBlock = decimalString(value.fromBlock, `${label}.fromBlock`);
   const untilBlock = decimalString(value.untilBlock, `${label}.untilBlock`);
@@ -75,7 +75,7 @@ function gcd(left, right) {
   return a;
 }
 
-function admitRational(value, label) {
+function validateRational(value, label) {
   exactKeys(value, ["denominator", "numerator"], label);
   if (typeof value.numerator !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value.numerator)) throw new Error(`${label} numerator is invalid.`);
   const numerator = BigInt(value.numerator);
@@ -89,7 +89,8 @@ function compareRational(left, right) {
   return result < 0n ? -1 : result > 0n ? 1 : 0;
 }
 
-function admitSource(value, label) {
+// Stored firstSource and lastSource values are exact positions of Swap events.
+function validateSwapPosition(value, label) {
   exactKeys(value, ["blockHash", "blockNumber", "logIndex", "transactionHash", "transactionIndex"], label);
   decimalString(value.blockNumber, `${label}.blockNumber`);
   if (!/^0x[0-9a-f]{64}$/.test(value.blockHash) || !/^0x[0-9a-f]{64}$/.test(value.transactionHash)) throw new Error(`${label} hash is invalid.`);
@@ -99,14 +100,14 @@ function admitSource(value, label) {
   return value;
 }
 
-function compareSourceCoordinates(left, right) {
+function compareSwapPositions(left, right) {
   const block = BigInt(left.blockNumber) - BigInt(right.blockNumber);
   if (block !== 0n) return block < 0n ? -1 : 1;
   if (left.transactionIndex !== right.transactionIndex) return left.transactionIndex < right.transactionIndex ? -1 : 1;
   return left.logIndex < right.logIndex ? -1 : left.logIndex > right.logIndex ? 1 : 0;
 }
 
-function sourceIdentities() {
+function swapPositionIdentities() {
   return {
     blockHashByNumber: new Map(),
     blockNumberByHash: new Map(),
@@ -115,8 +116,8 @@ function sourceIdentities() {
   };
 }
 
-function admitSourceIdentity(value, label, identities) {
-  admitSource(value, label);
+function validateSwapPositionIdentity(value, label, identities) {
+  validateSwapPosition(value, label);
   const knownBlockHash = identities.blockHashByNumber.get(value.blockNumber);
   const knownBlockNumber = identities.blockNumberByHash.get(value.blockHash);
   if (
@@ -142,10 +143,10 @@ function admitSourceIdentity(value, label, identities) {
   return value;
 }
 
-function admitOrderedSourceRelationship(first, last, firstLabel, lastLabel, identities = sourceIdentities()) {
-  admitSourceIdentity(first, firstLabel, identities);
-  admitSourceIdentity(last, lastLabel, identities);
-  const order = compareSourceCoordinates(first, last);
+function validateSwapPositionOrder(first, last, firstLabel, lastLabel, identities = swapPositionIdentities()) {
+  validateSwapPositionIdentity(first, firstLabel, identities);
+  validateSwapPositionIdentity(last, lastLabel, identities);
+  const order = compareSwapPositions(first, last);
   if (order > 0) throw new Error("Candle source range is inverted.");
   const sameBlockCoordinate = first.blockNumber === last.blockNumber;
   if (sameBlockCoordinate && order < 0 && first.logIndex >= last.logIndex) {
@@ -154,14 +155,14 @@ function admitOrderedSourceRelationship(first, last, firstLabel, lastLabel, iden
   return order;
 }
 
-function admitSourceSpan(first, last, tradeCount) {
-  const order = admitOrderedSourceRelationship(first, last, "candle.firstSource", "candle.lastSource");
+function validateCandleSwapSpan(first, last, tradeCount) {
+  const order = validateSwapPositionOrder(first, last, "candle.firstSource", "candle.lastSource");
   if (tradeCount === 1 && order !== 0 || tradeCount > 1 && order === 0) {
     throw new Error("Candle trade count does not match its source span.");
   }
 }
 
-export function admitPairCandle(value, { expectedDay, coverage } = {}) {
+export function validatePairCandle(value, { expectedDay, coverage } = {}) {
   exactKeys(value, [
     "baseVolumeRaw",
     "close",
@@ -178,7 +179,7 @@ export function admitPairCandle(value, { expectedDay, coverage } = {}) {
   const start = instant(value.intervalStart, "candle.intervalStart");
   const end = instant(value.intervalEnd, "candle.intervalEnd");
   if (end - start !== 60_000 || expectedDay !== undefined && !value.intervalStart.startsWith(expectedDay)) throw new Error("Candle interval is invalid.");
-  for (const key of ["open", "high", "low", "close"]) admitRational(value[key], `candle.${key}`);
+  for (const key of ["open", "high", "low", "close"]) validateRational(value[key], `candle.${key}`);
   if (compareRational(value.high, value.open) < 0 || compareRational(value.high, value.close) < 0 || compareRational(value.low, value.open) > 0 || compareRational(value.low, value.close) > 0 || compareRational(value.high, value.low) < 0) {
     throw new Error("Candle price bounds are invalid.");
   }
@@ -186,26 +187,26 @@ export function admitPairCandle(value, { expectedDay, coverage } = {}) {
     throw new Error("Candle volumes must be positive.");
   }
   positiveInteger(value.tradeCount, "candle.tradeCount");
-  admitSourceSpan(value.firstSource, value.lastSource, value.tradeCount);
+  validateCandleSwapSpan(value.firstSource, value.lastSource, value.tradeCount);
   if (coverage && (value.intervalStart < coverage.fromTimestamp || value.intervalEnd > coverage.untilTimestamp || BigInt(value.firstSource.blockNumber) < BigInt(coverage.fromBlock) || BigInt(value.lastSource.blockNumber) >= BigInt(coverage.untilBlock))) {
-    throw new Error("Candle is outside admitted coverage.");
+    throw new Error("Candle is outside its enclosing coverage.");
   }
   return value;
 }
 
-export function admitPairCandleSequence(value, candleContext = {}) {
+export function validatePairCandleSequence(value, candleContext = {}) {
   if (!Array.isArray(value)) throw new Error("Pair candles must be an array.");
-  const identities = sourceIdentities();
+  const identities = swapPositionIdentities();
   let previous;
   for (const candle of value) {
-    admitPairCandle(candle, candleContext);
-    admitSourceIdentity(candle.firstSource, "candle.firstSource", identities);
-    admitSourceIdentity(candle.lastSource, "candle.lastSource", identities);
+    validatePairCandle(candle, candleContext);
+    validateSwapPositionIdentity(candle.firstSource, "candle.firstSource", identities);
+    validateSwapPositionIdentity(candle.lastSource, "candle.lastSource", identities);
     if (previous !== undefined) {
       if (candle.intervalStart <= previous.intervalStart) {
         throw new Error("Pair candles are duplicated or unordered.");
       }
-      admitOrderedSourceRelationship(
+      validateSwapPositionOrder(
         previous.lastSource,
         candle.firstSource,
         "previous candle.lastSource",
@@ -221,6 +222,7 @@ export function admitPairCandleSequence(value, candleContext = {}) {
   return value;
 }
 
+// This ID names pair data independently of its publication generation and storage location.
 function logicalId(kind, pairId, period) {
   if (!/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Logical pair identity is invalid.");
   const suffix = period === undefined ? "state" : `${kind}/${period}`;
@@ -250,10 +252,10 @@ export function createPairReference({ encoded, context }) {
   const child = decoded.value;
   let identity;
   if (child.kind === "pair_candle_month") {
-    admitPairMonth(child, context);
+    validatePairMonth(child, context);
     identity = pairMonthLogicalId(child.pair.pairId, child.month);
   } else if (child.kind === "pair_candle_day") {
-    admitPairDay(child, context);
+    validatePairDay(child, context);
     identity = pairDayLogicalId(child.pair.pairId, child.day);
   } else {
     throw new Error("Only a pair month or day can be referenced.");
@@ -267,20 +269,20 @@ export function createPairReference({ encoded, context }) {
     gzipBytes: encoded.gzipBytes.byteLength,
     gzipSha256: decoded.gzipSha256,
   };
-  return admitPairReference(reference, { maximumArtifactBytes });
+  return validatePairReference(reference, { maximumArtifactBytes });
 }
 
-function admitPairReference(value, { logicalId: expectedLogicalId, maximumSequence, maximumArtifactBytes }) {
+function validatePairReference(value, { logicalId: expectedLogicalId, maximumSequence, maximumArtifactBytes }) {
   exactKeys(value, ["coverage", "gzipBytes", "gzipSha256", "jsonBytes", "jsonSha256", "logicalId", "sequence"], "artifact reference");
   positiveInteger(maximumArtifactBytes, "maximum artifact bytes");
   const identity = typeof value.logicalId === "string" ? value.logicalId.match(/^pairs\/(0x[0-9a-f]{64})\/(months|days)\/(.+)$/) : null;
   if (!identity) {
-    throw new Error("Reference logical identity is invalid.");
+    throw new Error("Stored reference ID is invalid.");
   }
-  if (expectedLogicalId !== undefined && value.logicalId !== expectedLogicalId) throw new Error("Reference logical identity does not match its owner.");
+  if (expectedLogicalId !== undefined && value.logicalId !== expectedLogicalId) throw new Error("Stored reference ID does not match its parent file.");
   positiveInteger(value.sequence, "reference sequence");
-  if (maximumSequence !== undefined && value.sequence > maximumSequence) throw new Error("Reference sequence exceeds its owner.");
-  admitPairCoverage(value.coverage, "reference coverage");
+  if (maximumSequence !== undefined && value.sequence > maximumSequence) throw new Error("Reference generation is newer than its parent file.");
+  validatePairCoverage(value.coverage, "reference coverage");
   let periodStart;
   let periodUntil;
   if (identity[2] === "months") {
@@ -303,7 +305,7 @@ function admitPairReference(value, { logicalId: expectedLogicalId, maximumSequen
   return value;
 }
 
-function admitHeader(value, { registry, kind }) {
+function validateHeader(value, { registry, kind }) {
   exactKeys(value, kind.keys, kind.label);
   if (value.contractVersion !== "1" || value.kind !== kind.value) throw new Error(`${kind.label} identity is invalid.`);
   pairDescriptor(value.pair, registry);
@@ -325,12 +327,12 @@ function intersectedKeys(fromTimestamp, untilTimestamp, size) {
   return keys;
 }
 
-function admitOrderedReferences(references, expectedLogicalIds, ownerSequence, maximumArtifactBytes, parentCoverage, label) {
+function validateOrderedReferences(references, expectedLogicalIds, ownerSequence, maximumArtifactBytes, parentCoverage, label) {
   if (!Array.isArray(references) || references.length !== expectedLogicalIds.length) throw new Error(`${label} references do not cover their interval.`);
   let cursorBlock = parentCoverage.fromBlock;
   let cursorTimestamp = parentCoverage.fromTimestamp;
   for (let index = 0; index < references.length; index += 1) {
-    admitPairReference(references[index], {
+    validatePairReference(references[index], {
       logicalId: expectedLogicalIds[index],
       maximumSequence: ownerSequence,
       maximumArtifactBytes,
@@ -341,20 +343,20 @@ function admitOrderedReferences(references, expectedLogicalIds, ownerSequence, m
     cursorBlock = references[index].coverage.untilBlock;
     cursorTimestamp = references[index].coverage.untilTimestamp;
   }
-  if (cursorBlock !== parentCoverage.untilBlock || cursorTimestamp !== parentCoverage.untilTimestamp) throw new Error(`${label} references do not reach their owner coverage.`);
+  if (cursorBlock !== parentCoverage.untilBlock || cursorTimestamp !== parentCoverage.untilTimestamp) throw new Error(`${label} references do not cover the complete parent range.`);
   if (!references.some((reference) => reference.sequence === ownerSequence)) {
-    throw new Error(`${label} references do not contain an owner-generation child.`);
+    throw new Error(`${label} references do not include a file written in the parent generation.`);
   }
 }
 
-export function admitPairState(value, { registry }) {
+export function validatePairState(value, { registry }) {
   const kind = {
     label: "pair state",
     value: "pair_candle_state",
     keys: ["contractVersion", "coverage", "kind", "months", "pair", "sequence"],
   };
-  admitHeader(value, { registry, kind });
-  admitPairCoverage(value.coverage, "state coverage");
+  validateHeader(value, { registry, kind });
+  validatePairCoverage(value.coverage, "state coverage");
   const pair = pairById(registry, value.pair.pairId).pair;
   const fromBlock = BigInt(value.coverage.fromBlock);
   const untilBlock = BigInt(value.coverage.untilBlock);
@@ -364,7 +366,7 @@ export function admitPairState(value, { registry }) {
     throw new Error("State coverage is outside pair history and activation bounds.");
   }
   const months = intersectedKeys(value.coverage.fromTimestamp, value.coverage.untilTimestamp, "month");
-  admitOrderedReferences(
+  validateOrderedReferences(
     value.months,
     months.map((entry) => pairMonthLogicalId(pair.pairId, entry)),
     value.sequence,
@@ -375,22 +377,22 @@ export function admitPairState(value, { registry }) {
   return value;
 }
 
-export function admitPairMonth(value, { registry }) {
+export function validatePairMonth(value, { registry }) {
   const kind = {
     label: "pair month",
     value: "pair_candle_month",
     keys: ["contractVersion", "coverage", "days", "kind", "month", "pair", "sequence"],
   };
-  admitHeader(value, { registry, kind });
+  validateHeader(value, { registry, kind });
   month(value.month, "pair month");
-  admitPairCoverage(value.coverage, "month coverage");
+  validatePairCoverage(value.coverage, "month coverage");
   const monthStart = `${value.month}-01T00:00:00.000Z`;
   const nextMonth = new Date(monthStart);
   nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
   const monthUntil = nextMonth.toISOString();
   if (value.coverage.fromTimestamp < monthStart || value.coverage.untilTimestamp > monthUntil) throw new Error("Month coverage escapes its UTC month.");
   const days = intersectedKeys(value.coverage.fromTimestamp, value.coverage.untilTimestamp, "day");
-  admitOrderedReferences(
+  validateOrderedReferences(
     value.days,
     days.map((entry) => pairDayLogicalId(value.pair.pairId, entry)),
     value.sequence,
@@ -401,33 +403,33 @@ export function admitPairMonth(value, { registry }) {
   return value;
 }
 
-export function admitPairDay(value, { registry }) {
+export function validatePairDay(value, { registry }) {
   const kind = {
     label: "pair day",
     value: "pair_candle_day",
     keys: ["candles", "contractVersion", "coverage", "day", "kind", "pair", "sequence"],
   };
-  admitHeader(value, { registry, kind });
+  validateHeader(value, { registry, kind });
   day(value.day, "pair day");
-  admitPairCoverage(value.coverage, "day coverage");
+  validatePairCoverage(value.coverage, "day coverage");
   const dayStart = `${value.day}T00:00:00.000Z`;
   const dayUntil = new Date(Date.parse(dayStart) + 86_400_000).toISOString();
   if (value.coverage.fromTimestamp < dayStart || value.coverage.untilTimestamp > dayUntil) throw new Error("Day coverage escapes its UTC day.");
   if (!Array.isArray(value.candles) || value.candles.length > 1_440) throw new Error("Pair day candle count is invalid.");
-  admitPairCandleSequence(value.candles, { expectedDay: value.day, coverage: value.coverage });
+  validatePairCandleSequence(value.candles, { expectedDay: value.day, coverage: value.coverage });
   return value;
 }
 
-function encode(value, context, admission) {
-  const encoded = encodeArtifact(admission(value, context));
+function encode(value, context, validation) {
+  const encoded = encodeArtifact(validation(value, context));
   if (encoded.jsonBytes.byteLength > context.registry.collection.maximumArtifactBytes || encoded.gzipBytes.byteLength > context.registry.collection.maximumArtifactBytes) {
-    throw new Error("Pair artifact exceeds the admitted byte limit.");
+    throw new Error("Pair data file exceeds the maximum byte size.");
   }
   return encoded;
 }
 
-function decodeReferencedPairArtifact(bytes, context, reference, admission) {
-  admitPairReference(reference, { maximumArtifactBytes: context.registry.collection.maximumArtifactBytes });
+function decodeReferencedPairArtifact(bytes, context, reference, validation) {
+  validatePairReference(reference, { maximumArtifactBytes: context.registry.collection.maximumArtifactBytes });
   if (!Buffer.isBuffer(bytes) || bytes.byteLength !== reference.gzipBytes || sha256Hex(bytes) !== reference.gzipSha256) {
     throw new Error("Stored bytes do not match their reference.");
   }
@@ -435,7 +437,7 @@ function decodeReferencedPairArtifact(bytes, context, reference, admission) {
   if (decoded.jsonBytes.byteLength !== reference.jsonBytes || decoded.jsonSha256 !== reference.jsonSha256) {
     throw new Error("Decoded artifact does not match its reference.");
   }
-  const value = admission(decoded.value, context);
+  const value = validation(decoded.value, context);
   if (value.sequence !== reference.sequence) throw new Error("Artifact sequence does not match its reference.");
   if (!canonicalBytes(value.coverage).equals(canonicalBytes(reference.coverage))) throw new Error("Artifact coverage does not match its reference.");
   const expectedLogicalId = value.kind === "pair_candle_month"
@@ -446,29 +448,29 @@ function decodeReferencedPairArtifact(bytes, context, reference, admission) {
 }
 
 export function encodePairState(value, context) {
-  return encode(value, context, admitPairState);
+  return encode(value, context, validatePairState);
 }
 
 export function encodePairMonth(value, context) {
-  return encode(value, context, admitPairMonth);
+  return encode(value, context, validatePairMonth);
 }
 
 export function encodePairDay(value, context) {
-  return encode(value, context, admitPairDay);
+  return encode(value, context, validatePairDay);
 }
 
 export function decodePairState(bytes, context, expectedPairId) {
   pairById(context.registry, expectedPairId);
   const decoded = decodeArtifact(bytes, context.registry.collection.maximumArtifactBytes);
-  const value = admitPairState(decoded.value, context);
-  if (value.pair.pairId !== expectedPairId) throw new Error("Pair state does not match its requested logical identity.");
+  const value = validatePairState(decoded.value, context);
+  if (value.pair.pairId !== expectedPairId) throw new Error("Pair state does not match the requested pair ID.");
   return value;
 }
 
 export function decodePairMonth(bytes, context, reference) {
-  return decodeReferencedPairArtifact(bytes, context, reference, admitPairMonth);
+  return decodeReferencedPairArtifact(bytes, context, reference, validatePairMonth);
 }
 
 export function decodePairDay(bytes, context, reference) {
-  return decodeReferencedPairArtifact(bytes, context, reference, admitPairDay);
+  return decodeReferencedPairArtifact(bytes, context, reference, validatePairDay);
 }

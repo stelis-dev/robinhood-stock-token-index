@@ -21,7 +21,7 @@ async function directoryStore(registry, prefix) {
   });
 }
 
-test("current, backward history, and repair move only their owned coverage edges", async () => {
+test("current, historical, and repair operations change only their assigned coverage boundaries", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
   const activation = BigInt(pair.activation.blockNumber);
@@ -46,6 +46,7 @@ test("current, backward history, and repair move only their owned coverage edges
 
   const current = await collectPairCurrent({ registry, pairId: pair.pairId, store, rpc: currentRpc });
   assert.equal(current.status, "published");
+  assert.equal(current.phase, "current");
   assert.equal(current.sequence, 1);
   assert.equal(current.candleCount, 1);
   let state = await readPairState({ registry, pairId: pair.pairId, store });
@@ -62,6 +63,7 @@ test("current, backward history, and repair move only their owned coverage edges
   }));
   const firstHistory = await collectPairHistory({ registry, pairId: pair.pairId, store, rpc: historyRpc });
   assert.equal(firstHistory.status, "published");
+  assert.equal(firstHistory.phase, "history");
   assert.equal(firstHistory.sequence, 2);
   state = await readPairState({ registry, pairId: pair.pairId, store });
   assert.equal(state.coverage.fromTimestamp, "2026-08-14T13:01:00.000Z");
@@ -89,6 +91,7 @@ test("current, backward history, and repair move only their owned coverage edges
   });
   const repaired = await repairPairIndex({ registry, pairId: pair.pairId, store, rpc: currentRpc });
   assert.equal(repaired.status, "published");
+  assert.equal(repaired.phase, "repair");
   assert.equal(repaired.sequence, 5);
   const afterRepair = await readPairState({ registry, pairId: pair.pairId, store });
   assert.deepEqual(afterRepair.coverage, beforeRepair.coverage);
@@ -112,7 +115,7 @@ test("current, backward history, and repair move only their owned coverage edges
   assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "months", "2026-08"))).length, 2);
 });
 
-test("a selected transition retries its bounded cleanup on the next current operation", async () => {
+test("an unfinished cleanup is retried by the next current collection", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
   const activation = BigInt(pair.activation.blockNumber);
@@ -174,7 +177,7 @@ test("a first historical publication can start at history and end exactly at act
   assert.equal(state.coverage.fromTimestamp, "2026-08-14T13:01:00.000Z");
 });
 
-test("native ETH and stock-token pairs use the same exact base-to-USDG candle path", async () => {
+test("native ETH and stock-token pairs use the same base-to-USDG candle calculation", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "ETH").pair;
   const activation = BigInt(pair.activation.blockNumber);
@@ -204,7 +207,7 @@ test("native ETH and stock-token pairs use the same exact base-to-USDG candle pa
   assert.equal(state.pair.quoteAsset.address, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
 });
 
-test("one replacement closure remains continuous across UTC month and year boundaries", async () => {
+test("one replacement data set remains continuous across UTC month and year boundaries", async () => {
   const registry = await compactPairRegistry({ activationTimestamp: "2026-12-31T23:30:00.000Z" });
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
   const activation = BigInt(pair.activation.blockNumber);
@@ -268,7 +271,7 @@ test("multi-day block gaps remain continuous empty coverage without impossible b
   assert.ok(rpc.blockSearches.every((search) => search.minimumBlock <= search.maximumBlock));
 });
 
-test("pair identity is admitted before any market operation", async () => {
+test("pair identity is validated before any market operation", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
   let rpcUsed = false;
@@ -282,7 +285,7 @@ test("pair identity is admitted before any market operation", async () => {
   assert.equal(pairById(registry, pair.pairId).pair.pairId, pair.pairId);
 });
 
-test("a changed child must be admitted from storage before state selection", async () => {
+test("a changed child must be validated from storage before state selection", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
   const activation = BigInt(pair.activation.blockNumber);

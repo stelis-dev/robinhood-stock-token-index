@@ -97,24 +97,16 @@ jobs:
           set -euo pipefail
           if [[ "${EVENT_NAME}" == "schedule" ]]; then
             OPERATION=collect
-            TARGET_KIND=group
-            case "${SCHEDULE_EXPRESSION}" in
-              "7,52 0-23/3 * * *"|"37 1-23/3 * * *"|"22 2-23/3 * * *") TARGET_ID=group-1 ;;
-              "22 0-23/3 * * *"|"7,52 1-23/3 * * *"|"37 2-23/3 * * *") TARGET_ID=group-2 ;;
-              "37 0-23/3 * * *"|"22 1-23/3 * * *"|"7,52 2-23/3 * * *") TARGET_ID=group-3 ;;
-              *) echo "Scheduled collection group is invalid." >&2; exit 1 ;;
-            esac
+            TARGET_FLAG=--schedule
+            TARGET_ID="${SCHEDULE_EXPRESSION}"
           else
             OPERATION="${MANUAL_OPERATION}"
-            TARGET_KIND="${MANUAL_TARGET_KIND}"
             TARGET_ID="${MANUAL_TARGET_ID}"
+            case "${MANUAL_TARGET_KIND}" in
+              pair) TARGET_FLAG=--pair ;;
+              group) TARGET_FLAG=--group ;;
+              *) echo "Operation target kind is invalid." >&2; exit 1 ;;
+            esac
           fi
 
-          if [[ "${TARGET_KIND}" == "pair" ]]; then
-            node cli.mjs "${OPERATION}" --pair "${TARGET_ID}" --store github --repository "${INDEX_REPOSITORY}"
-          elif [[ "${TARGET_KIND}" == "group" ]]; then
-            node group-cli.mjs "${OPERATION}" --group "${TARGET_ID}" --store github --repository "${INDEX_REPOSITORY}"
-          else
-            echo "Operation target kind is invalid." >&2
-            exit 1
-          fi
+          node cli.mjs "${OPERATION}" "${TARGET_FLAG}" "${TARGET_ID}" --store github --repository "${INDEX_REPOSITORY}"

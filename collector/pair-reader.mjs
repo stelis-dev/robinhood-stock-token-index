@@ -1,17 +1,17 @@
 import { canonicalBytes } from "./canonical.mjs";
 import {
-  admitPairCandleSequence,
+  validatePairCandleSequence,
   decodePairDay,
   decodePairMonth,
   decodePairState,
   pairMonthLogicalId,
 } from "./pair-artifact.mjs";
-import { admitPairPeriodInput, admitPairPeriodResult } from "./pair-period.mjs";
+import { validatePairPeriodInput, validatePairPeriodResult } from "./pair-period.mjs";
 import { pairById } from "./pair-registry.mjs";
 
 function exactReference(references, logicalId, label) {
   const reference = references.find((candidate) => candidate.logicalId === logicalId);
-  if (!reference) throw new Error(`${label} reference is missing from the selected closure.`);
+  if (!reference) throw new Error(`${label} reference is missing from the selected pair state.`);
   return reference;
 }
 
@@ -20,10 +20,10 @@ export async function readPairState({ registry, pairId, store }) {
   const selected = await store.readSelectedState(pairId);
   if (selected === null) return null;
   if (selected === undefined || !Number.isSafeInteger(selected.sequence) || !Buffer.isBuffer(selected.gzipBytes)) {
-    throw new Error("Selected state carriage is invalid.");
+    throw new Error("Selected state record is invalid.");
   }
   const state = decodePairState(selected.gzipBytes, { registry }, pairId);
-  if (state.sequence !== selected.sequence) throw new Error("Selected state sequence does not match its carrier generation.");
+  if (state.sequence !== selected.sequence) throw new Error("Selected state sequence does not match its stored generation.");
   return state;
 }
 
@@ -50,7 +50,7 @@ export async function verifyPairIndex({ registry, pairId, store }) {
     for (const dayReference of month.days) {
       const day = await readPairDay({ registry, store, reference: dayReference });
       if (previousCandle !== null && day.candles.length > 0) {
-        admitPairCandleSequence([previousCandle, day.candles[0]]);
+        validatePairCandleSequence([previousCandle, day.candles[0]]);
       }
       if (day.candles.length > 0) previousCandle = day.candles.at(-1);
       dayCount += 1;
@@ -86,7 +86,7 @@ function availability(request, availableRange) {
 }
 
 export async function readPairPeriod({ registry, input, store }) {
-  const request = admitPairPeriodInput(input, registry);
+  const request = validatePairPeriodInput(input, registry);
   const entry = pairById(registry, request.pairId);
   const state = await readPairState({ registry, pairId: request.pairId, store });
   let availableRange = null;
@@ -119,7 +119,7 @@ export async function readPairPeriod({ registry, input, store }) {
     available: ranges.available,
     unavailable: ranges.unavailable,
   };
-  return admitPairPeriodResult(result, { registry, input: request });
+  return validatePairPeriodResult(result, { registry, input: request });
 }
 
 export function samePairState(left, right) {

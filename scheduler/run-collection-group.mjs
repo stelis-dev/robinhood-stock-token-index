@@ -1,4 +1,4 @@
-import { admitCollectionGroupRegistry, collectionGroupById } from "./collection-group-registry.mjs";
+import { validateCollectionPlan, collectionGroupById, collectionGroupPairIds } from "./collection-plan.mjs";
 
 function throwIfAborted(signal) {
   if (signal?.aborted) throw signal.reason ?? new Error("Operation cancelled.");
@@ -6,16 +6,16 @@ function throwIfAborted(signal) {
 
 export async function runCollectionGroup({
   pairRegistry,
-  groupRegistry,
+  collectionPlan,
   groupId,
   runPair,
   signal,
 }) {
   if (typeof runPair !== "function") throw new Error("Group pair operation is invalid.");
-  const admittedGroups = admitCollectionGroupRegistry(groupRegistry, pairRegistry);
-  const group = collectionGroupById(admittedGroups, groupId);
+  const validatedPlan = validateCollectionPlan(collectionPlan, pairRegistry);
+  const group = collectionGroupById(validatedPlan, groupId);
   const pairs = [];
-  for (const pairId of group.pairIds) {
+  for (const pairId of collectionGroupPairIds(group)) {
     throwIfAborted(signal);
     try {
       await runPair(pairId);

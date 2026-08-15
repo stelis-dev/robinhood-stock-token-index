@@ -1,5 +1,7 @@
 const canonicalHexQuantityPattern = /^0x(?:0|[1-9a-f][0-9a-f]*)$/;
 
+// Ethereum JSON-RPC quantities are lowercase 0x-prefixed integers with no leading zeroes.
+
 export function isCanonicalHexQuantity(value) {
   return typeof value === "string" && canonicalHexQuantityPattern.test(value);
 }

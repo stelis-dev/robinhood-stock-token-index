@@ -1,102 +1,109 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  admitCollectionGroupRegistry,
+  validateCollectionPlan,
+  collectionGroupEstimatedRuntime,
   collectionGroupById,
-  loadCollectionGroupRegistry,
-} from "../scheduler/collection-group-registry.mjs";
+  collectionGroupPairIds,
+  loadCollectionPlan,
+} from "../scheduler/collection-plan.mjs";
 import { runCollectionGroup } from "../scheduler/run-collection-group.mjs";
-import { main as runGroupCli, parseGroupArguments } from "../group-cli.mjs";
+import { main as runCli, parseArguments } from "../cli.mjs";
 import { fixturePairRegistry } from "./pair-fixtures.mjs";
 
-const expectedGroups = [
-  [
-    "0x54f7883914619af9105355bf83ed678bcf9f63560218ac61c9963b9503d0ba32",
-    "0x9194a557b6a6bb2236b49ea7e2bbccec5d3eeb705aef00903be4b3de1d949579",
-    "0xd32646872e6712af8cf778e34b6bbef1d2ae0bddd83764e1b07333518ad59333",
-  ],
-  [
-    "0x8517f8071ae5b831b738052f12125e8e3d6c158b78728aa44ce3b25e5104d32e",
-    "0xd4ecb79fdc521d7725d22b33ed43cb4e47aa96bfad76aa29577e3151f723ac5e",
-    "0xfe2a80bb5618fd14984b92ca6d45bf5ba67443ddb1435e28b2e48df2fc1526cd",
-  ],
-  [
-    "0x3bb34a44f1b2b5f32c034c38a53065a521a47b199700fa9bd19d60985ff24bf1",
-    "0xc748f4671a867db48b552f6b7650bf3255e05f80f00e3f7aad1b17ccb7898fdb",
-    "0x5875d407a42965b0e768c8925cea290e06fa50603ef34fc99eb92a1050e6ae36",
-  ],
-];
-
-test("the measured collection groups are the exact ordered partition of admitted pairs", async () => {
+test("the collection plan defines all group limits, estimated runtimes, members, and schedules", async () => {
   const pairRegistry = await fixturePairRegistry();
-  const registry = await loadCollectionGroupRegistry(pairRegistry);
+  const plan = await loadCollectionPlan(pairRegistry);
+  assert.deepEqual(plan.capacity, {
+    durationPaddingPercent: 25,
+    maximumGroupCount: 3,
+    maximumGroupSeconds: 720,
+    maximumPairsPerGroup: 3,
+  });
+  assert.deepEqual(plan.groups.map((group) => collectionGroupEstimatedRuntime(plan, group)), [582, 599, 589]);
   assert.deepEqual(
-    registry.groups,
-    expectedGroups.map((pairIds, index) => ({
-      groupId: `group-${index + 1}`,
-      pairIds,
-    })),
+    new Set(plan.groups.flatMap(collectionGroupPairIds)),
+    new Set(pairRegistry.pairs.map((entry) => entry.pair.pairId)),
   );
-  assert.equal(collectionGroupById(registry, "group-2"), registry.groups[1]);
-  assert.throws(() => collectionGroupById(registry, "group-4"), /Unknown collection group/);
+  assert.equal(new Set(plan.groups.flatMap((group) => group.schedules)).size, 9);
+  assert.equal(collectionGroupById(plan, "group-2"), plan.groups[1]);
+  assert.throws(() => collectionGroupById(plan, "group-4"), /Unknown collection group/);
 });
 
-test("group admission rejects structure that cannot be an exact pair partition", async () => {
+test("collection-plan validation rejects group limits, estimated runtime, schedule, and membership conflicts", async () => {
   const pairRegistry = await fixturePairRegistry();
-  const registry = await loadCollectionGroupRegistry(pairRegistry);
+  const plan = await loadCollectionPlan(pairRegistry);
   const invalidCandidates = [];
 
-  const extraRootMember = structuredClone(registry);
+  const extraRootMember = structuredClone(plan);
   extraRootMember.measurements = [];
   invalidCandidates.push(extraRootMember);
 
-  const extraGroupMember = structuredClone(registry);
-  extraGroupMember.groups[0].schedule = "unused";
+  const extraGroupMember = structuredClone(plan);
+  extraGroupMember.groups[0].operation = "collect";
   invalidCandidates.push(extraGroupMember);
 
-  const skippedGroupId = structuredClone(registry);
+  const skippedGroupId = structuredClone(plan);
   skippedGroupId.groups[1].groupId = "group-3";
   invalidCandidates.push(skippedGroupId);
 
-  const emptyGroup = structuredClone(registry);
-  emptyGroup.groups[0].pairIds = [];
+  const tooManyGroups = structuredClone(plan);
+  const movedGroupMember = tooManyGroups.groups[2].members.pop();
+  tooManyGroups.groups.push({ groupId: "group-4", members: [movedGroupMember], schedules: ["1 1 * * *"] });
+  invalidCandidates.push(tooManyGroups);
+
+  const tooManyMembers = structuredClone(plan);
+  tooManyMembers.groups[0].members.push(tooManyMembers.groups[1].members.shift());
+  invalidCandidates.push(tooManyMembers);
+
+  const excessiveDuration = structuredClone(plan);
+  excessiveDuration.groups[0].members[0].measuredSeconds = 721;
+  invalidCandidates.push(excessiveDuration);
+
+  const emptyGroup = structuredClone(plan);
+  emptyGroup.groups[0].members = [];
   invalidCandidates.push(emptyGroup);
 
-  const omittedPair = structuredClone(registry);
-  omittedPair.groups[0].pairIds.pop();
+  const omittedPair = structuredClone(plan);
+  omittedPair.groups[0].members.pop();
   invalidCandidates.push(omittedPair);
 
-  const duplicatedPair = structuredClone(registry);
-  duplicatedPair.groups[1].pairIds[0] = duplicatedPair.groups[0].pairIds[0];
+  const duplicatedPair = structuredClone(plan);
+  duplicatedPair.groups[1].members[0].pairId = duplicatedPair.groups[0].members[0].pairId;
   invalidCandidates.push(duplicatedPair);
 
-  const unknownPair = structuredClone(registry);
-  unknownPair.groups[2].pairIds[0] = `0x${"0".repeat(64)}`;
+  const unknownPair = structuredClone(plan);
+  unknownPair.groups[2].members[0].pairId = `0x${"0".repeat(64)}`;
   invalidCandidates.push(unknownPair);
 
+  const duplicateSchedule = structuredClone(plan);
+  duplicateSchedule.groups[1].schedules[0] = duplicateSchedule.groups[0].schedules[0];
+  invalidCandidates.push(duplicateSchedule);
+
   for (const candidate of invalidCandidates) {
-    assert.throws(() => admitCollectionGroupRegistry(candidate, pairRegistry));
+    assert.throws(() => validateCollectionPlan(candidate, pairRegistry));
   }
 });
 
 test("the group runner preserves order and isolates a non-abort pair failure", async () => {
   const pairRegistry = await fixturePairRegistry();
-  const groupRegistry = await loadCollectionGroupRegistry(pairRegistry);
-  const group = groupRegistry.groups[0];
+  const collectionPlan = await loadCollectionPlan(pairRegistry);
+  const group = collectionPlan.groups[0];
+  const pairIds = collectionGroupPairIds(group);
   const calls = [];
   const result = await runCollectionGroup({
     pairRegistry,
-    groupRegistry,
+    collectionPlan,
     groupId: group.groupId,
     runPair: async (pairId) => {
       calls.push(pairId);
-      if (pairId === group.pairIds[1]) throw new Error("untrusted pair failure");
+      if (pairId === pairIds[1]) throw new Error("untrusted pair failure");
     },
   });
-  assert.deepEqual(calls, group.pairIds);
+  assert.deepEqual(calls, pairIds);
   assert.deepEqual(result, {
     status: "failure",
-    pairs: group.pairIds.map((pairId, index) => ({
+    pairs: pairIds.map((pairId, index) => ({
       pairId,
       status: index === 1 ? "failure" : "success",
     })),
@@ -106,13 +113,13 @@ test("the group runner preserves order and isolates a non-abort pair failure", a
 
 test("malformed membership and abort stop before another pair operation starts", async () => {
   const pairRegistry = await fixturePairRegistry();
-  const groupRegistry = await loadCollectionGroupRegistry(pairRegistry);
-  const malformed = structuredClone(groupRegistry);
-  malformed.groups[0].pairIds.pop();
+  const collectionPlan = await loadCollectionPlan(pairRegistry);
+  const malformed = structuredClone(collectionPlan);
+  malformed.groups[0].members.pop();
   let calls = 0;
   await assert.rejects(runCollectionGroup({
     pairRegistry,
-    groupRegistry: malformed,
+    collectionPlan: malformed,
     groupId: "group-1",
     runPair: async () => { calls += 1; },
   }));
@@ -122,7 +129,7 @@ test("malformed membership and abort stop before another pair operation starts",
   const started = [];
   await assert.rejects(runCollectionGroup({
     pairRegistry,
-    groupRegistry,
+    collectionPlan,
     groupId: "group-1",
     signal: controller.signal,
     runPair: async (pairId) => {
@@ -130,17 +137,19 @@ test("malformed membership and abort stop before another pair operation starts",
       controller.abort(new Error("Operation cancelled."));
     },
   }), /Operation cancelled/);
-  assert.deepEqual(started, [groupRegistry.groups[0].pairIds[0]]);
+  assert.deepEqual(started, [collectionPlan.groups[0].members[0].pairId]);
 });
 
-test("the group CLI passes unchanged pair, storage, environment, and signal inputs", async () => {
+test("the unified CLI passes unchanged group operation, storage, environment, and signal inputs", async () => {
   const pairRegistry = await fixturePairRegistry();
-  const groupRegistry = await loadCollectionGroupRegistry(pairRegistry);
-  const group = groupRegistry.groups[1];
+  const collectionPlan = await loadCollectionPlan(pairRegistry);
+  const group = collectionPlan.groups[1];
+  const pairIds = collectionGroupPairIds(group);
   const environment = { GITHUB_TOKEN: "test-token", INDEX_RPC_FALLBACK_URL_0: "https://rpc.example/key" };
   const controller = new AbortController();
   const calls = [];
-  const summary = await runGroupCli([
+  const output = [];
+  const summary = await runCli([
     "repair",
     "--group", group.groupId,
     "--store", "github",
@@ -149,8 +158,9 @@ test("the group CLI passes unchanged pair, storage, environment, and signal inpu
     environment,
     signal: controller.signal,
     pairMain: async (argv, context) => calls.push({ argv, context }),
+    writeOutput: (line) => output.push(line),
   });
-  assert.deepEqual(calls, group.pairIds.map((pairId) => ({
+  assert.deepEqual(calls, pairIds.map((pairId) => ({
     argv: ["repair", "--pair", pairId, "--store", "github", "--repository", "owner/index"],
     context: { environment, signal: controller.signal },
   })));
@@ -160,22 +170,51 @@ test("the group CLI passes unchanged pair, storage, environment, and signal inpu
     groupId: group.groupId,
     result: {
       status: "success",
-      pairs: group.pairIds.map((pairId) => ({ pairId, status: "success" })),
+      pairs: pairIds.map((pairId) => ({ pairId, status: "success" })),
     },
   });
+  assert.deepEqual(output, [`${JSON.stringify(summary)}\n`]);
 });
 
-test("the group CLI admits only one exact operation, group, and storage boundary", () => {
-  assert.deepEqual(parseGroupArguments([
+test("the unified CLI resolves a scheduled expression only through the collection plan", async () => {
+  const pairRegistry = await fixturePairRegistry();
+  const collectionPlan = await loadCollectionPlan(pairRegistry);
+  const group = collectionPlan.groups[2];
+  const calls = [];
+  const output = [];
+  const summary = await runCli([
+    "collect",
+    "--schedule", group.schedules[1],
+    "--store", "directory",
+    "--root", "/tmp/index",
+  ], {
+    pairMain: async (argv) => calls.push(argv),
+    writeOutput: (line) => output.push(line),
+  });
+  assert.deepEqual(calls, collectionGroupPairIds(group).map((pairId) => [
+    "collect", "--pair", pairId, "--store", "directory", "--root", "/tmp/index",
+  ]));
+  assert.equal(summary.groupId, group.groupId);
+  assert.deepEqual(output, [`${JSON.stringify(summary)}\n`]);
+});
+
+test("the unified CLI accepts one group or schedule target and only its allowed operations", () => {
+  assert.deepEqual(parseArguments([
     "collect", "--group", "group-1", "--store", "directory", "--root", "/tmp/index",
   ]), {
     operation: "collect",
-    groupId: "group-1",
+    target: { kind: "group", id: "group-1" },
     store: "directory",
     root: "/tmp/index",
     repository: undefined,
+    from: undefined,
+    until: undefined,
   });
-  assert.throws(() => parseGroupArguments(["verify", "--group", "group-1", "--store", "directory", "--root", "/tmp/index"]), /collect or repair/);
-  assert.throws(() => parseGroupArguments(["collect", "--store", "directory", "--root", "/tmp/index"]), /--group/);
-  assert.throws(() => parseGroupArguments(["collect", "--group", "group-1", "--store", "github", "--repository", "owner/index", "--root", "/tmp/index"]), /cannot cross/);
+  assert.equal(parseArguments([
+    "collect", "--schedule", "7,52 0-23/3 * * *", "--store", "github", "--repository", "owner/index",
+  ]).target.kind, "schedule");
+  assert.throws(() => parseArguments(["verify", "--group", "group-1", "--store", "directory", "--root", "/tmp/index"]), /pair target/);
+  assert.throws(() => parseArguments(["repair", "--schedule", "7,52 0-23/3 * * *", "--store", "directory", "--root", "/tmp/index"]), /collect only/);
+  assert.throws(() => parseArguments(["collect", "--store", "directory", "--root", "/tmp/index"]), /exactly one/);
+  assert.throws(() => parseArguments(["collect", "--pair", "a", "--group", "group-1", "--store", "directory", "--root", "/tmp/index"]), /exactly one/);
 });

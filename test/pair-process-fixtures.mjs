@@ -1,4 +1,4 @@
-import { admitPairRegistry } from "../collector/pair-registry.mjs";
+import { validatePairRegistry } from "../collector/pair-registry.mjs";
 import { fixturePairRegistry, pairEntryBySymbol } from "./pair-fixtures.mjs";
 
 function hex(value, bytes = 32) {
@@ -50,7 +50,7 @@ export async function compactPairRegistry({
     blockNumber: pair.sourceInitialization.blockNumber,
     timestamp: pair.sourceInitialization.timestamp,
   };
-  return admitPairRegistry(registry);
+  return validatePairRegistry(registry);
 }
 
 export function pairSwapLog({ registry, pair, block, baseAmountRaw, quoteAmountRaw, transactionIndex = 0, logIndex = 0 }) {

@@ -17,7 +17,7 @@ import {
 import { pairById } from "./pair-registry.mjs";
 import { RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
 import { blockTimestamp } from "./rpc-client.mjs";
-import { admitSwapLog, admitSwapLogBlockNumber } from "./swap.mjs";
+import { validateSwapLog, validateSwapLogBlockNumber } from "./swap.mjs";
 
 function throwIfAborted(signal) {
   signal?.throwIfAborted();
@@ -164,7 +164,7 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
     });
     const blockNumbers = [];
     for (const log of logs) {
-      const blockNumber = admitSwapLogBlockNumber(log);
+      const blockNumber = validateSwapLogBlockNumber(log);
       if (blockNumber < cursor || blockNumber >= rangeUntil) throw new Error("RPC returned a log outside the requested range.");
       blockNumbers.push(blockNumber);
     }
@@ -174,7 +174,7 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
     accumulator.addTrades(logs.map((log, index) => {
       const header = headers.get(blockNumbers[index].toString());
       if (!header) throw new Error("RPC omitted a block header for a Swap log.");
-      const trade = admitSwapLog(log, { registry, pair, block: header });
+      const trade = validateSwapLog(log, { registry, pair, block: header });
       if (trade.blockTimestamp < rangeFromSeconds || trade.blockTimestamp >= rangeUntilSeconds) {
         throw new Error("Swap block timestamp is outside the fixed collection range.");
       }
@@ -211,7 +211,7 @@ async function loadAffectedArtifacts({ registry, pair, store, state, partitions 
   return { months, days };
 }
 
-async function cleanupSelectedTransition({ registry, pairId, store, state }) {
+async function cleanupSelectedGeneration({ registry, pairId, store, state }) {
   if (state === null) return;
   const changedMonths = [];
   for (const monthReference of state.months.filter((reference) => reference.sequence === state.sequence)) {
@@ -225,7 +225,7 @@ async function cleanupSelectedTransition({ registry, pairId, store, state }) {
   });
 }
 
-function expectedStateCoverage(previous, pair, range, role) {
+function expectedStateCoverage(previous, pair, range, phase) {
   const activation = {
     fromBlock: pair.activation.blockNumber,
     fromTimestamp: pair.activation.timestamp,
@@ -233,15 +233,15 @@ function expectedStateCoverage(previous, pair, range, role) {
     untilTimestamp: pair.activation.timestamp,
   };
   const existing = previous?.coverage ?? activation;
-  if (role === "current") {
+  if (phase === "current") {
     if (range.fromBlock !== existing.untilBlock || range.fromTimestamp !== existing.untilTimestamp) {
-      throw new Error("Current collection does not start at the selected forward edge.");
+      throw new Error("Current collection does not start at the stored coverage end.");
     }
     return { ...existing, untilBlock: range.untilBlock, untilTimestamp: range.untilTimestamp };
   }
-  if (role === "history") {
+  if (phase === "history") {
     if (range.untilBlock !== existing.fromBlock || range.untilTimestamp !== existing.fromTimestamp) {
-      throw new Error("History collection does not end at the selected historical edge.");
+      throw new Error("Historical collection does not end at the stored coverage start.");
     }
     return { ...existing, fromBlock: range.fromBlock, fromTimestamp: range.fromTimestamp };
   }
@@ -251,9 +251,9 @@ function expectedStateCoverage(previous, pair, range, role) {
   return { ...existing };
 }
 
-async function buildReplacement({ registry, pair, store, previous, role, range, collected }) {
+async function buildReplacement({ registry, pair, store, previous, phase, range, collected }) {
   await assertSelectedStateUnchanged({ registry, pairId: pair.pairId, store, previous });
-  const expectedCoverage = expectedStateCoverage(previous, pair, range, role);
+  const expectedCoverage = expectedStateCoverage(previous, pair, range, phase);
   const existing = await loadAffectedArtifacts({ registry, pair, store, state: previous, partitions: collected.partitions });
   const sequence = previous === null ? 1 : previous.sequence + 1;
   const candlesByDay = new Map();
@@ -313,7 +313,7 @@ async function buildReplacement({ registry, pair, store, previous, role, range, 
   let monthReferences = [...(previous?.months ?? [])];
   for (const replacement of replacementMonths.values()) monthReferences = replaceReference(monthReferences, replacement);
   const derivedCoverage = coverageFromReferences(monthReferences);
-  if (!sameCoverage(derivedCoverage, expectedCoverage)) throw new Error("Rebuilt closure does not match the operation coverage.");
+  if (!sameCoverage(derivedCoverage, expectedCoverage)) throw new Error("Rebuilt pair state does not match the operation coverage.");
   const state = {
     contractVersion: "1",
     kind: "pair_candle_state",
@@ -326,9 +326,9 @@ async function buildReplacement({ registry, pair, store, previous, role, range, 
   return { state, encodedState, encodedDays, encodedMonths };
 }
 
-async function publishReplacement({ registry, pair, store, previous, role, range, collected, signal }) {
-  const replacement = await buildReplacement({ registry, pair, store, previous, role, range, collected });
-  await cleanupSelectedTransition({ registry, pairId: pair.pairId, store, state: previous });
+async function publishReplacement({ registry, pair, store, previous, phase, range, collected, signal }) {
+  const replacement = await buildReplacement({ registry, pair, store, previous, phase, range, collected });
+  await cleanupSelectedGeneration({ registry, pairId: pair.pairId, store, state: previous });
   for (const entry of replacement.encodedDays) {
     throwIfAborted(signal);
     await store.writeReferenced(entry.reference, entry.encoded.gzipBytes);
@@ -347,10 +347,10 @@ async function publishReplacement({ registry, pair, store, previous, role, range
   if (selectedState === null || !samePairState(selectedState, replacement.state)) {
     throw new Error("Published pair state is not the selected state.");
   }
-  await cleanupSelectedTransition({ registry, pairId: pair.pairId, store, state: selectedState });
+  await cleanupSelectedGeneration({ registry, pairId: pair.pairId, store, state: selectedState });
   return {
     status: "published",
-    role,
+    phase,
     pairId: pair.pairId,
     sequence: replacement.state.sequence,
     fromBlock: range.fromBlock,
@@ -395,7 +395,7 @@ async function historyRange({ registry, pair, rpc, state }) {
   const fromTimestamp = state?.coverage.fromTimestamp ?? pair.activation.timestamp;
   const historyBlock = BigInt(pair.historyStart.blockNumber);
   if (fromBlock === historyBlock && fromTimestamp === pair.historyStart.timestamp) return null;
-  if (fromBlock < historyBlock || fromTimestamp < pair.historyStart.timestamp) throw new Error("Selected history edge is outside the pair boundary.");
+  if (fromBlock < historyBlock || fromTimestamp < pair.historyStart.timestamp) throw new Error("Stored coverage start is before the pair historyStart boundary.");
   const nominalBlock = maximum(fromBlock - BigInt(registry.collection.maximumBlocksPerRun), historyBlock);
   let nextFromBlock;
   let nextFromTimestamp;
@@ -449,9 +449,9 @@ async function repairRange({ registry, rpc, state }) {
   };
 }
 
-async function collectAndPublish({ registry, pair, store, rpc, previous, role, range, signal }) {
+async function collectAndPublish({ registry, pair, store, rpc, previous, phase, range, signal }) {
   const collected = await collectFixedRange({ registry, pair, rpc, range, signal });
-  return publishReplacement({ registry, pair, store, previous, role, range, collected, signal });
+  return publishReplacement({ registry, pair, store, previous, phase, range, collected, signal });
 }
 
 export async function collectPairCurrent({ registry, pairId, store, rpc, signal }) {
@@ -464,10 +464,10 @@ export async function collectPairCurrent({ registry, pairId, store, rpc, signal 
   assertFinalizedCoversStoredRange(previous, pair, finalized);
   const range = await currentRange({ registry, pair, rpc, state: previous, finalized });
   if (range === null) {
-    await cleanupSelectedTransition({ registry, pairId, store, state: previous });
-    return { status: "current", role: "current", pairId, sequence: previous?.sequence ?? null };
+    await cleanupSelectedGeneration({ registry, pairId, store, state: previous });
+    return { status: "current", phase: "current", pairId, sequence: previous?.sequence ?? null };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previous, role: "current", range, signal });
+  return collectAndPublish({ registry, pair, store, rpc, previous, phase: "current", range, signal });
 }
 
 export async function collectPairHistory({ registry, pairId, store, rpc, signal }) {
@@ -480,10 +480,10 @@ export async function collectPairHistory({ registry, pairId, store, rpc, signal 
   assertFinalizedCoversStoredRange(previous, pair, finalized);
   const range = await historyRange({ registry, pair, rpc, state: previous });
   if (range === null) {
-    await cleanupSelectedTransition({ registry, pairId, store, state: previous });
-    return { status: "current", role: "history", pairId, sequence: previous?.sequence ?? null };
+    await cleanupSelectedGeneration({ registry, pairId, store, state: previous });
+    return { status: "current", phase: "history", pairId, sequence: previous?.sequence ?? null };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previous, role: "history", range, signal });
+  return collectAndPublish({ registry, pair, store, rpc, previous, phase: "history", range, signal });
 }
 
 export async function repairPairIndex({ registry, pairId, store, rpc, signal }) {
@@ -492,13 +492,13 @@ export async function repairPairIndex({ registry, pairId, store, rpc, signal }) 
   await rpc.verifyChain(registry.chain.numericChainId);
   await verifyActivationBoundary(pair, rpc);
   const previous = await readPairState({ registry, pairId, store });
-  if (previous === null) return { status: "empty", role: "repair", pairId, sequence: null };
+  if (previous === null) return { status: "empty", phase: "repair", pairId, sequence: null };
   const finalized = await rpc.getBlock(registry.chain.finalityTag);
   assertFinalizedCoversStoredRange(previous, pair, finalized);
   const range = await repairRange({ registry, rpc, state: previous });
   if (range === null) {
-    await cleanupSelectedTransition({ registry, pairId, store, state: previous });
-    return { status: "current", role: "repair", pairId, sequence: previous.sequence };
+    await cleanupSelectedGeneration({ registry, pairId, store, state: previous });
+    return { status: "current", phase: "repair", pairId, sequence: previous.sequence };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previous, role: "repair", range, signal });
+  return collectAndPublish({ registry, pair, store, rpc, previous, phase: "repair", range, signal });
 }

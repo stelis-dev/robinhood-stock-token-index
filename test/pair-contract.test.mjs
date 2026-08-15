@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  admitPairCandle,
-  admitPairDay,
-  admitPairMonth,
-  admitPairState,
+  validatePairCandle,
+  validatePairDay,
+  validatePairMonth,
+  validatePairState,
   createPairReference,
   decodePairDay,
   decodePairMonth,
@@ -16,8 +16,8 @@ import {
   pairMonthLogicalId,
 } from "../collector/pair-artifact.mjs";
 import { canonicalBytes, encodeArtifact } from "../collector/canonical.mjs";
-import { admitPairPeriodInput, admitPairPeriodResult } from "../collector/pair-period.mjs";
-import { admitPairRegistry, subtractUtcCalendarMonths } from "../collector/pair-registry.mjs";
+import { validatePairPeriodInput, validatePairPeriodResult } from "../collector/pair-period.mjs";
+import { validatePairRegistry, subtractUtcCalendarMonths } from "../collector/pair-registry.mjs";
 import { derivePoolId } from "../collector/pool-key.mjs";
 import { fixturePairRegistry, pairCandle, pairEntryBySymbol } from "./pair-fixtures.mjs";
 
@@ -116,7 +116,7 @@ function assertInitialRegistry(registry) {
   }
 }
 
-function closure(registry) {
+function dataset(registry) {
   const entry = pairEntryBySymbol(registry, "NVDA");
   const pair = entry.pair;
   const sequence = 1;
@@ -263,10 +263,10 @@ function multiChildIndexes(registry) {
   return { context, month, state };
 }
 
-test("the pair registry admits nine exact sources and one neutral PoolId owner", async () => {
+test("the pair registry validates nine specific pools and derives every PoolId from its PoolKey", async () => {
   const registry = await fixturePairRegistry();
   assertInitialRegistry(registry);
-  assert.deepEqual(admitPairRegistry(structuredClone(registry)), registry);
+  assert.deepEqual(validatePairRegistry(structuredClone(registry)), registry);
 
   const eth = pairEntryBySymbol(registry, "ETH");
   assert.deepEqual(eth.pair.baseAsset, {
@@ -281,89 +281,89 @@ test("the pair registry admits nine exact sources and one neutral PoolId owner",
 
   const wrongPool = structuredClone(registry);
   wrongPool.pairs[0].pair.pairId = `0x${"0".repeat(64)}`;
-  assert.throws(() => admitPairRegistry(wrongPool), /does not derive/);
+  assert.throws(() => validatePairRegistry(wrongPool), /does not derive/);
   const fakeNativeToken = structuredClone(registry);
   fakeNativeToken.pairs.find((entry) => entry.display.baseSymbol === "ETH").pair.baseAsset.address = "0x0000000000000000000000000000000000000001";
-  assert.throws(() => admitPairRegistry(fakeNativeToken), /member set/);
+  assert.throws(() => validatePairRegistry(fakeNativeToken), /member set/);
   const wrongNativeDecimals = structuredClone(registry);
   wrongNativeDecimals.pairs.find((entry) => entry.display.baseSymbol === "ETH").pair.baseAsset.decimals = 6;
-  assert.throws(() => admitPairRegistry(wrongNativeDecimals), /native decimals/);
+  assert.throws(() => validatePairRegistry(wrongNativeDecimals), /native decimals/);
   const conflictingQuoteDisplay = structuredClone(registry);
   conflictingQuoteDisplay.pairs[0].display.quoteName = "Conflicting quote display";
-  assert.throws(() => admitPairRegistry(conflictingQuoteDisplay), /conflicting numeric or display facts/);
+  assert.throws(() => validatePairRegistry(conflictingQuoteDisplay), /conflicting numeric or display facts/);
   const conflictingQuoteDecimals = structuredClone(registry);
   conflictingQuoteDecimals.pairs[0].pair.quoteAsset.decimals = 18;
-  assert.throws(() => admitPairRegistry(conflictingQuoteDecimals), /conflicting numeric or display facts/);
+  assert.throws(() => validatePairRegistry(conflictingQuoteDecimals), /conflicting numeric or display facts/);
   const zeroCurrencyErc20 = structuredClone(registry);
   zeroCurrencyErc20.pairs.find((entry) => entry.display.baseSymbol === "ETH").pair.baseAsset = {
     kind: "erc20",
     address: "0x0000000000000000000000000000000000000000",
     decimals: 18,
   };
-  assert.throws(() => admitPairRegistry(zeroCurrencyErc20), /ERC-20 address/);
+  assert.throws(() => validatePairRegistry(zeroCurrencyErc20), /ERC-20 address/);
   const changedQuoteDisplay = structuredClone(registry);
   for (const entry of changedQuoteDisplay.pairs) {
     entry.display.quoteName = "Changed quote display";
     entry.display.quoteSymbol = "OTHER";
     entry.display.label = `${entry.display.baseSymbol}/OTHER`;
   }
-  assert.deepEqual(admitPairRegistry(changedQuoteDisplay), changedQuoteDisplay);
+  assert.deepEqual(validatePairRegistry(changedQuoteDisplay), changedQuoteDisplay);
   assert.throws(() => assertInitialRegistry(changedQuoteDisplay), assert.AssertionError);
   const earlyHistory = structuredClone(registry);
   earlyHistory.pairs[0].pair.historyStart.timestamp = "2026-07-02T23:27:00.000Z";
-  assert.throws(() => admitPairRegistry(earlyHistory), /boundaries|history start/);
+  assert.throws(() => validatePairRegistry(earlyHistory), /boundaries|history start/);
 });
 
-test("pair candles admit only possible source spans", () => {
-  assert.deepEqual(admitPairCandle(pairCandle()), pairCandle());
+test("pair candles accept only possible first and last Swap positions", () => {
+  assert.deepEqual(validatePairCandle(pairCandle()), pairCandle());
   const oneTrade = pairCandle();
   oneTrade.tradeCount = 1;
   oneTrade.lastSource = structuredClone(oneTrade.firstSource);
-  assert.deepEqual(admitPairCandle(oneTrade), oneTrade);
+  assert.deepEqual(validatePairCandle(oneTrade), oneTrade);
   const acrossTransactions = pairCandle();
   acrossTransactions.lastSource.transactionIndex = 1;
   acrossTransactions.lastSource.transactionHash = `0x${"c".repeat(64)}`;
   acrossTransactions.lastSource.logIndex = 2;
-  assert.deepEqual(admitPairCandle(acrossTransactions), acrossTransactions);
+  assert.deepEqual(validatePairCandle(acrossTransactions), acrossTransactions);
   const acrossBlocks = pairCandle();
   acrossBlocks.lastSource.blockNumber = (BigInt(acrossBlocks.firstSource.blockNumber) + 1n).toString();
   acrossBlocks.lastSource.blockHash = `0x${"b".repeat(64)}`;
   acrossBlocks.lastSource.transactionHash = `0x${"a".repeat(64)}`;
   acrossBlocks.lastSource.logIndex = 0;
-  assert.deepEqual(admitPairCandle(acrossBlocks), acrossBlocks);
+  assert.deepEqual(validatePairCandle(acrossBlocks), acrossBlocks);
 
   const repeatedSource = pairCandle();
   repeatedSource.lastSource = structuredClone(repeatedSource.firstSource);
-  assert.throws(() => admitPairCandle(repeatedSource), /trade count/);
+  assert.throws(() => validatePairCandle(repeatedSource), /trade count/);
   const oneTradeRange = pairCandle();
   oneTradeRange.tradeCount = 1;
-  assert.throws(() => admitPairCandle(oneTradeRange), /trade count/);
+  assert.throws(() => validatePairCandle(oneTradeRange), /trade count/);
   const inverted = pairCandle();
   [inverted.firstSource, inverted.lastSource] = [inverted.lastSource, inverted.firstSource];
-  assert.throws(() => admitPairCandle(inverted), /inverted/);
+  assert.throws(() => validatePairCandle(inverted), /inverted/);
   const conflictingBlock = pairCandle();
   conflictingBlock.lastSource.blockHash = `0x${"f".repeat(64)}`;
-  assert.throws(() => admitPairCandle(conflictingBlock), /block identity/);
+  assert.throws(() => validatePairCandle(conflictingBlock), /block identity/);
   const conflictingTransaction = pairCandle();
   conflictingTransaction.lastSource.transactionHash = `0x${"e".repeat(64)}`;
-  assert.throws(() => admitPairCandle(conflictingTransaction), /transaction identity/);
+  assert.throws(() => validatePairCandle(conflictingTransaction), /transaction identity/);
   const reusedBlockHash = pairCandle();
   reusedBlockHash.lastSource.blockNumber = (BigInt(reusedBlockHash.firstSource.blockNumber) + 1n).toString();
-  assert.throws(() => admitPairCandle(reusedBlockHash), /block identity/);
+  assert.throws(() => validatePairCandle(reusedBlockHash), /block identity/);
   const reusedTransactionHash = pairCandle();
   reusedTransactionHash.lastSource.transactionIndex = 1;
-  assert.throws(() => admitPairCandle(reusedTransactionHash), /transaction identity/);
+  assert.throws(() => validatePairCandle(reusedTransactionHash), /transaction identity/);
   const contradictoryLogOrder = pairCandle();
   contradictoryLogOrder.firstSource.logIndex = 5;
   contradictoryLogOrder.lastSource.transactionIndex = 1;
   contradictoryLogOrder.lastSource.transactionHash = `0x${"d".repeat(64)}`;
   contradictoryLogOrder.lastSource.logIndex = 3;
-  assert.throws(() => admitPairCandle(contradictoryLogOrder), /transaction and log order/);
+  assert.throws(() => validatePairCandle(contradictoryLogOrder), /transaction and log order/);
 });
 
-test("pair-day and pair-period consume one source-continuous candle sequence", async () => {
+test("pair-day files and period reads require candles in increasing Swap order", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
+  const values = dataset(registry);
   const first = pairCandle();
   const second = pairCandle({
     intervalStart: "2026-08-14T14:02:00.000Z",
@@ -384,17 +384,17 @@ test("pair-day and pair-period consume one source-continuous candle sequence", a
   });
   const day = (candles) => ({ ...values.day, candles });
 
-  assert.deepEqual(admitPairDay(day([first, second]), values.context).candles, [first, second]);
-  assert.deepEqual(admitPairPeriodResult(result([first, second]), { registry, input }).candles, [first, second]);
+  assert.deepEqual(validatePairDay(day([first, second]), values.context).candles, [first, second]);
+  assert.deepEqual(validatePairPeriodResult(result([first, second]), { registry, input }).candles, [first, second]);
 
   const repeated = structuredClone(second);
   repeated.firstSource = structuredClone(first.firstSource);
   repeated.lastSource = structuredClone(first.lastSource);
-  for (const admit of [
-    () => admitPairDay(day([first, repeated]), values.context),
-    () => admitPairPeriodResult(result([first, repeated]), { registry, input }),
+  for (const validate of [
+    () => validatePairDay(day([first, repeated]), values.context),
+    () => validatePairPeriodResult(result([first, repeated]), { registry, input }),
   ]) {
-    assert.throws(admit, /source range|source blocks/);
+    assert.throws(validate, /source range|source blocks/);
   }
 
   const sameBlock = pairCandle({
@@ -403,11 +403,11 @@ test("pair-day and pair-period consume one source-continuous candle sequence", a
   });
   sameBlock.firstSource.logIndex = 2;
   sameBlock.lastSource.logIndex = 3;
-  for (const admit of [
-    () => admitPairDay(day([first, sameBlock]), values.context),
-    () => admitPairPeriodResult(result([first, sameBlock]), { registry, input }),
+  for (const validate of [
+    () => validatePairDay(day([first, sameBlock]), values.context),
+    () => validatePairPeriodResult(result([first, sameBlock]), { registry, input }),
   ]) {
-    assert.throws(admit, /strictly increasing source blocks/);
+    assert.throws(validate, /strictly increasing source blocks/);
   }
 
   const widerCoverage = { ...values.coverage, untilBlock: "36308144" };
@@ -416,7 +416,7 @@ test("pair-day and pair-period consume one source-continuous candle sequence", a
   reusedNonAdjacentBlockHash.lastSource.blockHash = first.firstSource.blockHash;
   reusedNonAdjacentBlockHash.lastSource.transactionHash = `0x${"9".repeat(64)}`;
   assert.throws(
-    () => admitPairDay({ ...values.day, coverage: widerCoverage, candles: [first, reusedNonAdjacentBlockHash] }, values.context),
+    () => validatePairDay({ ...values.day, coverage: widerCoverage, candles: [first, reusedNonAdjacentBlockHash] }, values.context),
     /block identity/,
   );
   const reusedNonAdjacentTransactionHash = structuredClone(second);
@@ -424,7 +424,7 @@ test("pair-day and pair-period consume one source-continuous candle sequence", a
   reusedNonAdjacentTransactionHash.lastSource.blockHash = `0x${"8".repeat(64)}`;
   reusedNonAdjacentTransactionHash.lastSource.transactionHash = first.firstSource.transactionHash;
   assert.throws(
-    () => admitPairDay({ ...values.day, coverage: widerCoverage, candles: [first, reusedNonAdjacentTransactionHash] }, values.context),
+    () => validatePairDay({ ...values.day, coverage: widerCoverage, candles: [first, reusedNonAdjacentTransactionHash] }, values.context),
     /transaction identity/,
   );
 });
@@ -438,19 +438,19 @@ test("UTC calendar subtraction clamps leap-day history without elapsed-day arith
 
 test("display changes do not alter immutable pair artifact bytes", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
+  const values = dataset(registry);
   const relabeled = structuredClone(registry);
   relabeled.pairs.find((entry) => entry.pair.pairId === values.pair.pairId).display.baseName = "Corrected display name";
-  admitPairRegistry(relabeled);
+  validatePairRegistry(relabeled);
   assert.deepEqual(encodePairDay(values.day, { registry: relabeled }).gzipBytes, values.encodedDay.gzipBytes);
   assert.doesNotMatch(canonicalBytes(values.day).toString("utf8"), /NVIDIA|NVDA|USDG/);
 
   const sameDisplay = structuredClone(registry);
   sameDisplay.pairs[1].display = structuredClone(sameDisplay.pairs[0].display);
-  assert.deepEqual(admitPairRegistry(sameDisplay), sameDisplay);
+  assert.deepEqual(validatePairRegistry(sameDisplay), sameDisplay);
 });
 
-test("an unpublished pair has no state carrier rather than an empty persisted state", async () => {
+test("an unpublished pair has no state file rather than an empty stored state", async () => {
   const registry = await fixturePairRegistry();
   const pair = pairEntryBySymbol(registry, "ETH").pair;
   const emptyState = {
@@ -466,13 +466,13 @@ test("an unpublished pair has no state carrier rather than an empty persisted st
     },
     months: [],
   };
-  assert.throws(() => admitPairState(emptyState, { registry }), /inverted/);
+  assert.throws(() => validatePairState(emptyState, { registry }), /inverted/);
   assert.throws(() => encodePairState(emptyState, { registry }), /inverted/);
 });
 
-test("state, month, and day form one deterministic digest-bound closure", async () => {
+test("state, month, and day files form one deterministic hash-verified data set", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
+  const values = dataset(registry);
   for (const [decoder, encoded] of [
     [decodePairMonth, values.encodedMonth],
     [decodePairDay, values.encodedDay],
@@ -484,7 +484,7 @@ test("state, month, and day form one deterministic digest-bound closure", async 
   assert.deepEqual(decodePairMonth(values.encodedMonth.gzipBytes, values.context, values.monthReference), values.month);
   assert.deepEqual(decodePairState(values.encodedState.gzipBytes, values.context, values.pair.pairId), values.state);
   const ethPair = pairEntryBySymbol(registry, "ETH").pair;
-  assert.throws(() => decodePairState(values.encodedState.gzipBytes, values.context, ethPair.pairId), /requested logical identity/);
+  assert.throws(() => decodePairState(values.encodedState.gzipBytes, values.context, ethPair.pairId), /requested pair ID/);
   assert.deepEqual(encodePairState(values.state, values.context).gzipBytes, values.encodedState.gzipBytes);
 
   const changedBytes = Buffer.from(values.encodedDay.gzipBytes);
@@ -529,83 +529,83 @@ test("state, month, and day form one deterministic digest-bound closure", async 
   assert.throws(() => decodePairDay(encodedEthDay.gzipBytes, values.context, mislabeledEthReference), /identity/);
 });
 
-test("reference creation cannot exceed the registry-owned byte boundary", async () => {
+test("reference creation cannot exceed the configured maximum file size", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
+  const values = dataset(registry);
   const boundedRegistry = structuredClone(registry);
   boundedRegistry.collection.maximumArtifactBytes = values.encodedDay.gzipBytes.byteLength - 1;
   assert.throws(
     () => createPairReference({ encoded: values.encodedDay, context: { registry: boundedRegistry } }),
-    /byte limit/,
+    /maximum byte size/,
   );
 });
 
 test("every index level must cover all child periods named by its coverage", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
-  assert.throws(() => admitPairState({ ...values.state, months: [] }, values.context), /cover/);
-  assert.throws(() => admitPairMonth({ ...values.month, days: [] }, values.context), /cover/);
+  const values = dataset(registry);
+  assert.throws(() => validatePairState({ ...values.state, months: [] }, values.context), /cover/);
+  assert.throws(() => validatePairMonth({ ...values.month, days: [] }, values.context), /cover/);
   const narrower = structuredClone(values.monthReference);
   narrower.coverage.fromTimestamp = "2026-08-14T14:02:00.000Z";
-  assert.throws(() => admitPairState({ ...values.state, months: [narrower] }, values.context), /continuous/);
+  assert.throws(() => validatePairState({ ...values.state, months: [narrower] }, values.context), /continuous/);
   const escapedDay = structuredClone(values.dayReference);
   escapedDay.coverage.untilTimestamp = "2026-09-01T00:01:00.000Z";
-  assert.throws(() => admitPairMonth({ ...values.month, days: [escapedDay] }, values.context), /logical period/);
+  assert.throws(() => validatePairMonth({ ...values.month, days: [escapedDay] }, values.context), /logical period/);
 });
 
-test("every non-leaf generation owns at least one direct child from that generation", async () => {
+test("every state and month generation references a file written in the same generation", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
+  const values = dataset(registry);
   assert.throws(
-    () => admitPairMonth({ ...values.month, sequence: 2 }, values.context),
-    /owner-generation child/,
+    () => validatePairMonth({ ...values.month, sequence: 2 }, values.context),
+    /file written in the parent generation/,
   );
   assert.throws(
-    () => admitPairState({ ...values.state, sequence: 2 }, values.context),
-    /owner-generation child/,
+    () => validatePairState({ ...values.state, sequence: 2 }, values.context),
+    /file written in the parent generation/,
   );
 });
 
 test("multi-child indexes reject omission, duplication, reversal, gaps, and overlaps", async () => {
   const registry = await fixturePairRegistry();
   const values = multiChildIndexes(registry);
-  assert.deepEqual(admitPairMonth(values.month, values.context), values.month);
-  assert.deepEqual(admitPairState(values.state, values.context), values.state);
+  assert.deepEqual(validatePairMonth(values.month, values.context), values.month);
+  assert.deepEqual(validatePairState(values.state, values.context), values.state);
 
-  assert.throws(() => admitPairMonth({ ...values.month, days: values.month.days.slice(0, 1) }, values.context), /cover/);
-  assert.throws(() => admitPairState({ ...values.state, months: [values.state.months[0], values.state.months[0]] }, values.context), /logical identity/);
-  assert.throws(() => admitPairState({ ...values.state, months: [...values.state.months].reverse() }, values.context), /logical identity/);
+  assert.throws(() => validatePairMonth({ ...values.month, days: values.month.days.slice(0, 1) }, values.context), /cover/);
+  assert.throws(() => validatePairState({ ...values.state, months: [values.state.months[0], values.state.months[0]] }, values.context), /Stored reference ID/);
+  assert.throws(() => validatePairState({ ...values.state, months: [...values.state.months].reverse() }, values.context), /Stored reference ID/);
 
   const gap = structuredClone(values.month);
   gap.days[0].coverage.untilBlock = (BigInt(gap.days[0].coverage.untilBlock) - 1n).toString();
-  assert.throws(() => admitPairMonth(gap, values.context), /continuous/);
+  assert.throws(() => validatePairMonth(gap, values.context), /continuous/);
 
   const overlap = structuredClone(values.state);
   overlap.months[0].coverage.untilTimestamp = "2026-09-01T00:01:00.000Z";
   overlap.months[0].coverage.untilBlock = overlap.coverage.untilBlock;
-  assert.throws(() => admitPairState(overlap, values.context), /logical period/);
+  assert.throws(() => validatePairState(overlap, values.context), /logical period/);
 });
 
-test("a pair-day admits covered empty time but never synthetic or unbounded candles", async () => {
+test("a pair-day validates covered empty time but never synthetic or unbounded candles", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
-  assert.equal(admitPairDay({ ...values.day, candles: [] }, values.context).candles.length, 0);
-  assert.throws(() => admitPairDay({ ...values.day, candles: Array(1_441).fill(values.day.candles[0]) }, values.context), /count/);
+  const values = dataset(registry);
+  assert.equal(validatePairDay({ ...values.day, candles: [] }, values.context).candles.length, 0);
+  assert.throws(() => validatePairDay({ ...values.day, candles: Array(1_441).fill(values.day.candles[0]) }, values.context), /count/);
   const outside = structuredClone(values.day);
   outside.candles[0].intervalStart = "2026-08-14T14:03:00.000Z";
   outside.candles[0].intervalEnd = "2026-08-14T14:04:00.000Z";
-  assert.throws(() => admitPairDay(outside, values.context), /outside admitted coverage/);
+  assert.throws(() => validatePairDay(outside, values.context), /outside its enclosing coverage/);
 });
 
 test("the period contract is one pair, one month, and an exact availability partition", async () => {
   const registry = await fixturePairRegistry();
-  const values = closure(registry);
+  const values = dataset(registry);
   const input = {
     pairId: values.pair.pairId,
     from: "2026-08-14T14:00:00.000Z",
     until: "2026-08-14T14:04:00.000Z",
   };
-  assert.deepEqual(admitPairPeriodInput(input, registry), input);
+  assert.deepEqual(validatePairPeriodInput(input, registry), input);
   const result = {
     pair: values.pair,
     display: values.entry.display,
@@ -617,13 +617,13 @@ test("the period contract is one pair, one month, and an exact availability part
       { from: "2026-08-14T14:03:00.000Z", until: "2026-08-14T14:04:00.000Z" },
     ],
   };
-  assert.deepEqual(admitPairPeriodResult(result, { registry, input }), result);
-  assert.throws(() => admitPairPeriodInput({ ...input, until: "2026-09-02T00:00:00.000Z" }, registry), /calendar month/);
-  assert.throws(() => admitPairPeriodInput({ ...input, from: "2026-08-14T14:00:30.000Z" }, registry), /minute-aligned/);
-  assert.throws(() => admitPairPeriodResult({ ...result, unavailable: [result.unavailable[0]] }, { registry, input }), /cover/);
+  assert.deepEqual(validatePairPeriodResult(result, { registry, input }), result);
+  assert.throws(() => validatePairPeriodInput({ ...input, until: "2026-09-02T00:00:00.000Z" }, registry), /calendar month/);
+  assert.throws(() => validatePairPeriodInput({ ...input, from: "2026-08-14T14:00:30.000Z" }, registry), /minute-aligned/);
+  assert.throws(() => validatePairPeriodResult({ ...result, unavailable: [result.unavailable[0]] }, { registry, input }), /cover/);
   const otherPair = pairEntryBySymbol(registry, "ETH");
-  assert.throws(() => admitPairPeriodResult({ ...result, pair: otherPair.pair, display: otherPair.display }, { registry, input }), /match its request/);
-  assert.deepEqual(admitPairPeriodResult({
+  assert.throws(() => validatePairPeriodResult({ ...result, pair: otherPair.pair, display: otherPair.display }, { registry, input }), /match its request/);
+  assert.deepEqual(validatePairPeriodResult({
     ...result,
     candles: [],
     available: [{ from: input.from, until: input.until }],

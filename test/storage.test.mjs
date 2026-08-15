@@ -10,7 +10,7 @@ import {
   encodePairState,
 } from "../collector/pair-artifact.mjs";
 import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
-import { admitCleanupPlan, referenceObjectName } from "../storage/carriage.mjs";
+import { validateCleanupPlan, referenceObjectName } from "../storage/stored-files.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { GitHubReleaseStore } from "../storage/github-release-store.mjs";
 import { fixturePairRegistry, pairCandle, pairEntryBySymbol } from "./pair-fixtures.mjs";
@@ -104,7 +104,7 @@ class FakeGitHub {
   };
 }
 
-function pairClosure(registry, sequence = 1) {
+function pairDataset(registry, sequence = 1) {
   const entry = pairEntryBySymbol(registry, "NVDA");
   const pair = entry.pair;
   const context = { registry };
@@ -160,7 +160,7 @@ function pairClosure(registry, sequence = 1) {
   };
 }
 
-function twoDayClosure(registry) {
+function twoDayDataset(registry) {
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
   const context = { registry };
   const firstCoverage = {
@@ -239,14 +239,14 @@ function twoDayClosure(registry) {
   };
 }
 
-async function publishClosure(store, closure) {
-  for (const child of closure.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
-  await store.writeState(closure.state.pair.pairId, closure.state.sequence, closure.encodedState.gzipBytes);
+async function publishDataset(store, dataset) {
+  for (const child of dataset.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
+  await store.writeState(dataset.state.pair.pairId, dataset.state.sequence, dataset.encodedState.gzipBytes);
 }
 
-test("directory and GitHub carriage yield the same selected canonical closure", async () => {
+test("directory and GitHub storage return the same selected data set", async () => {
   const registry = await fixturePairRegistry();
-  const closure = pairClosure(registry);
+  const dataset = pairDataset(registry);
   const maximumArtifactBytes = registry.collection.maximumArtifactBytes;
   const directory = new DirectoryStore({
     root: await mkdtemp(join(tmpdir(), "stock-token-pair-directory-")),
@@ -259,26 +259,26 @@ test("directory and GitHub carriage yield the same selected canonical closure", 
     maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
   });
-  await publishClosure(directory, closure);
-  await publishClosure(github, closure);
+  await publishDataset(directory, dataset);
+  await publishDataset(github, dataset);
 
-  const directoryVerification = await verifyPairIndex({ registry, pairId: closure.state.pair.pairId, store: directory });
-  const githubVerification = await verifyPairIndex({ registry, pairId: closure.state.pair.pairId, store: github });
+  const directoryVerification = await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store: directory });
+  const githubVerification = await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store: github });
   assert.deepEqual(githubVerification, directoryVerification);
   assert.deepEqual(githubVerification, {
     status: "verified",
-    pairId: closure.state.pair.pairId,
+    pairId: dataset.state.pair.pairId,
     sequence: 1,
-    coverage: closure.state.coverage,
+    coverage: dataset.state.coverage,
     monthCount: 1,
     dayCount: 1,
     candleCount: 1,
   });
   assert.doesNotMatch(JSON.stringify(github), /test-token/);
 
-  const replacement = pairClosure(registry, 2);
-  await publishClosure(directory, replacement);
-  await publishClosure(github, replacement);
+  const replacement = pairDataset(registry, 2);
+  await publishDataset(directory, replacement);
+  await publishDataset(github, replacement);
   assert.equal((await readPairState({ registry, pairId: replacement.state.pair.pairId, store: directory })).sequence, 2);
   assert.equal((await readPairState({ registry, pairId: replacement.state.pair.pairId, store: github })).sequence, 2);
   const unrelatedTag = "unrelated-release";
@@ -301,9 +301,9 @@ test("directory and GitHub carriage yield the same selected canonical closure", 
   assert.equal((await verifyPairIndex({ registry, pairId: replacement.state.pair.pairId, store: github })).sequence, 2);
 });
 
-test("cleanup proves the selected carrier and omission cannot authorize child deletion", async () => {
+test("cleanup verifies the selected state file and cannot treat omission as deletion permission", async () => {
   const registry = await fixturePairRegistry();
-  const closure = twoDayClosure(registry);
+  const dataset = twoDayDataset(registry);
   const directory = new DirectoryStore({
     root: await mkdtemp(join(tmpdir(), "stock-token-pair-cleanup-safety-")),
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
@@ -315,31 +315,31 @@ test("cleanup proves the selected carrier and omission cannot authorize child de
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
   });
-  for (const store of [directory, github]) await publishClosure(store, closure);
+  for (const store of [directory, github]) await publishDataset(store, dataset);
 
-  const omittedDayPlan = structuredClone(closure.cleanupPlan);
+  const omittedDayPlan = structuredClone(dataset.cleanupPlan);
   omittedDayPlan.changedMonths[0].dayReferences.shift();
   for (const store of [directory, github]) {
     await store.cleanupSelectedGeneration(omittedDayPlan);
-    assert.equal((await verifyPairIndex({ registry, pairId: closure.state.pair.pairId, store })).status, "verified");
+    assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
   }
 
-  const unpublished = pairClosure(registry, 3);
+  const unpublished = pairDataset(registry, 3);
   for (const store of [directory, github]) {
     for (const child of unpublished.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
     await assert.rejects(
       store.cleanupSelectedGeneration(unpublished.cleanupPlan),
-      /Selected state carrier is unavailable/,
+      /Selected state file is unavailable/,
     );
-    assert.equal((await readPairState({ registry, pairId: closure.state.pair.pairId, store })).sequence, 2);
-    assert.equal((await verifyPairIndex({ registry, pairId: closure.state.pair.pairId, store })).status, "verified");
+    assert.equal((await readPairState({ registry, pairId: dataset.state.pair.pairId, store })).sequence, 2);
+    assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
   }
 });
 
-test("GitHub cleanup reports only its fixed failed boundary while the selected closure remains readable", async () => {
+test("GitHub cleanup reports only its fixed failure fields while the selected data set remains readable", async () => {
   const registry = await fixturePairRegistry();
-  const previous = pairClosure(registry, 1);
-  const selected = pairClosure(registry, 2);
+  const previous = pairDataset(registry, 1);
+  const selected = pairDataset(registry, 2);
   const githubApi = new FakeGitHub();
   const operationalLogs = [];
   const github = new GitHubReleaseStore({
@@ -349,8 +349,8 @@ test("GitHub cleanup reports only its fixed failed boundary while the selected c
     fetchImplementation: githubApi.fetch,
     writeOperationalLog: (line) => operationalLogs.push(line),
   });
-  await publishClosure(github, previous);
-  await publishClosure(github, selected);
+  await publishDataset(github, previous);
+  await publishDataset(github, selected);
   const previousMonth = previous.children.find((child) => child.reference.logicalId.includes("/months/"));
   githubApi.failDeleteAssetName = referenceObjectName(previousMonth.reference);
 
@@ -369,31 +369,31 @@ test("GitHub cleanup reports only its fixed failed boundary while the selected c
   })).sequence, 2);
 });
 
-test("cleanup plan admission closes pair, generation, and logical-identity scope", async () => {
+test("cleanup validates the pair, generation, and stored reference IDs", async () => {
   const registry = await fixturePairRegistry();
-  const closure = twoDayClosure(registry);
-  assert.equal(admitCleanupPlan(closure.cleanupPlan).changedMonths.length, 1);
+  const dataset = twoDayDataset(registry);
+  assert.equal(validateCleanupPlan(dataset.cleanupPlan).changedMonths.length, 1);
 
-  const duplicated = structuredClone(closure.cleanupPlan);
+  const duplicated = structuredClone(dataset.cleanupPlan);
   duplicated.changedMonths.push(structuredClone(duplicated.changedMonths[0]));
-  assert.throws(() => admitCleanupPlan(duplicated), /duplicated or unordered/);
+  assert.throws(() => validateCleanupPlan(duplicated), /duplicated or unordered/);
 
-  const future = structuredClone(closure.cleanupPlan);
+  const future = structuredClone(dataset.cleanupPlan);
   future.changedMonths[0].dayReferences[0].sequence = 3;
-  assert.throws(() => admitCleanupPlan(future), /does not belong/);
+  assert.throws(() => validateCleanupPlan(future), /does not belong/);
 
-  const crossPair = structuredClone(closure.cleanupPlan);
+  const crossPair = structuredClone(dataset.cleanupPlan);
   const otherPair = pairEntryBySymbol(registry, "ETH").pair.pairId;
   crossPair.changedMonths[0].dayReferences[0].logicalId = crossPair.changedMonths[0].dayReferences[0].logicalId.replace(
-    closure.state.pair.pairId,
+    dataset.state.pair.pairId,
     otherPair,
   );
-  assert.throws(() => admitCleanupPlan(crossPair), /does not belong/);
+  assert.throws(() => validateCleanupPlan(crossPair), /does not belong/);
 });
 
 test("public GitHub reads omit authorization while every mutation requires a token before network use", async () => {
   const registry = await fixturePairRegistry();
-  const closure = pairClosure(registry);
+  const dataset = pairDataset(registry);
   const githubApi = new FakeGitHub();
   const maximumArtifactBytes = registry.collection.maximumArtifactBytes;
   const writer = new GitHubReleaseStore({
@@ -402,14 +402,14 @@ test("public GitHub reads omit authorization while every mutation requires a tok
     maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
   });
-  await publishClosure(writer, closure);
+  await publishDataset(writer, dataset);
   const reader = new GitHubReleaseStore({
     repository: "owner/index",
     maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
   });
   githubApi.requests.length = 0;
-  assert.equal((await verifyPairIndex({ registry, pairId: closure.state.pair.pairId, store: reader })).status, "verified");
+  assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store: reader })).status, "verified");
   assert.ok(githubApi.requests.length > 0);
   assert.ok(githubApi.requests.every((request) => request.method === "GET" && request.authorization === null));
   const apiReads = githubApi.requests.filter((request) => new URL(request.target).hostname === "api.github.com");
@@ -419,26 +419,26 @@ test("public GitHub reads omit authorization while every mutation requires a tok
 
   const before = githubApi.requests.length;
   await assert.rejects(reader.writeState(
-    closure.state.pair.pairId,
-    closure.state.sequence,
-    closure.encodedState.gzipBytes,
+    dataset.state.pair.pairId,
+    dataset.state.sequence,
+    dataset.encodedState.gzipBytes,
   ), /token is required/);
   await assert.rejects(reader.writeReferenced(
-    closure.children[0].reference,
-    closure.children[0].encoded.gzipBytes,
+    dataset.children[0].reference,
+    dataset.children[0].encoded.gzipBytes,
   ), /token is required/);
-  await assert.rejects(reader.cleanupSelectedGeneration(closure.cleanupPlan), /token is required/);
+  await assert.rejects(reader.cleanupSelectedGeneration(dataset.cleanupPlan), /token is required/);
   assert.equal(githubApi.requests.length, before);
 });
 
 test("a bounded period read touches only its selected pair and month and reports uncovered time", async () => {
   const registry = await fixturePairRegistry();
-  const closure = pairClosure(registry);
+  const dataset = pairDataset(registry);
   const directory = new DirectoryStore({
     root: await mkdtemp(join(tmpdir(), "stock-token-pair-period-")),
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
   });
-  await publishClosure(directory, closure);
+  await publishDataset(directory, dataset);
   const logicalReads = [];
   const store = {
     readSelectedState: (...args) => directory.readSelectedState(...args),
@@ -452,7 +452,7 @@ test("a bounded period read touches only its selected pair and month and reports
     registry,
     store,
     input: {
-      pairId: closure.state.pair.pairId,
+      pairId: dataset.state.pair.pairId,
       from: "2026-08-14T14:00:00.000Z",
       until: "2026-08-14T14:03:00.000Z",
     },
@@ -461,15 +461,15 @@ test("a bounded period read touches only its selected pair and month and reports
   assert.deepEqual(result.unavailable, [{ from: "2026-08-14T14:00:00.000Z", until: "2026-08-14T14:01:00.000Z" }]);
   assert.equal(result.candles.length, 1);
   assert.deepEqual(logicalReads, [
-    `pairs/${closure.state.pair.pairId}/months/2026-08`,
-    `pairs/${closure.state.pair.pairId}/days/2026-08-14`,
+    `pairs/${dataset.state.pair.pairId}/months/2026-08`,
+    `pairs/${dataset.state.pair.pairId}/days/2026-08-14`,
   ]);
 
   const unavailableReads = [];
   const unavailable = await readPairPeriod({
     registry,
     input: {
-      pairId: closure.state.pair.pairId,
+      pairId: dataset.state.pair.pairId,
       from: "2026-08-14T14:01:00.000Z",
       until: "2026-08-14T14:03:00.000Z",
     },
@@ -487,39 +487,39 @@ test("a bounded period read touches only its selected pair and month and reports
   assert.deepEqual(unavailableReads, []);
 });
 
-test("carrier generation mismatch, missing children, and unequal immutable state bytes fail closed", async () => {
+test("stored generation mismatch, missing referenced files, and changed immutable state bytes fail", async () => {
   const registry = await fixturePairRegistry();
-  const closure = pairClosure(registry);
+  const dataset = pairDataset(registry);
   const root = await mkdtemp(join(tmpdir(), "stock-token-pair-integrity-"));
   const store = new DirectoryStore({ root, maximumArtifactBytes: registry.collection.maximumArtifactBytes });
-  for (const child of closure.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
-  await store.writeState(closure.state.pair.pairId, 2, closure.encodedState.gzipBytes);
+  for (const child of dataset.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
+  await store.writeState(dataset.state.pair.pairId, 2, dataset.encodedState.gzipBytes);
   await assert.rejects(
-    readPairState({ registry, pairId: closure.state.pair.pairId, store }),
-    /does not match its carrier generation/,
+    readPairState({ registry, pairId: dataset.state.pair.pairId, store }),
+    /does not match its stored generation/,
   );
 
   const cleanStore = new DirectoryStore({
     root: await mkdtemp(join(tmpdir(), "stock-token-pair-missing-")),
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
   });
-  await cleanStore.writeState(closure.state.pair.pairId, 1, closure.encodedState.gzipBytes);
+  await cleanStore.writeState(dataset.state.pair.pairId, 1, dataset.encodedState.gzipBytes);
   await assert.rejects(
-    verifyPairIndex({ registry, pairId: closure.state.pair.pairId, store: cleanStore }),
+    verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store: cleanStore }),
     /ENOENT/,
   );
 
-  const different = Buffer.from(closure.encodedState.gzipBytes);
+  const different = Buffer.from(dataset.encodedState.gzipBytes);
   different[different.byteLength - 1] ^= 1;
   await assert.rejects(
-    cleanStore.writeState(closure.state.pair.pairId, 1, different),
+    cleanStore.writeState(dataset.state.pair.pairId, 1, different),
     /immutable bytes differ/,
   );
 });
 
 test("a failed state upload leaves uploaded children unselected", async () => {
   const registry = await fixturePairRegistry();
-  const closure = pairClosure(registry);
+  const dataset = pairDataset(registry);
   const githubApi = new FakeGitHub();
   const store = new GitHubReleaseStore({
     repository: "owner/index",
@@ -527,11 +527,11 @@ test("a failed state upload leaves uploaded children unselected", async () => {
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
   });
-  for (const child of closure.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
+  for (const child of dataset.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
   githubApi.failStateUpload = true;
   await assert.rejects(
-    store.writeState(closure.state.pair.pairId, closure.state.sequence, closure.encodedState.gzipBytes),
+    store.writeState(dataset.state.pair.pairId, dataset.state.sequence, dataset.encodedState.gzipBytes),
     /HTTP 500/,
   );
-  assert.equal(await store.readSelectedState(closure.state.pair.pairId), null);
+  assert.equal(await store.readSelectedState(dataset.state.pair.pairId), null);
 });

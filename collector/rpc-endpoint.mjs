@@ -1,7 +1,7 @@
 export const maximumRpcEndpointCount = 3;
 export const maximumRpcBatchSize = 100;
 
-export function admitRpcUrl(value, label = "RPC URL") {
+export function validateRpcUrl(value, label = "RPC URL") {
   if (typeof value !== "string" || value.length === 0 || value.trim() !== value) {
     throw new Error(`${label} must be a nonempty URL without surrounding whitespace.`);
   }

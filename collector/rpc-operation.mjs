@@ -1,15 +1,15 @@
 import { collectPairCurrent, collectPairHistory, repairPairIndex } from "./process.mjs";
 import { maximumRpcEndpointCount, RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
 
-const operationOwners = new Map([
+const operationHandlers = new Map([
   ["current", collectPairCurrent],
   ["history", collectPairHistory],
   ["repair", repairPairIndex],
 ]);
 
 export async function runRpcPairOperation({ operation, registry, pairId, store, rpcClients, signal }) {
-  const owner = operationOwners.get(operation);
-  if (!owner) throw new Error("RPC pair operation must be current, history, or repair.");
+  const handler = operationHandlers.get(operation);
+  if (!handler) throw new Error("RPC pair operation must be current, history, or repair.");
   if (!Array.isArray(rpcClients) || rpcClients.length === 0 || rpcClients.length > maximumRpcEndpointCount || rpcClients.some((rpc) => rpc === null || typeof rpc !== "object")) {
     throw new Error("RPC endpoint set is invalid.");
   }
@@ -18,7 +18,7 @@ export async function runRpcPairOperation({ operation, registry, pairId, store, 
     signal?.throwIfAborted();
     try {
       return {
-        result: await owner({ registry, pairId, store, rpc: rpcClients[endpointIndex], signal }),
+        result: await handler({ registry, pairId, store, rpc: rpcClients[endpointIndex], signal }),
         selectedEndpointIndex: endpointIndex,
       };
     } catch (error) {

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { derivePoolId } from "./pool-key.mjs";
-import { admitRpcUrl, maximumRpcBatchSize } from "./rpc-endpoint.mjs";
+import { validateRpcUrl, maximumRpcBatchSize } from "./rpc-endpoint.mjs";
 
 const addressPattern = /^0x[0-9a-f]{40}$/;
 const bytes32Pattern = /^0x[0-9a-f]{64}$/;
@@ -46,7 +46,7 @@ function nonemptyText(value, label, maximumLength = 128) {
   }
 }
 
-function admitAsset(value, label) {
+function validateAsset(value, label) {
   if (value?.kind === "erc20") {
     exactKeys(value, ["address", "decimals", "kind"], label);
     if (!addressPattern.test(value.address) || value.address === nativeCurrency) throw new Error(`${label} ERC-20 address is invalid.`);
@@ -73,7 +73,7 @@ function assetLocator(value) {
   return `${value.kind}:${assetCurrency(value)}`;
 }
 
-function admitAssetFacts(asset, symbol, name, facts) {
+function validateAssetFacts(asset, symbol, name, facts) {
   const locator = assetLocator(asset);
   const value = JSON.stringify([asset.decimals, symbol, name]);
   const existing = facts.get(locator);
@@ -83,13 +83,15 @@ function admitAssetFacts(asset, symbol, name, facts) {
   facts.set(locator, value);
 }
 
-function admitInitialization(value) {
+// sourceInitialization is the registered pool's Initialization event, not an
+// RPC provider or one of the Swap positions stored in a candle.
+function validateSourceInitialization(value) {
   exactKeys(value, ["blockNumber", "timestamp"], "sourceInitialization");
   decimalString(value.blockNumber, "sourceInitialization.blockNumber");
   instant(value.timestamp, "sourceInitialization.timestamp");
 }
 
-function admitMinuteBoundary(value, label, withHash = false) {
+function validateMinuteBoundary(value, label, withHash = false) {
   exactKeys(value, withHash ? ["blockNumber", "hash", "timestamp"] : ["blockNumber", "timestamp"], label);
   decimalString(value.blockNumber, `${label}.blockNumber`);
   instant(value.timestamp, `${label}.timestamp`, true);
@@ -118,7 +120,7 @@ function minuteFloor(value) {
   return new Date(Math.floor(Date.parse(value) / 60_000) * 60_000).toISOString();
 }
 
-function admitPairDescriptor(value, registry) {
+function validatePairDescriptor(value, registry) {
   exactKeys(value, [
     "activation",
     "baseAsset",
@@ -137,8 +139,8 @@ function admitPairDescriptor(value, registry) {
   if (value.chainId !== registry.chain.chainId || value.finality !== registry.chain.finalityTag || value.poolManager !== registry.deployment.poolManager || value.swapTopic !== registry.deployment.swapTopic) {
     throw new Error("Pair source does not match the registry deployment.");
   }
-  admitAsset(value.baseAsset, "baseAsset");
-  admitAsset(value.quoteAsset, "quoteAsset");
+  validateAsset(value.baseAsset, "baseAsset");
+  validateAsset(value.quoteAsset, "quoteAsset");
   if (typeof value.baseIsCurrency0 !== "boolean") throw new Error("Pair orientation is invalid.");
   exactKeys(value.poolKey, ["currency0", "currency1", "fee", "hooks", "tickSpacing"], "poolKey");
   for (const key of ["currency0", "currency1", "hooks"]) {
@@ -156,9 +158,9 @@ function admitPairDescriptor(value, registry) {
   }
   if (derivePoolId(value.poolKey) !== value.pairId) throw new Error("Pair ID does not derive from its PoolKey.");
 
-  admitInitialization(value.sourceInitialization);
-  admitMinuteBoundary(value.historyStart, "historyStart");
-  admitMinuteBoundary(value.activation, "activation", true);
+  validateSourceInitialization(value.sourceInitialization);
+  validateMinuteBoundary(value.historyStart, "historyStart");
+  validateMinuteBoundary(value.activation, "activation", true);
   const initializationBlock = decimalString(value.sourceInitialization.blockNumber, "sourceInitialization.blockNumber");
   const historyBlock = decimalString(value.historyStart.blockNumber, "historyStart.blockNumber");
   const activationBlock = decimalString(value.activation.blockNumber, "activation.blockNumber");
@@ -178,7 +180,7 @@ function admitPairDescriptor(value, registry) {
   return value;
 }
 
-function admitDisplay(value) {
+function validateDisplay(value) {
   exactKeys(value, ["baseName", "baseSymbol", "label", "quoteName", "quoteSymbol"], "pair display");
   for (const key of ["baseSymbol", "quoteSymbol"]) {
     if (typeof value[key] !== "string" || !symbolPattern.test(value[key])) throw new Error(`pair display ${key} is invalid.`);
@@ -188,7 +190,7 @@ function admitDisplay(value) {
   return value;
 }
 
-export function admitPairRegistry(candidate) {
+export function validatePairRegistry(candidate) {
   exactKeys(candidate, ["chain", "collection", "deployment", "pairs"], "pair registry");
 
   exactKeys(candidate.chain, ["chainId", "finalityTag", "numericChainId", "primaryRpcUrl"], "chain");
@@ -197,7 +199,7 @@ export function admitPairRegistry(candidate) {
   if (!chainIdentity || BigInt(chainIdentity[1]) !== BigInt(candidate.chain.numericChainId) || candidate.chain.finalityTag !== "finalized") {
     throw new Error("Chain identity or finality is invalid.");
   }
-  admitRpcUrl(candidate.chain.primaryRpcUrl, "Primary RPC URL");
+  validateRpcUrl(candidate.chain.primaryRpcUrl, "Primary RPC URL");
 
   exactKeys(candidate.deployment, ["poolManager", "stateView", "swapTopic"], "deployment");
   if (!addressPattern.test(candidate.deployment.poolManager) || !addressPattern.test(candidate.deployment.stateView) || !bytes32Pattern.test(candidate.deployment.swapTopic)) {
@@ -222,10 +224,10 @@ export function admitPairRegistry(candidate) {
   for (const key of collectionKeys) positiveInteger(candidate.collection[key], `collection.${key}`);
   if (candidate.collection.candleSeconds !== 60 || candidate.collection.historyMonths !== 12) throw new Error("Unexpected candle or history boundary.");
   if (candidate.collection.headerBatchSize > maximumRpcBatchSize || candidate.collection.maximumArtifactBytes > 16_777_216 || candidate.collection.maximumResponseBytes > 16_777_216) {
-    throw new Error("Collection byte or batch boundary exceeds the admitted limit.");
+    throw new Error("A collection byte or batch limit exceeds its configured maximum.");
   }
   if (candidate.collection.maximumRpcAttempts > 10 || candidate.collection.maximumRpcRetryDelayMilliseconds > 300_000) {
-    throw new Error("RPC retry boundary exceeds the admitted limit.");
+    throw new Error("An RPC retry setting exceeds its configured maximum.");
   }
 
   if (!Array.isArray(candidate.pairs) || candidate.pairs.length === 0) {
@@ -235,10 +237,10 @@ export function admitPairRegistry(candidate) {
   let previousPairId = "";
   for (const entry of candidate.pairs) {
     exactKeys(entry, ["display", "pair"], "pair registry entry");
-    admitPairDescriptor(entry.pair, candidate);
-    admitDisplay(entry.display);
-    admitAssetFacts(entry.pair.baseAsset, entry.display.baseSymbol, entry.display.baseName, assetFacts);
-    admitAssetFacts(entry.pair.quoteAsset, entry.display.quoteSymbol, entry.display.quoteName, assetFacts);
+    validatePairDescriptor(entry.pair, candidate);
+    validateDisplay(entry.display);
+    validateAssetFacts(entry.pair.baseAsset, entry.display.baseSymbol, entry.display.baseName, assetFacts);
+    validateAssetFacts(entry.pair.quoteAsset, entry.display.quoteSymbol, entry.display.quoteName, assetFacts);
     if (entry.pair.pairId <= previousPairId) throw new Error("Pairs must be uniquely ordered by pair ID.");
     previousPairId = entry.pair.pairId;
   }
@@ -246,7 +248,7 @@ export function admitPairRegistry(candidate) {
 }
 
 export async function loadPairRegistry(path = fileURLToPath(registryUrl)) {
-  return admitPairRegistry(JSON.parse(await readFile(path, "utf8")));
+  return validatePairRegistry(JSON.parse(await readFile(path, "utf8")));
 }
 
 export function pairById(registry, pairId) {

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 
+// Canonical JSON sorts object keys and normalizes values so one valid value has one byte form.
+
 function normalize(value) {
   if (value === null || typeof value === "boolean" || typeof value === "string") {
     return value;
@@ -52,7 +54,7 @@ export function encodeArtifact(value) {
 }
 
 export function decodeArtifact(gzipBytes, maximumBytes = 16_777_216) {
-  if (!Buffer.isBuffer(gzipBytes) || gzipBytes.byteLength > maximumBytes) throw new Error("Compressed artifact exceeds the admitted byte limit.");
+  if (!Buffer.isBuffer(gzipBytes) || gzipBytes.byteLength > maximumBytes) throw new Error("Compressed data exceeds the maximum byte size.");
   const jsonBytes = gunzipSync(gzipBytes, { maxOutputLength: maximumBytes });
   const value = JSON.parse(jsonBytes.toString("utf8"));
   if (!canonicalBytes(value).equals(jsonBytes)) {

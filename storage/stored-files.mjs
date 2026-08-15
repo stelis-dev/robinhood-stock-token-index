@@ -10,12 +10,12 @@ function exactKeys(value, keys, label) {
   if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} has an invalid member set.`);
 }
 
-export function admitPairId(value) {
+export function validatePairId(value) {
   if (typeof value !== "string" || !pairIdPattern.test(value)) throw new Error("Pair ID is invalid.");
   return value;
 }
 
-export function admitCarrierSequence(value, label = "carrier sequence") {
+export function validateGeneration(value, label = "generation") {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive safe integer.`);
   return value;
 }
@@ -31,26 +31,26 @@ function canonicalPeriod(value, kind) {
   return value;
 }
 
-export function admitPairMonth(value) {
+export function validatePairMonth(value) {
   return canonicalPeriod(value, "month");
 }
 
-export function parseReferenceLogicalId(value) {
-  if (typeof value !== "string") throw new Error("Reference logical identity is invalid.");
+export function parseStoredReferenceId(value) {
+  if (typeof value !== "string") throw new Error("Stored reference ID is invalid.");
   const match = value.match(/^pairs\/(0x[0-9a-f]{64})\/(months|days)\/(.+)$/);
-  if (!match) throw new Error("Reference logical identity is invalid.");
+  if (!match) throw new Error("Stored reference ID is invalid.");
   const kind = match[2] === "months" ? "month" : "day";
   return {
-    pairId: admitPairId(match[1]),
+    pairId: validatePairId(match[1]),
     kind,
     period: canonicalPeriod(match[3], kind),
   };
 }
 
-export function admitCarriedReference(value) {
-  exactKeys(value, ["coverage", "gzipBytes", "gzipSha256", "jsonBytes", "jsonSha256", "logicalId", "sequence"], "carried reference");
-  const identity = parseReferenceLogicalId(value.logicalId);
-  admitCarrierSequence(value.sequence, "reference sequence");
+export function validateStoredReference(value) {
+  exactKeys(value, ["coverage", "gzipBytes", "gzipSha256", "jsonBytes", "jsonSha256", "logicalId", "sequence"], "stored reference");
+  const identity = parseStoredReferenceId(value.logicalId);
+  validateGeneration(value.sequence, "reference generation");
   for (const key of ["gzipBytes", "jsonBytes"]) {
     if (!Number.isSafeInteger(value[key]) || value[key] <= 0) throw new Error(`Reference ${key} is invalid.`);
   }
@@ -61,7 +61,7 @@ export function admitCarriedReference(value) {
 }
 
 function generation(value) {
-  return String(admitCarrierSequence(value)).padStart(16, "0");
+  return String(validateGeneration(value)).padStart(16, "0");
 }
 
 export function stateObjectName(sequence) {
@@ -69,12 +69,12 @@ export function stateObjectName(sequence) {
 }
 
 export function referenceObjectName(reference) {
-  const identity = admitCarriedReference(reference);
+  const identity = validateStoredReference(reference);
   return `${identity.kind}-${identity.period}-g${generation(reference.sequence)}-${reference.gzipSha256}.json.gz`;
 }
 
 export function parseReferencedObjectName(pairId, value) {
-  const ownerPairId = admitPairId(pairId);
+  const ownerPairId = validatePairId(pairId);
   const match = typeof value === "string"
     ? value.match(/^(month|day)-(.+)-g([0-9]{16})-([0-9a-f]{64})\.json\.gz$/)
     : null;
@@ -99,10 +99,10 @@ export function parseReferencedObjectName(pairId, value) {
   };
 }
 
-export function admitCleanupPlan(value) {
+export function validateCleanupPlan(value) {
   exactKeys(value, ["changedMonths", "pairId", "selectedSequence"], "cleanup plan");
-  const pairId = admitPairId(value.pairId);
-  const selectedSequence = admitCarrierSequence(value.selectedSequence, "selected state sequence");
+  const pairId = validatePairId(value.pairId);
+  const selectedSequence = validateGeneration(value.selectedSequence, "selected state generation");
   if (!Array.isArray(value.changedMonths) || value.changedMonths.length === 0) {
     throw new Error("Cleanup changed months are required.");
   }
@@ -110,21 +110,21 @@ export function admitCleanupPlan(value) {
   const logicalIds = new Set();
   const changedMonths = [];
   let previousMonth = "";
-  for (const [index, scope] of value.changedMonths.entries()) {
-    exactKeys(scope, ["dayReferences", "monthReference"], `cleanup changedMonths[${index}]`);
-    const monthIdentity = admitCarriedReference(scope.monthReference);
-    if (monthIdentity.kind !== "month" || monthIdentity.pairId !== pairId || scope.monthReference.sequence !== selectedSequence) {
+  for (const [index, changedMonth] of value.changedMonths.entries()) {
+    exactKeys(changedMonth, ["dayReferences", "monthReference"], `cleanup changedMonths[${index}]`);
+    const monthIdentity = validateStoredReference(changedMonth.monthReference);
+    if (monthIdentity.kind !== "month" || monthIdentity.pairId !== pairId || changedMonth.monthReference.sequence !== selectedSequence) {
       throw new Error("Cleanup month does not identify the selected pair generation.");
     }
     if (monthIdentity.period <= previousMonth) throw new Error("Cleanup months are duplicated or unordered.");
     previousMonth = monthIdentity.period;
-    if (!Array.isArray(scope.dayReferences) || scope.dayReferences.length === 0) {
+    if (!Array.isArray(changedMonth.dayReferences) || changedMonth.dayReferences.length === 0) {
       throw new Error("Cleanup month day references are required.");
     }
 
     const objects = [];
     const append = (reference, identity) => {
-      if (logicalIds.has(reference.logicalId)) throw new Error("Cleanup logical identities are duplicated.");
+      if (logicalIds.has(reference.logicalId)) throw new Error("Cleanup stored reference IDs are duplicated.");
       logicalIds.add(reference.logicalId);
       objects.push({
         logicalId: reference.logicalId,
@@ -132,12 +132,12 @@ export function admitCleanupPlan(value) {
         sequence: reference.sequence,
       });
     };
-    append(scope.monthReference, monthIdentity);
+    append(changedMonth.monthReference, monthIdentity);
 
     let previousDay = "";
     let ownsChangedDay = false;
-    for (const dayReference of scope.dayReferences) {
-      const dayIdentity = admitCarriedReference(dayReference);
+    for (const dayReference of changedMonth.dayReferences) {
+      const dayIdentity = validateStoredReference(dayReference);
       if (
         dayIdentity.kind !== "day"
         || dayIdentity.pairId !== pairId
@@ -151,7 +151,7 @@ export function admitCleanupPlan(value) {
       ownsChangedDay ||= dayReference.sequence === selectedSequence;
       append(dayReference, dayIdentity);
     }
-    if (!ownsChangedDay) throw new Error("Cleanup month has no owner-generation day.");
+    if (!ownsChangedDay) throw new Error("Cleanup month has no day from the selected generation.");
     changedMonths.push({ month: monthIdentity.period, objects });
   }
 
@@ -163,19 +163,19 @@ export function admitCleanupPlan(value) {
   };
 }
 
-export function verifyCarriedReferenceBytes(reference, bytes, maximumArtifactBytes) {
-  admitCarriedReference(reference);
+export function verifyStoredReferenceBytes(reference, bytes, maximumArtifactBytes) {
+  validateStoredReference(reference);
   if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
   if (!Buffer.isBuffer(bytes) || bytes.byteLength !== reference.gzipBytes || bytes.byteLength > maximumArtifactBytes || sha256Hex(bytes) !== reference.gzipSha256) {
-    throw new Error("Carried bytes do not match their reference.");
+    throw new Error("Stored bytes do not match their reference.");
   }
   return bytes;
 }
 
-export function admitStateBytes(bytes, maximumArtifactBytes) {
+export function validateStateBytes(bytes, maximumArtifactBytes) {
   if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
   if (!Buffer.isBuffer(bytes) || bytes.byteLength === 0 || bytes.byteLength > maximumArtifactBytes) {
-    throw new Error("State bytes exceed the admitted carriage boundary.");
+    throw new Error("State file is empty or exceeds the maximum byte size.");
   }
   return bytes;
 }

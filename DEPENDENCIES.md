@@ -31,4 +31,4 @@ A no-dependency implementation would require maintaining a security-sensitive
 Keccak implementation. Node's `sha3-256` is not Ethereum Keccak and cannot be
 substituted. A larger Ethereum SDK would add unrelated transports, ABI,
 signing, and chain behavior. The single zero-dependency hash package is the
-smallest complete current closure for this exact identity check.
+smallest complete current dependency set for this PoolId calculation.
