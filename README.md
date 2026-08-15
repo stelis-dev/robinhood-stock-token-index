@@ -78,9 +78,11 @@ node cli.mjs repair --pair "${PAIR_ID}" --store directory --root "${INDEX_ROOT}"
 ```
 
 The `verify` stdout envelope contains `result.coverage`. Its `fromTimestamp` and
-`untilTimestamp` are the available half-open boundary. A `read` request must be
-non-empty and stay inside one UTC calendar month. Split a coverage range at UTC
-month boundaries when it spans more than one month:
+`untilTimestamp` are the available half-open boundary. The built-in `read`
+contract accepts minute-aligned canonical UTC boundaries, rejects rather than
+rounds other boundaries, and requires a non-empty interval inside one UTC
+calendar month. Split a coverage range at UTC month boundaries when it spans
+more than one month:
 
 ```sh
 node cli.mjs read --pair "${PAIR_ID}" \
@@ -88,6 +90,13 @@ node cli.mjs read --pair "${PAIR_ID}" \
   --until 2026-08-14T15:01:00.000Z \
   --store directory --root "${INDEX_ROOT}"
 ```
+
+Pair-day and pair-month artifacts retain minute-aligned coverage, and stored
+candles remain exact one-minute candles. A downstream product whose own
+half-open request contains seconds or milliseconds keeps that public request
+unchanged, selects the overlapping monthly data, and exposes only candles fully
+contained in the original request. That downstream composition does not change
+the stored artifact contract or its version.
 
 Local collection uses the committed primary RPC. Optional fallback RPCs are
 complete HTTPS URLs supplied as `INDEX_RPC_FALLBACK_URL_0` and then
