@@ -441,8 +441,16 @@ Cleanup failure records add the fixed cleanup phase, selected generation, and
 affected month or stored object kind. These codes distinguish GitHub access,
 rate-limit, transport, HTTP, response, storage-limit, and immutable-byte failures
 without exposing a URL, response body, or token. Exhausting every configured RPC
-endpoint is reported as `component=rpc reason=all_endpoints_unavailable`; other
-collector failures use the fixed `component=collector reason=operation_rejected`.
+endpoint is reported as `component=rpc reason=all_endpoints_unavailable`. A fatal
+RPC response reports `component=rpc` with one of `activation_boundary_mismatch`,
+`chain_identity_mismatch`, `http_rejected`, `response_envelope_invalid`,
+`response_not_json`, `response_result_invalid`, `response_too_large`, or
+`rpc_error`. The applicable numeric facts, `http_status` and `rpc_code`, contain
+only the admitted integer status or JSON-RPC error code. Stored bytes or a
+stored file that fails its contract reports
+`component=stored_data reason=integrity_rejected`. Only a remaining collector
+invariant uses
+`component=collector reason=operation_rejected`.
 
 Fallback improves availability, but it cannot prove that an HTTP 200
 `eth_getLogs` response contains every log. GitHub Actions and Releases remain

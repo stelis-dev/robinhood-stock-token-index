@@ -9,9 +9,11 @@ import {
   selectRpcUrls,
 } from "../cli.mjs";
 import { loadPairRegistry } from "../collector/pair-registry.mjs";
+import { RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
 import { RpcPairOperationUnavailableError } from "../collector/rpc-operation.mjs";
 import { loadCollectionPlan } from "../scheduler/collection-plan.mjs";
 import { GitHubStorageError } from "../storage/github-release-store.mjs";
+import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 
 test("the CLI validates one PoolId and sends read and storage options to their responsible components", async () => {
@@ -70,6 +72,9 @@ test("the CLI fixes the registry primary and validates only two contiguous secre
 
 test("Actions logging reveals fixed operation, endpoint, and failure classifications only", () => {
   const pairId = `0x${"1".repeat(64)}`;
+  assert.throws(() => new RpcResponseRejectedError("provider_specific_reason"), /reason is invalid/);
+  assert.throws(() => new RpcResponseRejectedError("http_rejected"), /HTTP status is invalid/);
+  assert.throws(() => new RpcResponseRejectedError("rpc_error"), /error code is invalid/);
   assert.equal(rpcEndpointSourceName(0), "registry.chain.primaryRpcUrl");
   assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
   assert.equal(rpcEndpointSourceName(2), "INDEX_RPC_FALLBACK_URL_1");
@@ -101,6 +106,24 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
       new RpcPairOperationUnavailableError(),
     ),
     `pair_operation=current status=failed component=rpc reason=all_endpoints_unavailable pair_id=${pairId}\n`,
+  );
+  assert.equal(
+    pairOperationFailureLog(
+      "history",
+      pairId,
+      { GITHUB_ACTIONS: "true" },
+      new RpcResponseRejectedError("rpc_error", { rpcCode: -32000 }),
+    ),
+    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_code=-32000 pair_id=${pairId}\n`,
+  );
+  assert.equal(
+    pairOperationFailureLog(
+      "history",
+      pairId,
+      { GITHUB_ACTIONS: "true" },
+      new StoredDataIntegrityError(),
+    ),
+    `pair_operation=history status=failed component=stored_data reason=integrity_rejected pair_id=${pairId}\n`,
   );
 });
 

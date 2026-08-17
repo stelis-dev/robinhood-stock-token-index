@@ -8,10 +8,20 @@ import {
 } from "./pair-artifact.mjs";
 import { validatePairPeriodInput, validatePairPeriodResult } from "./pair-period.mjs";
 import { pairById } from "./pair-registry.mjs";
+import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
 
-function exactReference(references, logicalId, label) {
+function validateStoredData(action) {
+  try {
+    return action();
+  } catch (error) {
+    if (error instanceof StoredDataIntegrityError) throw error;
+    throw new StoredDataIntegrityError();
+  }
+}
+
+function exactReference(references, logicalId) {
   const reference = references.find((candidate) => candidate.logicalId === logicalId);
-  if (!reference) throw new Error(`${label} reference is missing from the selected pair state.`);
+  if (!reference) throw new StoredDataIntegrityError();
   return reference;
 }
 
@@ -19,20 +29,24 @@ export async function readPairState({ registry, pairId, store }) {
   pairById(registry, pairId);
   const selected = await store.readSelectedState(pairId);
   if (selected === null) return null;
-  if (selected === undefined || !Number.isSafeInteger(selected.sequence) || !Buffer.isBuffer(selected.gzipBytes)) {
-    throw new Error("Selected state record is invalid.");
-  }
-  const state = decodePairState(selected.gzipBytes, { registry }, pairId);
-  if (state.sequence !== selected.sequence) throw new Error("Selected state sequence does not match its stored generation.");
-  return state;
+  return validateStoredData(() => {
+    if (selected === undefined || !Number.isSafeInteger(selected.sequence) || !Buffer.isBuffer(selected.gzipBytes)) {
+      throw new StoredDataIntegrityError();
+    }
+    const state = decodePairState(selected.gzipBytes, { registry }, pairId);
+    if (state.sequence !== selected.sequence) throw new StoredDataIntegrityError();
+    return state;
+  });
 }
 
 export async function readPairMonth({ registry, store, reference }) {
-  return decodePairMonth(await store.readReferenced(reference), { registry }, reference);
+  const bytes = await store.readReferenced(reference);
+  return validateStoredData(() => decodePairMonth(bytes, { registry }, reference));
 }
 
 export async function readPairDay({ registry, store, reference }) {
-  return decodePairDay(await store.readReferenced(reference), { registry }, reference);
+  const bytes = await store.readReferenced(reference);
+  return validateStoredData(() => decodePairDay(bytes, { registry }, reference));
 }
 
 export async function verifyPairIndex({ registry, pairId, store }) {
@@ -44,7 +58,7 @@ export async function verifyPairIndex({ registry, pairId, store }) {
   for (const monthReference of state.months) {
     const monthIdentity = monthReference.logicalId.slice(-7);
     if (await store.resolvePairMonth(pairId, monthIdentity) !== "present") {
-      throw new Error("A selected pair month is unavailable.");
+      throw new StoredDataIntegrityError();
     }
     const month = await readPairMonth({ registry, store, reference: monthReference });
     for (const dayReference of month.days) {
@@ -96,7 +110,7 @@ export async function readPairPeriod({ registry, input, store }) {
     const until = minimum(request.until, state.coverage.untilTimestamp);
     if (from < until) {
       const monthIdentity = from.slice(0, 7);
-      const monthReference = exactReference(state.months, pairMonthLogicalId(request.pairId, monthIdentity), "Pair month");
+      const monthReference = exactReference(state.months, pairMonthLogicalId(request.pairId, monthIdentity));
       const resolved = await store.resolvePairMonth(request.pairId, monthIdentity);
       if (resolved !== "present" && resolved !== "unavailable") throw new Error("Pair month resolution is invalid.");
       if (resolved === "present") {

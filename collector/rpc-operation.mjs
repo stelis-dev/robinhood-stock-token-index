@@ -1,5 +1,9 @@
 import { collectPairCurrent, collectPairHistory, repairPairIndex } from "./process.mjs";
-import { maximumRpcEndpointCount, RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
+import {
+  maximumRpcEndpointCount,
+  RpcEndpointUnavailableError,
+  RpcResponseRejectedError,
+} from "./rpc-endpoint.mjs";
 
 const operationHandlers = new Map([
   ["current", collectPairCurrent],
@@ -15,9 +19,13 @@ export class RpcPairOperationUnavailableError extends Error {
 }
 
 export function rpcOperationFailureFields(error) {
-  return error instanceof RpcPairOperationUnavailableError
-    ? "component=rpc reason=all_endpoints_unavailable"
-    : null;
+  if (error instanceof RpcPairOperationUnavailableError) {
+    return "component=rpc reason=all_endpoints_unavailable";
+  }
+  if (!(error instanceof RpcResponseRejectedError)) return null;
+  const httpStatus = error.httpStatus === undefined ? "" : ` http_status=${error.httpStatus}`;
+  const rpcCode = error.rpcCode === undefined ? "" : ` rpc_code=${error.rpcCode}`;
+  return `component=rpc reason=${error.reason}${httpStatus}${rpcCode}`;
 }
 
 export async function runRpcPairOperation({ operation, registry, pairId, store, rpcClients, signal }) {

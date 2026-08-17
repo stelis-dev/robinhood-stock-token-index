@@ -11,6 +11,7 @@ import {
 import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
 import { pairById } from "../collector/pair-registry.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
+import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 
@@ -394,7 +395,7 @@ test("a changed child must be validated from storage before state selection", as
 
   await assert.rejects(
     collectPairCurrent({ registry, pairId: pair.pairId, store, rpc }),
-    /Stored bytes do not match their reference/,
+    (error) => error instanceof StoredDataIntegrityError,
   );
   assert.equal(stateWriteReached, false);
   assert.equal(await directory.readSelectedState(pair.pairId), null);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RpcEndpointUnavailableError } from "../collector/rpc-endpoint.mjs";
+import { RpcEndpointUnavailableError, RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
 import { RpcClient } from "../collector/rpc-client.mjs";
 
 function clientOptions(overrides = {}) {
@@ -45,7 +45,9 @@ test("the RPC client stops reading beyond the response byte boundary", async () 
     maximumResponseBytes: 16,
     fetchImplementation: async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "x".repeat(100) })),
   }));
-  await assert.rejects(client.call("eth_chainId", []), /maximum byte size/);
+  await assert.rejects(client.call("eth_chainId", []), (error) => (
+    error instanceof RpcResponseRejectedError && error.reason === "response_too_large"
+  ));
 });
 
 test("the RPC client retries a 429 with the same request and honors Retry-After", async () => {
@@ -110,8 +112,12 @@ test("RPC failures do not expose endpoint or untrusted provider text", async () 
     })),
   }));
   await assert.rejects(provider.call("eth_chainId", []), (error) => {
-    assert.equal(error.message, "RPC eth_chainId failed with code -32000.");
+    assert.ok(error instanceof RpcResponseRejectedError);
+    assert.equal(error.reason, "rpc_error");
+    assert.equal(error.rpcCode, -32000);
+    assert.equal(error.message, "RPC response was rejected.");
     assert.doesNotMatch(error.message, new RegExp(endpointToken));
+    assert.doesNotMatch(JSON.stringify(error), new RegExp(endpointToken));
     return true;
   });
 });
@@ -124,7 +130,11 @@ test("the RPC client does not retry a non-transient HTTP failure", async () => {
       return new Response("bad request", { status: 400 });
     },
   }));
-  await assert.rejects(client.call("eth_chainId", []), /RPC HTTP 400\./);
+  await assert.rejects(client.call("eth_chainId", []), (error) => (
+    error instanceof RpcResponseRejectedError
+      && error.reason === "http_rejected"
+      && error.httpStatus === 400
+  ));
   assert.equal(attempts, 1);
 });
 
@@ -286,7 +296,9 @@ test("fatal batch errors take precedence over availability errors", async () => 
     await assert.rejects(client.batch([
       { method: "eth_getBlockByNumber", params: ["0x1", false] },
       { method: "eth_getBlockByNumber", params: ["0x2", false] },
-    ]), /requested number/);
+    ]), (error) => (
+      error instanceof RpcResponseRejectedError && error.reason === "response_result_invalid"
+    ));
     assert.equal(attempts, 1);
   }
 });
@@ -361,6 +373,8 @@ test("malformed success responses remain fatal and are not retried", async () =>
       }));
     },
   }));
-  await assert.rejects(client.call("eth_chainId", []), /exactly one result or error/);
+  await assert.rejects(client.call("eth_chainId", []), (error) => (
+    error instanceof RpcResponseRejectedError && error.reason === "response_envelope_invalid"
+  ));
   assert.equal(attempts, 1);
 });

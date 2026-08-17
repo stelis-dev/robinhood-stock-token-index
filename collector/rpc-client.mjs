@@ -1,25 +1,40 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { isCanonicalHexQuantity, parseHexQuantity, safeHexQuantityNumber } from "./hex-quantity.mjs";
-import { validateRpcUrl, maximumRpcBatchSize, RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
+import {
+  validateRpcUrl,
+  maximumRpcBatchSize,
+  RpcEndpointUnavailableError,
+  RpcResponseRejectedError,
+} from "./rpc-endpoint.mjs";
 
 const allowedMethods = new Set(["eth_chainId", "eth_getBlockByNumber", "eth_getLogs"]);
 const accessDeniedHttpStatuses = new Set([401, 403]);
 const unavailableRpcErrorCodes = new Set([-32601, -32004, -32006]);
 const retryableRpcErrorCodes = new Set([-32603, -32001, -32002, -32005]);
 
-class RpcResponseBoundaryError extends Error {}
-
 function exactBlock(candidate) {
-  if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("Block response is invalid.");
-  if (!/^0x[0-9a-f]{64}$/.test(candidate.hash)) throw new Error("Block hash is invalid.");
-  parseHexQuantity(candidate.number, "block number");
-  parseHexQuantity(candidate.timestamp, "block timestamp");
+  if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+    throw new RpcResponseRejectedError("response_result_invalid");
+  }
+  if (!/^0x[0-9a-f]{64}$/.test(candidate.hash)) {
+    throw new RpcResponseRejectedError("response_result_invalid");
+  }
+  try {
+    parseHexQuantity(candidate.number, "block number");
+    parseHexQuantity(candidate.timestamp, "block timestamp");
+  } catch {
+    throw new RpcResponseRejectedError("response_result_invalid");
+  }
   return { hash: candidate.hash, number: candidate.number, timestamp: candidate.timestamp };
 }
 
 function validateRpcResult(result, request) {
   if (request.method === "eth_chainId") {
-    parseHexQuantity(result, "chain ID");
+    try {
+      parseHexQuantity(result, "chain ID");
+    } catch {
+      throw new RpcResponseRejectedError("response_result_invalid");
+    }
     return { result };
   }
   if (request.method === "eth_getBlockByNumber") {
@@ -27,12 +42,12 @@ function validateRpcResult(result, request) {
     const block = exactBlock(result);
     const selector = request.params?.[0];
     if (isCanonicalHexQuantity(selector) && BigInt(block.number) !== BigInt(selector)) {
-      throw new Error("RPC block response does not match the requested number.");
+      throw new RpcResponseRejectedError("response_result_invalid");
     }
     return { result: block };
   }
   if (request.method === "eth_getLogs") {
-    if (!Array.isArray(result)) throw new Error("RPC log result is not an array.");
+    if (!Array.isArray(result)) throw new RpcResponseRejectedError("response_result_invalid");
     return { result };
   }
   throw new Error("RPC response method is unsupported.");
@@ -40,30 +55,30 @@ function validateRpcResult(result, request) {
 
 function validateRpcEntry(entry, request) {
   if (entry === null || typeof entry !== "object" || Array.isArray(entry) || entry.jsonrpc !== "2.0" || entry.id !== request.id) {
-    throw new Error("RPC response envelope is invalid.");
+    throw new RpcResponseRejectedError("response_envelope_invalid");
   }
   const hasResult = Object.hasOwn(entry, "result");
   const hasError = Object.hasOwn(entry, "error");
-  if (hasResult === hasError) throw new Error("RPC response must contain exactly one result or error.");
+  if (hasResult === hasError) throw new RpcResponseRejectedError("response_envelope_invalid");
   if (hasResult) return validateRpcResult(entry.result, request);
   if (entry.error === null || typeof entry.error !== "object" || Array.isArray(entry.error) || !Number.isSafeInteger(entry.error.code) || typeof entry.error.message !== "string") {
-    throw new Error("RPC error response is invalid.");
+    throw new RpcResponseRejectedError("response_envelope_invalid");
   }
   if (unavailableRpcErrorCodes.has(entry.error.code)) return { unavailable: true };
   if (retryableRpcErrorCodes.has(entry.error.code)) return { retryable: true };
-  throw new Error(`RPC ${request.method} failed with code ${entry.error.code}.`);
+  throw new RpcResponseRejectedError("rpc_error", { rpcCode: entry.error.code });
 }
 
 function validateRpcResponse(value, requests, batch) {
   const entries = batch ? value : [value];
   if (!Array.isArray(entries) || entries.length !== requests.length) {
-    throw new Error(batch ? "RPC batch response count is invalid." : "RPC response envelope is invalid.");
+    throw new RpcResponseRejectedError("response_envelope_invalid");
   }
   const expectedIds = new Set(requests.map((request) => request.id));
   const byId = new Map();
   for (const entry of entries) {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry) || !Number.isSafeInteger(entry.id) || !expectedIds.has(entry.id) || byId.has(entry.id)) {
-      throw new Error(batch ? "RPC batch response envelope is invalid." : "RPC response envelope is invalid.");
+      throw new RpcResponseRejectedError("response_envelope_invalid");
     }
     byId.set(entry.id, entry);
   }
@@ -72,7 +87,7 @@ function validateRpcResponse(value, requests, batch) {
   let retryable = false;
   for (const request of requests) {
     const entry = byId.get(request.id);
-    if (entry === undefined) throw new Error(batch ? "RPC batch response omitted an ID." : "RPC response envelope is invalid.");
+    if (entry === undefined) throw new RpcResponseRejectedError("response_envelope_invalid");
     const validated = validateRpcEntry(entry, request);
     if (validated.unavailable === true) unavailable = true;
     if (validated.retryable === true) retryable = true;
@@ -85,7 +100,7 @@ function validateRpcResponse(value, requests, batch) {
 async function readBoundedResponse(response, maximumResponseBytes) {
   const contentLength = response.headers?.get?.("content-length");
   if (contentLength !== null && contentLength !== undefined && Number(contentLength) > maximumResponseBytes) {
-    throw new RpcResponseBoundaryError("RPC response exceeds the maximum byte size.");
+    throw new RpcResponseRejectedError("response_too_large");
   }
   const chunks = [];
   let byteLength = 0;
@@ -101,7 +116,7 @@ async function readBoundedResponse(response, maximumResponseBytes) {
         } catch {
           // The response-size boundary remains authoritative over stream cleanup.
         }
-        throw new RpcResponseBoundaryError("RPC response exceeds the maximum byte size.");
+        throw new RpcResponseRejectedError("response_too_large");
       }
       chunks.push(Buffer.from(value));
     }
@@ -111,7 +126,7 @@ async function readBoundedResponse(response, maximumResponseBytes) {
     chunks.push(value);
   }
   const bytes = Buffer.concat(chunks, byteLength);
-  if (bytes.byteLength > maximumResponseBytes) throw new RpcResponseBoundaryError("RPC response exceeds the maximum byte size.");
+  if (bytes.byteLength > maximumResponseBytes) throw new RpcResponseRejectedError("response_too_large");
   return bytes;
 }
 
@@ -221,7 +236,9 @@ export class RpcClient {
       if (!response.ok) {
         await cancelResponseBody(response);
         if (accessDeniedHttpStatuses.has(response.status)) throw new RpcEndpointUnavailableError();
-        if (!isRetryableHttpStatus(response.status)) throw new Error(`RPC HTTP ${response.status}.`);
+        if (!isRetryableHttpStatus(response.status)) {
+          throw new RpcResponseRejectedError("http_rejected", { httpStatus: response.status });
+        }
         const retryAfter = retryAfterMilliseconds(response.headers?.get?.("retry-after"), this.now());
         const retryDelay = retryAfter ?? this.#backoff(attempt);
         if (retryDelay > this.maximumRpcRetryDelayMilliseconds) {
@@ -235,7 +252,7 @@ export class RpcClient {
         bytes = await readBoundedResponse(response, this.maximumResponseBytes);
       } catch (error) {
         this.signal?.throwIfAborted();
-        if (error instanceof RpcResponseBoundaryError) throw error;
+        if (error instanceof RpcResponseRejectedError) throw error;
         await this.#retry(attempt);
         continue;
       }
@@ -243,7 +260,7 @@ export class RpcClient {
       try {
         value = JSON.parse(bytes.toString("utf8"));
       } catch {
-        throw new Error("RPC response is not JSON.");
+        throw new RpcResponseRejectedError("response_not_json");
       }
       const validated = validateRpcResponse(value, requests, batch);
       if (validated.unavailable === true) throw new RpcEndpointUnavailableError();
@@ -274,7 +291,7 @@ export class RpcClient {
 
   async verifyChain(numericChainId) {
     const observed = BigInt(await this.call("eth_chainId", []));
-    if (observed !== BigInt(numericChainId)) throw new Error("RPC chain identity mismatch.");
+    if (observed !== BigInt(numericChainId)) throw new RpcResponseRejectedError("chain_identity_mismatch");
   }
 
   async getBlock(selector) {
@@ -322,5 +339,9 @@ export class RpcClient {
 }
 
 export function blockTimestamp(block) {
-  return safeHexQuantityNumber(block.timestamp, "Block timestamp");
+  try {
+    return safeHexQuantityNumber(block.timestamp, "Block timestamp");
+  } catch {
+    throw new RpcResponseRejectedError("response_result_invalid");
+  }
 }

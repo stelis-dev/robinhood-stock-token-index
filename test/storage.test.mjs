@@ -10,7 +10,11 @@ import {
   encodePairState,
 } from "../collector/pair-artifact.mjs";
 import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
-import { validateCleanupPlan, referenceObjectName } from "../storage/stored-files.mjs";
+import {
+  validateCleanupPlan,
+  referenceObjectName,
+  StoredDataIntegrityError,
+} from "../storage/stored-files.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { GitHubReleaseStore, GitHubStorageError } from "../storage/github-release-store.mjs";
 import { fixturePairRegistry, pairCandle, pairEntryBySymbol } from "./pair-fixtures.mjs";
@@ -648,7 +652,7 @@ test("stored generation mismatch, missing referenced files, and changed immutabl
   await store.writeState(dataset.state.pair.pairId, 2, dataset.encodedState.gzipBytes);
   await assert.rejects(
     readPairState({ registry, pairId: dataset.state.pair.pairId, store }),
-    /does not match its stored generation/,
+    (error) => error instanceof StoredDataIntegrityError,
   );
 
   const cleanStore = new DirectoryStore({

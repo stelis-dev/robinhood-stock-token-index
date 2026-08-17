@@ -163,6 +163,11 @@ Terms used in this file:
   successful. After an uncertain Release creation or asset upload, read the
   exact remote identity and verify uploaded bytes before repeating the mutation.
   Do not make cleanup non-blocking or hide an exhausted storage failure.
+- Operational failure logs classify fatal RPC responses, stored-data integrity,
+  and collector invariants at their responsible boundary. Log only fixed reason
+  names and admitted numeric HTTP or JSON-RPC codes; never log endpoint URLs,
+  provider messages, response bodies, tokens, or stack traces. Classification
+  does not change retry, fallback, publication, or group-failure behavior.
 - Store processed candles and continuous coverage. Do not store raw RPC
   responses, invented candles, a general transaction index, the RPC provider
   used, or a storage URL.

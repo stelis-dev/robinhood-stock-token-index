@@ -13,6 +13,7 @@ import {
 import { runCollectionGroup } from "./scheduler/run-collection-group.mjs";
 import { createStore } from "./storage/create-store.mjs";
 import { githubStorageFailureFields } from "./storage/github-release-store.mjs";
+import { storedDataFailureFields } from "./storage/stored-files.mjs";
 
 const operations = new Set(["collect", "read", "repair", "verify"]);
 const flags = new Set(["--from", "--group", "--pair", "--repository", "--root", "--schedule", "--store", "--until"]);
@@ -43,7 +44,9 @@ export function pairOperationFailureLog(phase, pairId, environment, error) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
   if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("Pair operation phase is invalid.");
   if (typeof pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Pair operation identity is invalid.");
-  const failure = githubStorageFailureFields(error) ?? rpcOperationFailureFields(error);
+  const failure = githubStorageFailureFields(error)
+    ?? rpcOperationFailureFields(error)
+    ?? storedDataFailureFields(error);
   const fields = failure === null ? "component=collector reason=operation_rejected" : failure;
   return `pair_operation=${phase} status=failed ${fields} pair_id=${pairId}\n`;
 }

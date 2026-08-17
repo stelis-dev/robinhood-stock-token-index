@@ -1,5 +1,18 @@
 import { sha256Hex } from "../collector/canonical.mjs";
 
+export class StoredDataIntegrityError extends Error {
+  constructor() {
+    super("Stored data failed integrity validation.");
+    this.name = "StoredDataIntegrityError";
+  }
+}
+
+export function storedDataFailureFields(error) {
+  return error instanceof StoredDataIntegrityError
+    ? "component=stored_data reason=integrity_rejected"
+    : null;
+}
+
 const pairIdPattern = /^0x[0-9a-f]{64}$/;
 const digestPattern = /^[0-9a-f]{64}$/;
 const monthPattern = /^\d{4}-\d{2}$/;
@@ -167,7 +180,7 @@ export function verifyStoredReferenceBytes(reference, bytes, maximumArtifactByte
   validateStoredReference(reference);
   if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
   if (!Buffer.isBuffer(bytes) || bytes.byteLength !== reference.gzipBytes || bytes.byteLength > maximumArtifactBytes || sha256Hex(bytes) !== reference.gzipSha256) {
-    throw new Error("Stored bytes do not match their reference.");
+    throw new StoredDataIntegrityError();
   }
   return bytes;
 }
@@ -175,7 +188,7 @@ export function verifyStoredReferenceBytes(reference, bytes, maximumArtifactByte
 export function validateStateBytes(bytes, maximumArtifactBytes) {
   if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
   if (!Buffer.isBuffer(bytes) || bytes.byteLength === 0 || bytes.byteLength > maximumArtifactBytes) {
-    throw new Error("State file is empty or exceeds the maximum byte size.");
+    throw new StoredDataIntegrityError();
   }
   return bytes;
 }

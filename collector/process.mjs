@@ -15,7 +15,7 @@ import {
   samePairState,
 } from "./pair-reader.mjs";
 import { pairById } from "./pair-registry.mjs";
-import { RpcEndpointUnavailableError } from "./rpc-endpoint.mjs";
+import { RpcEndpointUnavailableError, RpcResponseRejectedError } from "./rpc-endpoint.mjs";
 import { blockTimestamp } from "./rpc-client.mjs";
 import { decodeSwapLog, validateSwapLogBlockNumber } from "./swap.mjs";
 
@@ -37,6 +37,15 @@ function minimum(left, right) {
 
 function maximum(left, right) {
   return left > right ? left : right;
+}
+
+function admittedRpcLogBlockNumber(log) {
+  try {
+    return validateSwapLogBlockNumber(log);
+  } catch (error) {
+    if (error instanceof RpcResponseRejectedError) throw error;
+    throw new RpcResponseRejectedError("response_result_invalid");
+  }
 }
 
 function replaceReference(references, replacement) {
@@ -102,7 +111,7 @@ async function verifyActivationBoundary(pair, rpc) {
     || block.hash !== pair.activation.hash
     || instant(blockTimestamp(block)) !== pair.activation.timestamp
   ) {
-    throw new Error("RPC activation boundary does not match the committed pair source.");
+    throw new RpcResponseRejectedError("activation_boundary_mismatch");
   }
 }
 
@@ -164,8 +173,10 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
     });
     const blockNumbers = [];
     for (const log of logs) {
-      const blockNumber = validateSwapLogBlockNumber(log);
-      if (blockNumber < cursor || blockNumber >= rangeUntil) throw new Error("RPC returned a log outside the requested range.");
+      const blockNumber = admittedRpcLogBlockNumber(log);
+      if (blockNumber < cursor || blockNumber >= rangeUntil) {
+        throw new RpcResponseRejectedError("response_result_invalid");
+      }
       blockNumbers.push(blockNumber);
     }
     const headers = logs.length === 0
@@ -175,10 +186,10 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
     for (let index = 0; index < logs.length; index += 1) {
       const log = logs[index];
       const header = headers.get(blockNumbers[index].toString());
-      if (!header) throw new Error("RPC omitted a block header for a Swap log.");
+      if (!header) throw new RpcResponseRejectedError("response_result_invalid");
       const decoded = decodeSwapLog(log, { registry, pair, block: header });
       if (decoded.blockTimestamp < rangeFromSeconds || decoded.blockTimestamp >= rangeUntilSeconds) {
-        throw new Error("Swap block timestamp is outside the fixed collection range.");
+        throw new RpcResponseRejectedError("response_result_invalid");
       }
       swaps.push(decoded);
     }

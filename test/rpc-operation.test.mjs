@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { readPairPeriod, readPairState } from "../collector/pair-reader.mjs";
-import { maximumRpcEndpointCount, RpcEndpointUnavailableError } from "../collector/rpc-endpoint.mjs";
+import {
+  maximumRpcEndpointCount,
+  RpcEndpointUnavailableError,
+  RpcResponseRejectedError,
+} from "../collector/rpc-endpoint.mjs";
 import { RpcPairOperationUnavailableError, runRpcPairOperation } from "../collector/rpc-operation.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
@@ -126,7 +130,9 @@ test("a Swap header outside the fixed time range is fatal and cannot be dropped 
     pairId: pair.pairId,
     store,
     rpcClients: [primary, { async verifyChain() { fallbackUsed = true; } }],
-  }), /outside the fixed collection range/);
+  }), (error) => (
+    error instanceof RpcResponseRejectedError && error.reason === "response_result_invalid"
+  ));
   assert.equal(fallbackUsed, false);
   assert.deepEqual(writes, []);
   assert.equal(await directory.readSelectedState(pair.pairId), null);
@@ -189,7 +195,9 @@ test("a committed activation mismatch is fatal rather than an availability fallb
     pairId: pair.pairId,
     store,
     rpcClients: [rpc, { async verifyChain() { fallbackUsed = true; } }],
-  }), /activation boundary/);
+  }), (error) => (
+    error instanceof RpcResponseRejectedError && error.reason === "activation_boundary_mismatch"
+  ));
   assert.equal(fallbackUsed, false);
 });
 
