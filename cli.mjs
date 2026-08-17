@@ -3,7 +3,7 @@
 import { pathToFileURL } from "node:url";
 import { readPairPeriod, verifyPairIndex } from "./collector/pair-reader.mjs";
 import { loadPairRegistry, pairById } from "./collector/pair-registry.mjs";
-import { runRpcPairOperation } from "./collector/rpc-operation.mjs";
+import { rpcOperationFailureFields, runRpcPairOperation } from "./collector/rpc-operation.mjs";
 import { RpcClient } from "./collector/rpc-client.mjs";
 import { validateRpcUrl, maximumRpcEndpointCount } from "./collector/rpc-endpoint.mjs";
 import {
@@ -12,6 +12,7 @@ import {
 } from "./scheduler/collection-plan.mjs";
 import { runCollectionGroup } from "./scheduler/run-collection-group.mjs";
 import { createStore } from "./storage/create-store.mjs";
+import { githubStorageFailureFields } from "./storage/github-release-store.mjs";
 
 const operations = new Set(["collect", "read", "repair", "verify"]);
 const flags = new Set(["--from", "--group", "--pair", "--repository", "--root", "--schedule", "--store", "--until"]);
@@ -38,11 +39,13 @@ export function rpcEndpointSelectionLog(phase, index, environment) {
   return `rpc_attempt=${phase} rpc_endpoint_source=${rpcEndpointSourceName(index)}\n`;
 }
 
-export function pairOperationFailureLog(phase, pairId, environment) {
+export function pairOperationFailureLog(phase, pairId, environment, error) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
   if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("Pair operation phase is invalid.");
   if (typeof pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Pair operation identity is invalid.");
-  return `pair_operation=${phase} status=failed pair_id=${pairId}\n`;
+  const failure = githubStorageFailureFields(error) ?? rpcOperationFailureFields(error);
+  const fields = failure === null ? "component=collector reason=operation_rejected" : failure;
+  return `pair_operation=${phase} status=failed ${fields} pair_id=${pairId}\n`;
 }
 
 export function selectRpcUrls(registry, environment) {
@@ -140,8 +143,8 @@ function writeSelection(phase, completed, environment) {
   if (line !== null) process.stderr.write(line);
 }
 
-function writeOperationFailure(phase, pairId, environment) {
-  const line = pairOperationFailureLog(phase, pairId, environment);
+function writeOperationFailure(phase, pairId, environment, error) {
+  const line = pairOperationFailureLog(phase, pairId, environment, error);
   if (line !== null) process.stderr.write(line);
 }
 
@@ -158,7 +161,7 @@ async function runPairOperation({ phase, registry, pairId, store, clients, signa
     writeSelection(phase, completed, environment);
     return completed.result;
   } catch (error) {
-    writeOperationFailure(phase, pairId, environment);
+    writeOperationFailure(phase, pairId, environment, error);
     throw error;
   }
 }

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { readPairPeriod, readPairState } from "../collector/pair-reader.mjs";
 import { maximumRpcEndpointCount, RpcEndpointUnavailableError } from "../collector/rpc-endpoint.mjs";
-import { runRpcPairOperation } from "../collector/rpc-operation.mjs";
+import { RpcPairOperationUnavailableError, runRpcPairOperation } from "../collector/rpc-operation.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
@@ -222,7 +222,7 @@ test("repair rejects an endpoint behind the stored range and never reads past th
   assert.ok(fallback.blockSearches.every((search) => search.maximumBlock <= activation + 359n));
 });
 
-test("the endpoint runner accepts at most three clients and returns one generic final error", async () => {
+test("the endpoint runner accepts at most three clients and returns one typed generic final error", async () => {
   const registry = await compactPairRegistry();
   const pairId = pairEntryBySymbol(registry, "NVDA").pair.pairId;
   let used = false;
@@ -244,6 +244,7 @@ test("the endpoint runner accepts at most three clients and returns one generic 
     store: {},
     rpcClients: [unavailable, { ...unavailable }],
   }), (error) => {
+    assert.ok(error instanceof RpcPairOperationUnavailableError);
     assert.equal(error.message, "All RPC endpoints were unavailable.");
     return true;
   });

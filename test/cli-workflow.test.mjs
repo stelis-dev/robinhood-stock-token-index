@@ -9,7 +9,9 @@ import {
   selectRpcUrls,
 } from "../cli.mjs";
 import { loadPairRegistry } from "../collector/pair-registry.mjs";
+import { RpcPairOperationUnavailableError } from "../collector/rpc-operation.mjs";
 import { loadCollectionPlan } from "../scheduler/collection-plan.mjs";
+import { GitHubStorageError } from "../storage/github-release-store.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 
 test("the CLI validates one PoolId and sends read and storage options to their responsible components", async () => {
@@ -66,7 +68,7 @@ test("the CLI fixes the registry primary and validates only two contiguous secre
   assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://two.example/#token" }), /fragment/);
 });
 
-test("Actions logging reveals only the operation part and fixed endpoint source name", () => {
+test("Actions logging reveals fixed operation, endpoint, and failure classifications only", () => {
   const pairId = `0x${"1".repeat(64)}`;
   assert.equal(rpcEndpointSourceName(0), "registry.chain.primaryRpcUrl");
   assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
@@ -80,7 +82,25 @@ test("Actions logging reveals only the operation part and fixed endpoint source 
   assert.equal(pairOperationFailureLog("current", pairId, {}), null);
   assert.equal(
     pairOperationFailureLog("current", pairId, { GITHUB_ACTIONS: "true" }),
-    `pair_operation=current status=failed pair_id=${pairId}\n`,
+    `pair_operation=current status=failed component=collector reason=operation_rejected pair_id=${pairId}\n`,
+  );
+  assert.equal(
+    pairOperationFailureLog(
+      "history",
+      pairId,
+      { GITHUB_ACTIONS: "true" },
+      new GitHubStorageError("delete_asset", "rate_limited", { retryable: true }),
+    ),
+    `pair_operation=history status=failed component=github operation=delete_asset reason=rate_limited pair_id=${pairId}\n`,
+  );
+  assert.equal(
+    pairOperationFailureLog(
+      "current",
+      pairId,
+      { GITHUB_ACTIONS: "true" },
+      new RpcPairOperationUnavailableError(),
+    ),
+    `pair_operation=current status=failed component=rpc reason=all_endpoints_unavailable pair_id=${pairId}\n`,
   );
 });
 

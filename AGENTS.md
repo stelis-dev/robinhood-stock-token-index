@@ -158,6 +158,11 @@ Terms used in this file:
   remain. Delete an older generation only when its pair, month or day identifier
   is named explicitly by the selected state update. A missing reference alone is
   never permission to delete a file.
+- The GitHub storage adapter retries only bounded transport, rate-limit, request
+  timeout, and server failures. Deleting an exact asset that is already absent is
+  successful. After an uncertain Release creation or asset upload, read the
+  exact remote identity and verify uploaded bytes before repeating the mutation.
+  Do not make cleanup non-blocking or hide an exhausted storage failure.
 - Store processed candles and continuous coverage. Do not store raw RPC
   responses, invented candles, a general transaction index, the RPC provider
   used, or a storage URL.

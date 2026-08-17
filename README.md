@@ -367,6 +367,16 @@ It deletes only older generations whose pair, month, or day ID is explicitly
 listed by the state update being completed. The absence of a reference is not,
 by itself, permission to delete a file.
 
+The GitHub adapter uses at most three attempts for transport failures, HTTP 408
+and 429 responses, and HTTP 5xx responses. It honors a `Retry-After` or rate-limit
+reset delay only when the delay is at most 60 seconds. A repeated `DELETE` that
+finds the exact asset already absent is successful. After an uncertain Release
+creation or asset upload response, the adapter first reads the exact Release or
+asset and verifies its identity and bytes; it does not blindly repeat a mutation.
+Access, invalid-response, immutable-byte, size, and other request failures remain
+fatal. Cleanup still fails the pair operation when its bounded recovery is
+exhausted.
+
 ## Command output and candle values
 
 Every command writes one JSON object to standard output with `ok`, `operation`,
@@ -426,8 +436,13 @@ Only in GitHub Actions, standard error records the operation phase (`current`,
 `registry.chain.primaryRpcUrl`, `INDEX_RPC_FALLBACK_URL_0`, or
 `INDEX_RPC_FALLBACK_URL_1`. It never prints the URL, provider response, token,
 exception message, or stack trace. Pair failure records include only the
-operation phase and PoolId. Cleanup failure records include only a fixed cleanup
-phase, PoolId, selected generation, and affected month.
+operation phase, PoolId, and fixed `component`, `operation`, and `reason` codes.
+Cleanup failure records add the fixed cleanup phase, selected generation, and
+affected month or stored object kind. These codes distinguish GitHub access,
+rate-limit, transport, HTTP, response, storage-limit, and immutable-byte failures
+without exposing a URL, response body, or token. Exhausting every configured RPC
+endpoint is reported as `component=rpc reason=all_endpoints_unavailable`; other
+collector failures use the fixed `component=collector reason=operation_rejected`.
 
 Fallback improves availability, but it cannot prove that an HTTP 200
 `eth_getLogs` response contains every log. GitHub Actions and Releases remain

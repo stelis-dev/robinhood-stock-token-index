@@ -7,6 +7,19 @@ const operationHandlers = new Map([
   ["repair", repairPairIndex],
 ]);
 
+export class RpcPairOperationUnavailableError extends Error {
+  constructor() {
+    super("All RPC endpoints were unavailable.");
+    this.name = "RpcPairOperationUnavailableError";
+  }
+}
+
+export function rpcOperationFailureFields(error) {
+  return error instanceof RpcPairOperationUnavailableError
+    ? "component=rpc reason=all_endpoints_unavailable"
+    : null;
+}
+
 export async function runRpcPairOperation({ operation, registry, pairId, store, rpcClients, signal }) {
   const handler = operationHandlers.get(operation);
   if (!handler) throw new Error("RPC pair operation must be current, history, or repair.");
@@ -25,5 +38,5 @@ export async function runRpcPairOperation({ operation, registry, pairId, store, 
       if (!(error instanceof RpcEndpointUnavailableError)) throw error;
     }
   }
-  throw new Error("All RPC endpoints were unavailable.");
+  throw new RpcPairOperationUnavailableError();
 }

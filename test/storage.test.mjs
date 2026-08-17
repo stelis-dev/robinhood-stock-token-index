@@ -12,7 +12,7 @@ import {
 import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
 import { validateCleanupPlan, referenceObjectName } from "../storage/stored-files.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
-import { GitHubReleaseStore } from "../storage/github-release-store.mjs";
+import { GitHubReleaseStore, GitHubStorageError } from "../storage/github-release-store.mjs";
 import { fixturePairRegistry, pairCandle, pairEntryBySymbol } from "./pair-fixtures.mjs";
 
 function jsonResponse(value, status = 200) {
@@ -336,7 +336,47 @@ test("cleanup verifies the selected state file and cannot treat omission as dele
   }
 });
 
-test("GitHub cleanup reports only its fixed failure fields while the selected data set remains readable", async () => {
+test("an uncertain GitHub deletion is reconciled by retrying the same asset until it is absent", async () => {
+  const registry = await fixturePairRegistry();
+  const previous = pairDataset(registry, 1);
+  const selected = pairDataset(registry, 2);
+  const githubApi = new FakeGitHub();
+  const previousMonth = previous.children.find((child) => child.reference.logicalId.includes("/months/"));
+  const deletedName = referenceObjectName(previousMonth.reference);
+  let intercepted = false;
+  const waits = [];
+  const github = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: async (target, init) => {
+      if (!intercepted && init?.method === "DELETE") {
+        const response = await githubApi.fetch(target, init);
+        assert.equal(response.status, 204);
+        intercepted = true;
+        return jsonResponse({ message: "upstream response was lost" }, 503);
+      }
+      return githubApi.fetch(target, init);
+    },
+    waitImplementation: async (milliseconds) => waits.push(milliseconds),
+  });
+  await publishDataset(github, previous);
+  await publishDataset(github, selected);
+
+  await github.cleanupSelectedGeneration(selected.cleanupPlan);
+
+  assert.equal(intercepted, true);
+  assert.deepEqual(waits, [1_000]);
+  const monthRelease = githubApi.releases.get(`pair-${selected.state.pair.pairId}-month-2026-08`);
+  assert.equal(monthRelease.assets.has(deletedName), false);
+  assert.equal((await verifyPairIndex({
+    registry,
+    pairId: selected.state.pair.pairId,
+    store: github,
+  })).sequence, 2);
+});
+
+test("a terminal GitHub cleanup failure reports only its fixed classification and preserves selected data", async () => {
   const registry = await fixturePairRegistry();
   const previous = pairDataset(registry, 1);
   const selected = pairDataset(registry, 2);
@@ -348,25 +388,137 @@ test("GitHub cleanup reports only its fixed failure fields while the selected da
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
     writeOperationalLog: (line) => operationalLogs.push(line),
+    waitImplementation: async () => {},
   });
   await publishDataset(github, previous);
   await publishDataset(github, selected);
   const previousMonth = previous.children.find((child) => child.reference.logicalId.includes("/months/"));
   githubApi.failDeleteAssetName = referenceObjectName(previousMonth.reference);
+  const failedAssetId = githubApi.releases
+    .get(`pair-${selected.state.pair.pairId}-month-2026-08`)
+    .assets.get(githubApi.failDeleteAssetName).id;
 
-  await assert.rejects(
-    github.cleanupSelectedGeneration(selected.cleanupPlan),
-    /GitHub API DELETE request failed with HTTP 503/,
-  );
+  await assert.rejects(github.cleanupSelectedGeneration(selected.cleanupPlan), (error) => (
+    error instanceof GitHubStorageError
+    && error.operation === "delete_asset"
+    && error.reason === "transient_http"
+  ));
   assert.deepEqual(operationalLogs, [
-    `github_cleanup status=failed phase=superseded_child_removal pair_id=${selected.state.pair.pairId} selected_sequence=2 pair_month=2026-08 object_kind=month\n`,
+    `github_cleanup status=failed phase=superseded_child_removal component=github operation=delete_asset reason=transient_http pair_id=${selected.state.pair.pairId} selected_sequence=2 pair_month=2026-08 object_kind=month\n`,
   ]);
   assert.doesNotMatch(operationalLogs[0], /test-token|HTTP 503|failure/);
+  assert.equal(githubApi.requests.filter((request) => (
+    request.method === "DELETE" && request.target.endsWith(`/assets/${failedAssetId}`)
+  )).length, 3);
   assert.equal((await verifyPairIndex({
     registry,
     pairId: selected.state.pair.pairId,
     store: github,
   })).sequence, 2);
+});
+
+test("GitHub rate-limit retries honor Retry-After without exposing the response body", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const githubApi = new FakeGitHub();
+  const writer = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  await publishDataset(writer, dataset);
+  let limited = false;
+  const waits = [];
+  const reader = new GitHubReleaseStore({
+    repository: "owner/index",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: async (target, init) => {
+      if (!limited && new URL(target).hostname === "api.github.com") {
+        limited = true;
+        return new Response(JSON.stringify({ message: "secret provider detail" }), {
+          status: 429,
+          headers: { "retry-after": "2" },
+        });
+      }
+      return githubApi.fetch(target, init);
+    },
+    waitImplementation: async (milliseconds) => waits.push(milliseconds),
+  });
+
+  assert.equal((await verifyPairIndex({
+    registry,
+    pairId: dataset.state.pair.pairId,
+    store: reader,
+  })).status, "verified");
+  assert.deepEqual(waits, [2_000]);
+  assert.doesNotMatch(JSON.stringify(reader), /secret provider detail|test-token/);
+});
+
+test("an upload committed before a failed response is reconciled without a duplicate POST", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const githubApi = new FakeGitHub();
+  let intercepted = false;
+  const waits = [];
+  const store = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: async (target, init) => {
+      if (!intercepted && init?.method === "POST" && new URL(target).hostname === "uploads.github.com") {
+        const response = await githubApi.fetch(target, init);
+        assert.equal(response.status, 201);
+        intercepted = true;
+        return jsonResponse({ message: "upstream response was lost" }, 503);
+      }
+      return githubApi.fetch(target, init);
+    },
+    waitImplementation: async (milliseconds) => waits.push(milliseconds),
+  });
+
+  await publishDataset(store, dataset);
+
+  assert.equal(intercepted, true);
+  assert.deepEqual(waits, []);
+  assert.equal(
+    githubApi.requests.filter((request) => request.method === "POST" && new URL(request.target).hostname === "uploads.github.com").length,
+    3,
+  );
+  assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
+});
+
+test("a Release created before a failed response is reconciled without duplicate creation", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const githubApi = new FakeGitHub();
+  let intercepted = false;
+  const store = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: async (target, init) => {
+      const url = new URL(target);
+      if (!intercepted && init?.method === "POST" && url.hostname === "api.github.com" && url.pathname === "/repos/owner/index/releases") {
+        const response = await githubApi.fetch(target, init);
+        assert.equal(response.status, 201);
+        intercepted = true;
+        return jsonResponse({ message: "upstream response was lost" }, 503);
+      }
+      return githubApi.fetch(target, init);
+    },
+    waitImplementation: async () => {},
+  });
+
+  await publishDataset(store, dataset);
+
+  assert.equal(intercepted, true);
+  assert.equal(
+    githubApi.requests.filter((request) => request.method === "POST" && request.target === "https://api.github.com/repos/owner/index/releases").length,
+    2,
+  );
+  assert.equal(githubApi.releases.size, 2);
+  assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
 });
 
 test("cleanup validates the pair, generation, and stored reference IDs", async () => {
@@ -526,12 +678,17 @@ test("a failed state upload leaves uploaded children unselected", async () => {
     token: "test-token",
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
+    waitImplementation: async () => {},
   });
   for (const child of dataset.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
   githubApi.failStateUpload = true;
   await assert.rejects(
     store.writeState(dataset.state.pair.pairId, dataset.state.sequence, dataset.encodedState.gzipBytes),
-    /HTTP 500/,
+    (error) => error instanceof GitHubStorageError && error.operation === "upload_asset" && error.reason === "transient_http",
+  );
+  assert.equal(
+    githubApi.requests.filter((request) => request.method === "POST" && request.target.includes("state-g")).length,
+    3,
   );
   assert.equal(await store.readSelectedState(dataset.state.pair.pairId), null);
 });
