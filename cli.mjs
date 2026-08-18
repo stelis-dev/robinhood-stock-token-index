@@ -183,9 +183,6 @@ async function runPairCommand(options, registry, { environment, signal }) {
     token: environment.GITHUB_TOKEN,
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     signal,
-    writeOperationalLog: environment.GITHUB_ACTIONS === "true"
-      ? (line) => process.stderr.write(line)
-      : undefined,
   });
   let result;
   if (options.operation === "verify") {

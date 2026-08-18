@@ -6,15 +6,14 @@ import {
   pairDayLogicalId,
   pairMonthLogicalId,
 } from "./pair-artifact.mjs";
-import { canonicalBytes } from "./canonical.mjs";
 import { CandleAccumulator, mergePairCandles } from "./candles.mjs";
 import {
   readPairDay,
   readPairMonth,
-  readPairState,
-  samePairState,
+  readPairStateSelection,
 } from "./pair-reader.mjs";
 import { pairById } from "./pair-registry.mjs";
+import { publishPairReplacement, recoverPairPublication } from "./publication.mjs";
 import { RpcEndpointUnavailableError, RpcResponseRejectedError } from "./rpc-endpoint.mjs";
 import { blockTimestamp } from "./rpc-client.mjs";
 import { decodeSwapLog, validateSwapLogBlockNumber } from "./swap.mjs";
@@ -202,9 +201,15 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
   };
 }
 
-async function assertSelectedStateUnchanged({ registry, pairId, store, previous }) {
-  const current = await readPairState({ registry, pairId, store });
-  if (previous === null ? current !== null : current === null || !samePairState(previous, current)) {
+async function assertSelectedStateUnchanged({ registry, pairId, store, previousSelection }) {
+  const current = await readPairStateSelection({ registry, pairId, store });
+  if (
+    previousSelection === null
+      ? current !== null
+      : current === null
+        || current.identity.sequence !== previousSelection.identity.sequence
+        || !current.gzipBytes.equals(previousSelection.gzipBytes)
+  ) {
     throw new Error("Selected pair state changed during the operation.");
   }
 }
@@ -216,27 +221,16 @@ async function loadAffectedArtifacts({ registry, pair, store, state, partitions 
   for (const pairMonth of affectedMonths) {
     const monthReference = state?.months.find((candidate) => candidate.logicalId === pairMonthLogicalId(pair.pairId, pairMonth));
     const month = monthReference ? await readPairMonth({ registry, store, reference: monthReference }) : null;
-    months.set(pairMonth, month);
+    months.set(pairMonth, { value: month, reference: monthReference ?? null });
     for (const partition of partitions.filter((candidate) => candidate.day.startsWith(`${pairMonth}-`))) {
       const reference = month?.days.find((candidate) => candidate.logicalId === pairDayLogicalId(pair.pairId, partition.day));
-      days.set(partition.day, reference ? await readPairDay({ registry, store, reference }) : null);
+      days.set(partition.day, {
+        value: reference ? await readPairDay({ registry, store, reference }) : null,
+        reference: reference ?? null,
+      });
     }
   }
   return { months, days };
-}
-
-async function cleanupSelectedGeneration({ registry, pairId, store, state }) {
-  if (state === null) return;
-  const changedMonths = [];
-  for (const monthReference of state.months.filter((reference) => reference.sequence === state.sequence)) {
-    const month = await readPairMonth({ registry, store, reference: monthReference });
-    changedMonths.push({ monthReference, dayReferences: month.days });
-  }
-  await store.cleanupSelectedGeneration({
-    pairId,
-    selectedSequence: state.sequence,
-    changedMonths,
-  });
 }
 
 function expectedStateCoverage(previous, pair, range, phase) {
@@ -265,8 +259,8 @@ function expectedStateCoverage(previous, pair, range, phase) {
   return { ...existing };
 }
 
-async function buildReplacement({ registry, pair, store, previous, phase, range, collected }) {
-  await assertSelectedStateUnchanged({ registry, pairId: pair.pairId, store, previous });
+async function buildReplacement({ registry, pair, store, previousSelection, phase, range, collected }) {
+  const previous = previousSelection?.state ?? null;
   const expectedCoverage = expectedStateCoverage(previous, pair, range, phase);
   const existing = await loadAffectedArtifacts({ registry, pair, store, state: previous, partitions: collected.partitions });
   const sequence = previous === null ? 1 : previous.sequence + 1;
@@ -281,7 +275,8 @@ async function buildReplacement({ registry, pair, store, previous, phase, range,
   const encodedDays = [];
   const replacementDays = new Map();
   for (const partition of collected.partitions) {
-    const current = existing.days.get(partition.day);
+    const currentEntry = existing.days.get(partition.day);
+    const current = currentEntry?.value ?? null;
     const day = {
       contractVersion: "1",
       kind: "pair_candle_day",
@@ -298,14 +293,20 @@ async function buildReplacement({ registry, pair, store, previous, phase, range,
     };
     const encoded = encodePairDay(day, { registry });
     const reference = createPairReference({ encoded, context: { registry } });
-    encodedDays.push({ value: day, reference, encoded });
+    encodedDays.push({
+      value: day,
+      reference,
+      encoded,
+      previousReference: currentEntry?.reference ?? null,
+    });
     replacementDays.set(partition.day, reference);
   }
 
   const encodedMonths = [];
   const replacementMonths = new Map();
   for (const pairMonth of [...new Set(collected.partitions.map((partition) => partition.day.slice(0, 7)))].sort()) {
-    let references = [...(existing.months.get(pairMonth)?.days ?? [])];
+    const currentEntry = existing.months.get(pairMonth);
+    let references = [...(currentEntry?.value?.days ?? [])];
     for (const [day, replacement] of replacementDays) {
       if (day.startsWith(`${pairMonth}-`)) references = replaceReference(references, replacement);
     }
@@ -320,7 +321,13 @@ async function buildReplacement({ registry, pair, store, previous, phase, range,
     };
     const encoded = encodePairMonth(month, { registry });
     const reference = createPairReference({ encoded, context: { registry } });
-    encodedMonths.push({ value: month, reference, encoded });
+    encodedMonths.push({
+      value: month,
+      reference,
+      encoded,
+      previousReference: currentEntry?.reference ?? null,
+      previousValue: currentEntry?.value ?? null,
+    });
     replacementMonths.set(pairMonth, reference);
   }
 
@@ -340,28 +347,10 @@ async function buildReplacement({ registry, pair, store, previous, phase, range,
   return { state, encodedState, encodedDays, encodedMonths };
 }
 
-async function publishReplacement({ registry, pair, store, previous, phase, range, collected, signal }) {
-  const replacement = await buildReplacement({ registry, pair, store, previous, phase, range, collected });
-  await cleanupSelectedGeneration({ registry, pairId: pair.pairId, store, state: previous });
-  for (const entry of replacement.encodedDays) {
-    throwIfAborted(signal);
-    await store.writeReferenced(entry.reference, entry.encoded.gzipBytes);
-    const stored = await readPairDay({ registry, store, reference: entry.reference });
-    if (!canonicalBytes(stored).equals(canonicalBytes(entry.value))) throw new Error("Published pair day does not match its replacement.");
-  }
-  for (const entry of replacement.encodedMonths) {
-    throwIfAborted(signal);
-    await store.writeReferenced(entry.reference, entry.encoded.gzipBytes);
-    const stored = await readPairMonth({ registry, store, reference: entry.reference });
-    if (!canonicalBytes(stored).equals(canonicalBytes(entry.value))) throw new Error("Published pair month does not match its replacement.");
-  }
-  throwIfAborted(signal);
-  await store.writeState(pair.pairId, replacement.state.sequence, replacement.encodedState.gzipBytes);
-  const selectedState = await readPairState({ registry, pairId: pair.pairId, store });
-  if (selectedState === null || !samePairState(selectedState, replacement.state)) {
-    throw new Error("Published pair state is not the selected state.");
-  }
-  await cleanupSelectedGeneration({ registry, pairId: pair.pairId, store, state: selectedState });
+async function publishReplacement({ registry, pair, store, previousSelection, phase, range, collected, signal }) {
+  const replacement = await buildReplacement({ registry, pair, store, previousSelection, phase, range, collected });
+  await assertSelectedStateUnchanged({ registry, pairId: pair.pairId, store, previousSelection });
+  await publishPairReplacement({ registry, pair, store, previousSelection, phase, replacement, signal });
   return {
     status: "published",
     phase,
@@ -463,56 +452,59 @@ async function repairRange({ registry, rpc, state }) {
   };
 }
 
-async function collectAndPublish({ registry, pair, store, rpc, previous, phase, range, signal }) {
+async function collectAndPublish({ registry, pair, store, rpc, previousSelection, phase, range, signal }) {
   const collected = await collectFixedRange({ registry, pair, rpc, range, signal });
-  return publishReplacement({ registry, pair, store, previous, phase, range, collected, signal });
+  return publishReplacement({ registry, pair, store, previousSelection, phase, range, collected, signal });
 }
 
 export async function collectPairCurrent({ registry, pairId, store, rpc, signal }) {
   throwIfAborted(signal);
   const pair = pairById(registry, pairId).pair;
+  await recoverPairPublication({ registry, pairId, store });
   await rpc.verifyChain(registry.chain.numericChainId);
   await verifyActivationBoundary(pair, rpc);
-  const previous = await readPairState({ registry, pairId, store });
+  const previousSelection = await readPairStateSelection({ registry, pairId, store });
+  const previous = previousSelection?.state ?? null;
   const finalized = await rpc.getBlock(registry.chain.finalityTag);
   assertFinalizedCoversStoredRange(previous, pair, finalized);
   const range = await currentRange({ registry, pair, rpc, state: previous, finalized });
   if (range === null) {
-    await cleanupSelectedGeneration({ registry, pairId, store, state: previous });
     return { status: "current", phase: "current", pairId, sequence: previous?.sequence ?? null };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previous, phase: "current", range, signal });
+  return collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "current", range, signal });
 }
 
 export async function collectPairHistory({ registry, pairId, store, rpc, signal }) {
   throwIfAborted(signal);
   const pair = pairById(registry, pairId).pair;
+  await recoverPairPublication({ registry, pairId, store });
   await rpc.verifyChain(registry.chain.numericChainId);
   await verifyActivationBoundary(pair, rpc);
-  const previous = await readPairState({ registry, pairId, store });
+  const previousSelection = await readPairStateSelection({ registry, pairId, store });
+  const previous = previousSelection?.state ?? null;
   const finalized = await rpc.getBlock(registry.chain.finalityTag);
   assertFinalizedCoversStoredRange(previous, pair, finalized);
   const range = await historyRange({ registry, pair, rpc, state: previous });
   if (range === null) {
-    await cleanupSelectedGeneration({ registry, pairId, store, state: previous });
     return { status: "current", phase: "history", pairId, sequence: previous?.sequence ?? null };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previous, phase: "history", range, signal });
+  return collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "history", range, signal });
 }
 
 export async function repairPairIndex({ registry, pairId, store, rpc, signal }) {
   throwIfAborted(signal);
   const pair = pairById(registry, pairId).pair;
+  await recoverPairPublication({ registry, pairId, store });
   await rpc.verifyChain(registry.chain.numericChainId);
   await verifyActivationBoundary(pair, rpc);
-  const previous = await readPairState({ registry, pairId, store });
+  const previousSelection = await readPairStateSelection({ registry, pairId, store });
+  const previous = previousSelection?.state ?? null;
   if (previous === null) return { status: "empty", phase: "repair", pairId, sequence: null };
   const finalized = await rpc.getBlock(registry.chain.finalityTag);
   assertFinalizedCoversStoredRange(previous, pair, finalized);
   const range = await repairRange({ registry, rpc, state: previous });
   if (range === null) {
-    await cleanupSelectedGeneration({ registry, pairId, store, state: previous });
     return { status: "current", phase: "repair", pairId, sequence: previous.sequence };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previous, phase: "repair", range, signal });
+  return collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "repair", range, signal });
 }

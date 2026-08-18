@@ -73,6 +73,24 @@ export function validateStoredReference(value) {
   return identity;
 }
 
+export function validateStateIdentity(value) {
+  exactKeys(value, ["gzipBytes", "gzipSha256", "sequence"], "state identity");
+  validateGeneration(value.sequence, "state generation");
+  if (!Number.isSafeInteger(value.gzipBytes) || value.gzipBytes <= 0) throw new Error("State gzip byte count is invalid.");
+  if (typeof value.gzipSha256 !== "string" || !digestPattern.test(value.gzipSha256)) throw new Error("State gzip digest is invalid.");
+  return value;
+}
+
+export function createStateIdentity(sequence, bytes, maximumArtifactBytes) {
+  validateGeneration(sequence, "state generation");
+  validateStateBytes(bytes, maximumArtifactBytes);
+  return validateStateIdentity({
+    sequence,
+    gzipBytes: bytes.byteLength,
+    gzipSha256: sha256Hex(bytes),
+  });
+}
+
 function generation(value) {
   return String(validateGeneration(value)).padStart(16, "0");
 }
@@ -81,99 +99,11 @@ export function stateObjectName(sequence) {
   return `state-g${generation(sequence)}.json.gz`;
 }
 
+export const publicationObjectName = "publication.json.gz";
+
 export function referenceObjectName(reference) {
   const identity = validateStoredReference(reference);
   return `${identity.kind}-${identity.period}-g${generation(reference.sequence)}-${reference.gzipSha256}.json.gz`;
-}
-
-export function parseReferencedObjectName(pairId, value) {
-  const ownerPairId = validatePairId(pairId);
-  const match = typeof value === "string"
-    ? value.match(/^(month|day)-(.+)-g([0-9]{16})-([0-9a-f]{64})\.json\.gz$/)
-    : null;
-  if (!match) return null;
-  const kind = match[1];
-  let period;
-  try {
-    period = canonicalPeriod(match[2], kind);
-  } catch {
-    return null;
-  }
-  const sequence = Number(match[3]);
-  if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
-  return {
-    pairId: ownerPairId,
-    kind,
-    period,
-    sequence,
-    gzipSha256: match[4],
-    logicalId: `pairs/${ownerPairId}/${kind === "month" ? "months" : "days"}/${period}`,
-    name: value,
-  };
-}
-
-export function validateCleanupPlan(value) {
-  exactKeys(value, ["changedMonths", "pairId", "selectedSequence"], "cleanup plan");
-  const pairId = validatePairId(value.pairId);
-  const selectedSequence = validateGeneration(value.selectedSequence, "selected state generation");
-  if (!Array.isArray(value.changedMonths) || value.changedMonths.length === 0) {
-    throw new Error("Cleanup changed months are required.");
-  }
-
-  const logicalIds = new Set();
-  const changedMonths = [];
-  let previousMonth = "";
-  for (const [index, changedMonth] of value.changedMonths.entries()) {
-    exactKeys(changedMonth, ["dayReferences", "monthReference"], `cleanup changedMonths[${index}]`);
-    const monthIdentity = validateStoredReference(changedMonth.monthReference);
-    if (monthIdentity.kind !== "month" || monthIdentity.pairId !== pairId || changedMonth.monthReference.sequence !== selectedSequence) {
-      throw new Error("Cleanup month does not identify the selected pair generation.");
-    }
-    if (monthIdentity.period <= previousMonth) throw new Error("Cleanup months are duplicated or unordered.");
-    previousMonth = monthIdentity.period;
-    if (!Array.isArray(changedMonth.dayReferences) || changedMonth.dayReferences.length === 0) {
-      throw new Error("Cleanup month day references are required.");
-    }
-
-    const objects = [];
-    const append = (reference, identity) => {
-      if (logicalIds.has(reference.logicalId)) throw new Error("Cleanup stored reference IDs are duplicated.");
-      logicalIds.add(reference.logicalId);
-      objects.push({
-        logicalId: reference.logicalId,
-        name: referenceObjectName(reference),
-        sequence: reference.sequence,
-      });
-    };
-    append(changedMonth.monthReference, monthIdentity);
-
-    let previousDay = "";
-    let ownsChangedDay = false;
-    for (const dayReference of changedMonth.dayReferences) {
-      const dayIdentity = validateStoredReference(dayReference);
-      if (
-        dayIdentity.kind !== "day"
-        || dayIdentity.pairId !== pairId
-        || dayIdentity.period.slice(0, 7) !== monthIdentity.period
-        || dayReference.sequence > selectedSequence
-      ) {
-        throw new Error("Cleanup day does not belong to its selected pair-month.");
-      }
-      if (dayIdentity.period <= previousDay) throw new Error("Cleanup days are duplicated or unordered.");
-      previousDay = dayIdentity.period;
-      ownsChangedDay ||= dayReference.sequence === selectedSequence;
-      append(dayReference, dayIdentity);
-    }
-    if (!ownsChangedDay) throw new Error("Cleanup month has no day from the selected generation.");
-    changedMonths.push({ month: monthIdentity.period, objects });
-  }
-
-  return {
-    pairId,
-    selectedSequence,
-    selectedStateName: stateObjectName(selectedSequence),
-    changedMonths,
-  };
 }
 
 export function verifyStoredReferenceBytes(reference, bytes, maximumArtifactBytes) {
@@ -188,6 +118,15 @@ export function verifyStoredReferenceBytes(reference, bytes, maximumArtifactByte
 export function validateStateBytes(bytes, maximumArtifactBytes) {
   if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
   if (!Buffer.isBuffer(bytes) || bytes.byteLength === 0 || bytes.byteLength > maximumArtifactBytes) {
+    throw new StoredDataIntegrityError();
+  }
+  return bytes;
+}
+
+export function verifyStateIdentityBytes(identity, bytes, maximumArtifactBytes) {
+  validateStateIdentity(identity);
+  validateStateBytes(bytes, maximumArtifactBytes);
+  if (bytes.byteLength !== identity.gzipBytes || sha256Hex(bytes) !== identity.gzipSha256) {
     throw new StoredDataIntegrityError();
   }
   return bytes;

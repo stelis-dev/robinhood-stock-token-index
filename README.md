@@ -350,6 +350,15 @@ changed day and month before publishing state, then re-reads the exact state
 generation. A reader therefore sees either the preceding complete set of files
 or the new complete set, never a mixture created by partial publication.
 
+Before those files are written, the collector stores one internal pending
+publication record for the pair. It identifies the exact preceding and
+replacement files without changing the public pair-state, month, day, or read
+formats. If a command stops before the replacement state is selected, the next
+pair mutation verifies the preceding data and removes only the unpublished
+replacement files. If it stops after selection, the next mutation verifies the
+replacement data and removes only the superseded files. Any other state is
+rejected as stored-data corruption before another RPC request is made.
+
 The directory storage adapter uses:
 
 ```text
@@ -362,10 +371,13 @@ one Release for each pair and UTC month. Stored state, month, and day data never
 contains a repository name, Release tag, URL, asset ID, token, workflow value,
 collection group, schedule, or RPC endpoint.
 
-Cleanup first verifies the selected state file and every file that must remain.
-It deletes only older generations whose pair, month, or day ID is explicitly
-listed by the state update being completed. The absence of a reference is not,
-by itself, permission to delete a file.
+Cleanup is blocking. It verifies the selected state and every retained file in
+the changed months before its first deletion, deletes only the exact files named
+by the pending publication, and removes the pending record last. A failed cleanup
+makes that pair operation fail while its selected data remains readable; the
+next pair mutation resumes the same cleanup before collecting new chain data.
+The absence of a reference, a generation comparison, or a repository scan is
+not deletion authority.
 
 The GitHub adapter uses at most three attempts for transport failures, HTTP 408
 and 429 responses, and HTTP 5xx responses. It honors a `Retry-After` or rate-limit
@@ -373,9 +385,17 @@ reset delay only when the delay is at most 60 seconds. A repeated `DELETE` that
 finds the exact asset already absent is successful. After an uncertain Release
 creation or asset upload response, the adapter first reads the exact Release or
 asset and verifies its identity and bytes; it does not blindly repeat a mutation.
+If that exact reconciliation remains unavailable, it stops without sending a
+second creation or upload request. Only an empty GitHub asset explicitly marked
+as an incomplete `starter` can be removed as an incomplete upload.
 Access, invalid-response, immutable-byte, size, and other request failures remain
 fatal. Cleanup still fails the pair operation when its bounded recovery is
 exhausted.
+
+GitHub mutations are supported through the repository's one non-cancelling
+Actions queue. Directory mutations are supported from one local process at a
+time. The pending publication record detects and recovers an interrupted
+transition; it is not a distributed lock and does not merge concurrent writers.
 
 ## Command output and candle values
 
@@ -437,10 +457,9 @@ Only in GitHub Actions, standard error records the operation phase (`current`,
 `INDEX_RPC_FALLBACK_URL_1`. It never prints the URL, provider response, token,
 exception message, or stack trace. Pair failure records include only the
 operation phase, PoolId, and fixed `component`, `operation`, and `reason` codes.
-Cleanup failure records add the fixed cleanup phase, selected generation, and
-affected month or stored object kind. These codes distinguish GitHub access,
-rate-limit, transport, HTTP, response, storage-limit, and immutable-byte failures
-without exposing a URL, response body, or token. Exhausting every configured RPC
+These codes distinguish GitHub access, rate-limit, transport, HTTP, response,
+storage-limit, and immutable-byte failures without exposing a URL, response
+body, or token. Exhausting every configured RPC
 endpoint is reported as `component=rpc reason=all_endpoints_unavailable`. A fatal
 RPC response reports `component=rpc` with one of `activation_boundary_mismatch`,
 `chain_identity_mismatch`, `http_rejected`, `response_envelope_invalid`,

@@ -13,6 +13,7 @@ import { RpcPairOperationUnavailableError, runRpcPairOperation } from "../collec
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
+import { storagePort } from "./storage-port-fixture.mjs";
 
 async function countingDirectory(registry) {
   const directory = new DirectoryStore({
@@ -23,10 +24,7 @@ async function countingDirectory(registry) {
   return {
     directory,
     writes,
-    store: {
-      readSelectedState: (...args) => directory.readSelectedState(...args),
-      readReferenced: (...args) => directory.readReferenced(...args),
-      resolvePairMonth: (...args) => directory.resolvePairMonth(...args),
+    store: storagePort(directory, {
       writeReferenced: async (...args) => {
         writes.push("reference");
         return directory.writeReferenced(...args);
@@ -35,8 +33,7 @@ async function countingDirectory(registry) {
         writes.push("state");
         return directory.writeState(...args);
       },
-      cleanupSelectedGeneration: (...args) => directory.cleanupSelectedGeneration(...args),
-    },
+    }),
   };
 }
 
@@ -158,13 +155,10 @@ test("integrity and storage failures stop without invoking another endpoint", as
   assert.equal(fallbackUsed, false);
 
   const rpc = new FakePairRpc({ registry, pair, finalizedNumber: activation + 360n });
-  const failingStore = {
-    readSelectedState: (...args) => directory.readSelectedState(...args),
-    readReferenced: (...args) => directory.readReferenced(...args),
-    resolvePairMonth: (...args) => directory.resolvePairMonth(...args),
+  const failingStore = storagePort(directory, {
     async writeReferenced() { throw new Error("storage publication failed"); },
     async writeState() { throw new Error("state must not be reached"); },
-  };
+  });
   await assert.rejects(runRpcPairOperation({
     operation: "current",
     registry,
@@ -245,11 +239,12 @@ test("the endpoint runner accepts at most three clients and returns one typed ge
   assert.equal(used, false);
 
   const unavailable = { async verifyChain() { throw new RpcEndpointUnavailableError(); } };
+  const directory = (await countingDirectory(registry)).directory;
   await assert.rejects(runRpcPairOperation({
     operation: "current",
     registry,
     pairId,
-    store: {},
+    store: directory,
     rpcClients: [unavailable, { ...unavailable }],
   }), (error) => {
     assert.ok(error instanceof RpcPairOperationUnavailableError);

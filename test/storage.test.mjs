@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,102 +11,17 @@ import {
 } from "../collector/pair-artifact.mjs";
 import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
 import {
-  validateCleanupPlan,
+  createStateIdentity,
+  publicationObjectName,
   referenceObjectName,
+  stateObjectName,
   StoredDataIntegrityError,
 } from "../storage/stored-files.mjs";
+import { sha256Hex } from "../collector/canonical.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { GitHubReleaseStore, GitHubStorageError } from "../storage/github-release-store.mjs";
 import { fixturePairRegistry, pairCandle, pairEntryBySymbol } from "./pair-fixtures.mjs";
-
-function jsonResponse(value, status = 200) {
-  return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
-}
-
-class FakeGitHub {
-  constructor() {
-    this.releases = new Map();
-    this.nextReleaseId = 1;
-    this.nextAssetId = 1;
-    this.requests = [];
-    this.failStateUpload = false;
-    this.failDeleteAssetName = null;
-  }
-
-  #releaseById(id) {
-    return [...this.releases.values()].find((release) => release.id === Number(id));
-  }
-
-  #assetById(id) {
-    for (const release of this.releases.values()) {
-      for (const asset of release.assets.values()) if (asset.id === Number(id)) return asset;
-    }
-    return null;
-  }
-
-  fetch = async (target, init = {}) => {
-    const url = new URL(target);
-    const method = init.method ?? "GET";
-    const requestHeaders = new Headers(init.headers);
-    this.requests.push({ method, target, authorization: requestHeaders.get("authorization") });
-    const tagMatch = url.pathname.match(/^\/repos\/owner\/index\/releases\/tags\/(.+)$/);
-    if (method === "GET" && tagMatch) {
-      const tag = decodeURIComponent(tagMatch[1]);
-      const release = this.releases.get(tag);
-      return release ? jsonResponse({ id: release.id, tag_name: tag }) : jsonResponse({ message: "Not Found" }, 404);
-    }
-    if (method === "POST" && url.pathname === "/repos/owner/index/releases") {
-      const request = JSON.parse(Buffer.from(init.body).toString("utf8"));
-      const release = { id: this.nextReleaseId++, tag: request.tag_name, assets: new Map() };
-      this.releases.set(release.tag, release);
-      return jsonResponse({ id: release.id, tag_name: release.tag }, 201);
-    }
-    const assetListMatch = url.pathname.match(/^\/repos\/owner\/index\/releases\/([0-9]+)\/assets$/);
-    if (method === "GET" && assetListMatch) {
-      const release = this.#releaseById(assetListMatch[1]);
-      if (!release) return jsonResponse({ message: "Not Found" }, 404);
-      return jsonResponse([...release.assets.values()].map((asset) => ({
-        id: asset.id,
-        name: asset.name,
-        size: asset.bytes.byteLength,
-      })));
-    }
-    if (method === "POST" && assetListMatch && url.hostname === "uploads.github.com") {
-      const release = this.#releaseById(assetListMatch[1]);
-      const name = url.searchParams.get("name");
-      if (!release || !name) return jsonResponse({ message: "Not Found" }, 404);
-      if (this.failStateUpload && name.startsWith("state-g")) return jsonResponse({ message: "failure" }, 500);
-      const bytes = Buffer.from(init.body);
-      const asset = { id: this.nextAssetId++, name, bytes };
-      release.assets.set(name, asset);
-      return jsonResponse({ id: asset.id, name, size: bytes.byteLength }, 201);
-    }
-    const assetMatch = url.pathname.match(/^\/repos\/owner\/index\/releases\/assets\/([0-9]+)$/);
-    if (assetMatch && method === "GET") {
-      const asset = this.#assetById(assetMatch[1]);
-      return asset ? new Response(asset.bytes) : jsonResponse({ message: "Not Found" }, 404);
-    }
-    if (assetMatch && method === "DELETE") {
-      for (const release of this.releases.values()) {
-        for (const [name, asset] of release.assets) {
-          if (asset.id === Number(assetMatch[1])) {
-            if (name === this.failDeleteAssetName) return jsonResponse({ message: "failure" }, 503);
-            release.assets.delete(name);
-            return new Response(null, { status: 204 });
-          }
-        }
-      }
-      return jsonResponse({ message: "Not Found" }, 404);
-    }
-    const publicAssetMatch = url.pathname.match(/^\/owner\/index\/releases\/download\/([^/]+)\/(.+)$/);
-    if (method === "GET" && url.hostname === "github.com" && publicAssetMatch) {
-      const release = this.releases.get(decodeURIComponent(publicAssetMatch[1]));
-      const asset = release?.assets.get(decodeURIComponent(publicAssetMatch[2]));
-      return asset ? new Response(asset.bytes) : jsonResponse({ message: "Not Found" }, 404);
-    }
-    throw new Error(`Unexpected fake GitHub request: ${method} ${target}`);
-  };
-}
+import { FakeGitHub, jsonResponse } from "./github-storage-fixture.mjs";
 
 function pairDataset(registry, sequence = 1) {
   const entry = pairEntryBySymbol(registry, "NVDA");
@@ -152,92 +67,8 @@ function pairDataset(registry, sequence = 1) {
   return {
     state,
     encodedState,
-    cleanupPlan: {
-      pairId: pair.pairId,
-      selectedSequence: sequence,
-      changedMonths: [{ monthReference, dayReferences: [dayReference] }],
-    },
     children: [
       { reference: dayReference, encoded: encodedDay },
-      { reference: monthReference, encoded: encodedMonth },
-    ],
-  };
-}
-
-function twoDayDataset(registry) {
-  const pair = pairEntryBySymbol(registry, "NVDA").pair;
-  const context = { registry };
-  const firstCoverage = {
-    fromBlock: pair.activation.blockNumber,
-    fromTimestamp: pair.activation.timestamp,
-    untilBlock: "36311735",
-    untilTimestamp: "2026-08-15T00:00:00.000Z",
-  };
-  const secondCoverage = {
-    fromBlock: firstCoverage.untilBlock,
-    fromTimestamp: firstCoverage.untilTimestamp,
-    untilBlock: "36311741",
-    untilTimestamp: "2026-08-15T00:01:00.000Z",
-  };
-  const firstDay = {
-    contractVersion: "1",
-    kind: "pair_candle_day",
-    pair,
-    sequence: 1,
-    day: "2026-08-14",
-    coverage: firstCoverage,
-    candles: [pairCandle()],
-  };
-  const secondDay = {
-    contractVersion: "1",
-    kind: "pair_candle_day",
-    pair,
-    sequence: 2,
-    day: "2026-08-15",
-    coverage: secondCoverage,
-    candles: [],
-  };
-  const encodedFirstDay = encodePairDay(firstDay, context);
-  const encodedSecondDay = encodePairDay(secondDay, context);
-  const firstDayReference = createPairReference({ encoded: encodedFirstDay, context });
-  const secondDayReference = createPairReference({ encoded: encodedSecondDay, context });
-  const coverage = {
-    fromBlock: firstCoverage.fromBlock,
-    fromTimestamp: firstCoverage.fromTimestamp,
-    untilBlock: secondCoverage.untilBlock,
-    untilTimestamp: secondCoverage.untilTimestamp,
-  };
-  const month = {
-    contractVersion: "1",
-    kind: "pair_candle_month",
-    pair,
-    sequence: 2,
-    month: "2026-08",
-    coverage,
-    days: [firstDayReference, secondDayReference],
-  };
-  const encodedMonth = encodePairMonth(month, context);
-  const monthReference = createPairReference({ encoded: encodedMonth, context });
-  const state = {
-    contractVersion: "1",
-    kind: "pair_candle_state",
-    pair,
-    sequence: 2,
-    coverage,
-    months: [monthReference],
-  };
-  const encodedState = encodePairState(state, context);
-  return {
-    state,
-    encodedState,
-    cleanupPlan: {
-      pairId: pair.pairId,
-      selectedSequence: 2,
-      changedMonths: [{ monthReference, dayReferences: [firstDayReference, secondDayReference] }],
-    },
-    children: [
-      { reference: firstDayReference, encoded: encodedFirstDay },
-      { reference: secondDayReference, encoded: encodedSecondDay },
       { reference: monthReference, encoded: encodedMonth },
     ],
   };
@@ -289,55 +120,19 @@ test("directory and GitHub storage return the same selected data set", async () 
   githubApi.releases.set(unrelatedTag, {
     id: 999,
     tag: unrelatedTag,
-    assets: new Map([["keep.bin", { id: 999, name: "keep.bin", bytes: Buffer.from("keep") }]]),
+    assets: new Map([["keep.bin", {
+      id: 999,
+      name: "keep.bin",
+      bytes: Buffer.from("keep"),
+      state: "uploaded",
+      digest: `sha256:${sha256Hex(Buffer.from("keep"))}`,
+    }]]),
   });
   githubApi.requests.length = 0;
-  await directory.cleanupSelectedGeneration(replacement.cleanupPlan);
-  await github.cleanupSelectedGeneration(replacement.cleanupPlan);
-  assert.equal((await readdir(join(directory.root, "pairs", replacement.state.pair.pairId, "state"))).length, 1);
-  assert.equal((await readdir(join(directory.root, "pairs", replacement.state.pair.pairId, "months", "2026-08"))).length, 2);
-  assert.equal(githubApi.releases.get(`pair-${replacement.state.pair.pairId}-state`).assets.size, 1);
-  assert.equal(githubApi.releases.get(`pair-${replacement.state.pair.pairId}-month-2026-08`).assets.size, 2);
   assert.equal(githubApi.releases.get(unrelatedTag).assets.size, 1);
   assert.ok(githubApi.requests.every((request) => !request.target.includes(unrelatedTag)));
-  assert.ok(githubApi.requests.every((request) => !request.target.endsWith("/repos/owner/index/releases")));
   assert.equal((await verifyPairIndex({ registry, pairId: replacement.state.pair.pairId, store: directory })).sequence, 2);
   assert.equal((await verifyPairIndex({ registry, pairId: replacement.state.pair.pairId, store: github })).sequence, 2);
-});
-
-test("cleanup verifies the selected state file and cannot treat omission as deletion permission", async () => {
-  const registry = await fixturePairRegistry();
-  const dataset = twoDayDataset(registry);
-  const directory = new DirectoryStore({
-    root: await mkdtemp(join(tmpdir(), "stock-token-pair-cleanup-safety-")),
-    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
-  });
-  const githubApi = new FakeGitHub();
-  const github = new GitHubReleaseStore({
-    repository: "owner/index",
-    token: "test-token",
-    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
-    fetchImplementation: githubApi.fetch,
-  });
-  for (const store of [directory, github]) await publishDataset(store, dataset);
-
-  const omittedDayPlan = structuredClone(dataset.cleanupPlan);
-  omittedDayPlan.changedMonths[0].dayReferences.shift();
-  for (const store of [directory, github]) {
-    await store.cleanupSelectedGeneration(omittedDayPlan);
-    assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
-  }
-
-  const unpublished = pairDataset(registry, 3);
-  for (const store of [directory, github]) {
-    for (const child of unpublished.children) await store.writeReferenced(child.reference, child.encoded.gzipBytes);
-    await assert.rejects(
-      store.cleanupSelectedGeneration(unpublished.cleanupPlan),
-      /Selected state file is unavailable/,
-    );
-    assert.equal((await readPairState({ registry, pairId: dataset.state.pair.pairId, store })).sequence, 2);
-    assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
-  }
 });
 
 test("an uncertain GitHub deletion is reconciled by retrying the same asset until it is absent", async () => {
@@ -367,7 +162,7 @@ test("an uncertain GitHub deletion is reconciled by retrying the same asset unti
   await publishDataset(github, previous);
   await publishDataset(github, selected);
 
-  await github.cleanupSelectedGeneration(selected.cleanupPlan);
+  await github.removeReferenced(previousMonth.reference);
 
   assert.equal(intercepted, true);
   assert.deepEqual(waits, [1_000]);
@@ -380,18 +175,16 @@ test("an uncertain GitHub deletion is reconciled by retrying the same asset unti
   })).sequence, 2);
 });
 
-test("a terminal GitHub cleanup failure reports only its fixed classification and preserves selected data", async () => {
+test("a terminal GitHub exact deletion failure preserves the selected data set", async () => {
   const registry = await fixturePairRegistry();
   const previous = pairDataset(registry, 1);
   const selected = pairDataset(registry, 2);
   const githubApi = new FakeGitHub();
-  const operationalLogs = [];
   const github = new GitHubReleaseStore({
     repository: "owner/index",
     token: "test-token",
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
-    writeOperationalLog: (line) => operationalLogs.push(line),
     waitImplementation: async () => {},
   });
   await publishDataset(github, previous);
@@ -402,15 +195,11 @@ test("a terminal GitHub cleanup failure reports only its fixed classification an
     .get(`pair-${selected.state.pair.pairId}-month-2026-08`)
     .assets.get(githubApi.failDeleteAssetName).id;
 
-  await assert.rejects(github.cleanupSelectedGeneration(selected.cleanupPlan), (error) => (
+  await assert.rejects(github.removeReferenced(previousMonth.reference), (error) => (
     error instanceof GitHubStorageError
     && error.operation === "delete_asset"
     && error.reason === "transient_http"
   ));
-  assert.deepEqual(operationalLogs, [
-    `github_cleanup status=failed phase=superseded_child_removal component=github operation=delete_asset reason=transient_http pair_id=${selected.state.pair.pairId} selected_sequence=2 pair_month=2026-08 object_kind=month\n`,
-  ]);
-  assert.doesNotMatch(operationalLogs[0], /test-token|HTTP 503|failure/);
   assert.equal(githubApi.requests.filter((request) => (
     request.method === "DELETE" && request.target.endsWith(`/assets/${failedAssetId}`)
   )).length, 3);
@@ -492,6 +281,186 @@ test("an upload committed before a failed response is reconciled without a dupli
   assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
 });
 
+test("an unavailable upload reconciliation never repeats the mutation before a later exact read", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const cases = [
+    {
+      name: referenceObjectName(dataset.children[0].reference),
+      write: (store) => store.writeReferenced(dataset.children[0].reference, dataset.children[0].encoded.gzipBytes),
+    },
+    {
+      name: publicationObjectName,
+      write: (store) => store.createPublication(dataset.state.pair.pairId, Buffer.from("publication")),
+    },
+  ];
+
+  for (const entry of cases) {
+    const githubApi = new FakeGitHub();
+    let responseLost = false;
+    let reconciliationFailures = 0;
+    const fetchImplementation = async (target, init = {}) => {
+      const url = new URL(target);
+      if (
+        !responseLost
+        && init.method === "POST"
+        && url.hostname === "uploads.github.com"
+        && url.searchParams.get("name") === entry.name
+      ) {
+        const response = await githubApi.fetch(target, init);
+        assert.equal(response.status, 201);
+        responseLost = true;
+        reconciliationFailures = 3;
+        return jsonResponse({ message: "upstream response was lost" }, 503);
+      }
+      if (reconciliationFailures > 0 && init.method === "GET" && /\/releases\/[0-9]+\/assets$/.test(url.pathname)) {
+        reconciliationFailures -= 1;
+        return jsonResponse({ message: "lookup unavailable" }, 503);
+      }
+      return githubApi.fetch(target, init);
+    };
+    const first = new GitHubReleaseStore({
+      repository: "owner/index",
+      token: "test-token",
+      maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+      fetchImplementation,
+      waitImplementation: async () => {},
+    });
+    await assert.rejects(entry.write(first), (error) => (
+      error instanceof GitHubStorageError
+      && error.operation === "list_assets"
+      && error.reason === "transient_http"
+    ));
+    const uploadPosts = () => githubApi.requests.filter((request) => (
+      request.method === "POST"
+      && new URL(request.target).hostname === "uploads.github.com"
+      && new URL(request.target).searchParams.get("name") === entry.name
+    )).length;
+    assert.equal(uploadPosts(), 1);
+
+    const restarted = new GitHubReleaseStore({
+      repository: "owner/index",
+      token: "test-token",
+      maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+      fetchImplementation: githubApi.fetch,
+      waitImplementation: async () => {},
+    });
+    await entry.write(restarted);
+    assert.equal(uploadPosts(), 1);
+  }
+});
+
+test("GitHub proof reuses verified bytes and reads a missing digest only once", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const reference = dataset.children[0].reference;
+  const githubApi = new FakeGitHub();
+  const writer = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  await writer.writeReferenced(reference, dataset.children[0].encoded.gzipBytes);
+  githubApi.requests.length = 0;
+  await writer.proveReferenced(reference);
+  assert.deepEqual(githubApi.requests, []);
+
+  const release = [...githubApi.releases.values()].find((candidate) => candidate.assets.has(referenceObjectName(reference)));
+  const asset = release.assets.get(referenceObjectName(reference));
+  asset.digest = null;
+  const restarted = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  githubApi.requests.length = 0;
+  await restarted.readReferenced(reference);
+  await restarted.proveReferenced(reference);
+  assert.equal(githubApi.requests.filter((request) => (
+    request.method === "GET" && request.target.endsWith(`/releases/assets/${asset.id}`)
+  )).length, 1);
+});
+
+test("only uploaded state assets are selectable and exact starters remain removable", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const pairId = dataset.state.pair.pairId;
+  const githubApi = new FakeGitHub();
+  const tag = `pair-${pairId}-state`;
+  const stateIdentity = createStateIdentity(
+    dataset.state.sequence,
+    dataset.encodedState.gzipBytes,
+    registry.collection.maximumArtifactBytes,
+  );
+  githubApi.releases.set(tag, {
+    id: 91,
+    tag,
+    assets: new Map([
+      [publicationObjectName, {
+        id: 92,
+        name: publicationObjectName,
+        bytes: Buffer.alloc(0),
+        state: "starter",
+        digest: null,
+      }],
+      [stateObjectName(dataset.state.sequence), {
+        id: 93,
+        name: stateObjectName(dataset.state.sequence),
+        bytes: Buffer.alloc(0),
+        state: "starter",
+        digest: null,
+      }],
+    ]),
+  });
+  const store = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+
+  assert.equal((await store.readPublication(pairId)).status, "starter");
+  assert.equal(await store.readSelectedState(pairId), null);
+  await store.removePublicationStarter(pairId);
+  await store.removeState(pairId, stateIdentity, { allowIncomplete: true });
+  assert.deepEqual([...githubApi.releases.get(tag).assets.keys()], []);
+});
+
+test("contradictory starter metadata is rejected without deletion", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const pairId = dataset.state.pair.pairId;
+  const githubApi = new FakeGitHub();
+  const tag = `pair-${pairId}-state`;
+  const bytes = Buffer.from("not incomplete");
+  githubApi.releases.set(tag, {
+    id: 94,
+    tag,
+    assets: new Map([[publicationObjectName, {
+      id: 95,
+      name: publicationObjectName,
+      bytes,
+      state: "starter",
+      digest: `sha256:${sha256Hex(bytes)}`,
+    }]]),
+  });
+  const store = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  await assert.rejects(
+    store.readPublication(pairId),
+    (error) => error instanceof GitHubStorageError
+      && error.operation === "list_assets"
+      && error.reason === "invalid_response",
+  );
+  assert.equal(githubApi.requests.some((request) => request.method === "DELETE"), false);
+});
+
 test("a Release created before a failed response is reconciled without duplicate creation", async () => {
   const registry = await fixturePairRegistry();
   const dataset = pairDataset(registry);
@@ -525,26 +494,83 @@ test("a Release created before a failed response is reconciled without duplicate
   assert.equal((await verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store })).status, "verified");
 });
 
-test("cleanup validates the pair, generation, and stored reference IDs", async () => {
+test("an unavailable Release reconciliation never repeats creation before a later exact read", async () => {
   const registry = await fixturePairRegistry();
-  const dataset = twoDayDataset(registry);
-  assert.equal(validateCleanupPlan(dataset.cleanupPlan).changedMonths.length, 1);
-
-  const duplicated = structuredClone(dataset.cleanupPlan);
-  duplicated.changedMonths.push(structuredClone(duplicated.changedMonths[0]));
-  assert.throws(() => validateCleanupPlan(duplicated), /duplicated or unordered/);
-
-  const future = structuredClone(dataset.cleanupPlan);
-  future.changedMonths[0].dayReferences[0].sequence = 3;
-  assert.throws(() => validateCleanupPlan(future), /does not belong/);
-
-  const crossPair = structuredClone(dataset.cleanupPlan);
-  const otherPair = pairEntryBySymbol(registry, "ETH").pair.pairId;
-  crossPair.changedMonths[0].dayReferences[0].logicalId = crossPair.changedMonths[0].dayReferences[0].logicalId.replace(
-    dataset.state.pair.pairId,
-    otherPair,
+  const dataset = pairDataset(registry);
+  const githubApi = new FakeGitHub();
+  let responseLost = false;
+  let reconciliationFailures = 0;
+  const fetchImplementation = async (target, init = {}) => {
+    const url = new URL(target);
+    if (!responseLost && init.method === "POST" && url.pathname === "/repos/owner/index/releases") {
+      const response = await githubApi.fetch(target, init);
+      assert.equal(response.status, 201);
+      responseLost = true;
+      reconciliationFailures = 3;
+      return jsonResponse({ message: "upstream response was lost" }, 503);
+    }
+    if (reconciliationFailures > 0 && init.method === "GET" && /\/releases\/tags\//.test(url.pathname)) {
+      reconciliationFailures -= 1;
+      return jsonResponse({ message: "lookup unavailable" }, 503);
+    }
+    return githubApi.fetch(target, init);
+  };
+  const first = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation,
+    waitImplementation: async () => {},
+  });
+  await assert.rejects(
+    first.writeReferenced(dataset.children[0].reference, dataset.children[0].encoded.gzipBytes),
+    (error) => error instanceof GitHubStorageError
+      && error.operation === "get_release"
+      && error.reason === "transient_http",
   );
-  assert.throws(() => validateCleanupPlan(crossPair), /does not belong/);
+  const creationPosts = () => githubApi.requests.filter((request) => (
+    request.method === "POST" && request.target === "https://api.github.com/repos/owner/index/releases"
+  )).length;
+  assert.equal(creationPosts(), 1);
+
+  const restarted = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  await restarted.writeReferenced(dataset.children[0].reference, dataset.children[0].encoded.gzipBytes);
+  assert.equal(creationPosts(), 1);
+});
+
+test("exact GitHub deletion rejects mismatched uploaded metadata without mutation", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const reference = dataset.children[0].reference;
+  const githubApi = new FakeGitHub();
+  const writer = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  await writer.writeReferenced(reference, dataset.children[0].encoded.gzipBytes);
+  const release = [...githubApi.releases.values()].find((candidate) => candidate.assets.has(referenceObjectName(reference)));
+  const asset = release.assets.get(referenceObjectName(reference));
+  asset.digest = `sha256:${"0".repeat(64)}`;
+  const restarted = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  githubApi.requests.length = 0;
+  await assert.rejects(
+    restarted.removeReferenced(reference),
+    (error) => error instanceof StoredDataIntegrityError,
+  );
+  assert.equal(release.assets.has(referenceObjectName(reference)), true);
+  assert.equal(githubApi.requests.some((request) => request.method === "DELETE"), false);
 });
 
 test("public GitHub reads omit authorization while every mutation requires a token before network use", async () => {
@@ -583,7 +609,7 @@ test("public GitHub reads omit authorization while every mutation requires a tok
     dataset.children[0].reference,
     dataset.children[0].encoded.gzipBytes,
   ), /token is required/);
-  await assert.rejects(reader.cleanupSelectedGeneration(dataset.cleanupPlan), /token is required/);
+  await assert.rejects(reader.removeReferenced(dataset.children[0].reference), /token is required/);
   assert.equal(githubApi.requests.length, before);
 });
 

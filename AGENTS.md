@@ -43,6 +43,10 @@ Terms used in this file:
   one UTC day. A **pair-month file** lists that pair's day files for one UTC
   month. A **pair-state file** lists the months currently available for one pair
   and records its current and historical collection boundaries.
+- A **publication manifest** is one internal stored file that gives an
+  unfinished pair publication exact ownership of its previous and next state,
+  changed month files, and changed day files. It is not part of the public
+  pair-state, month, day, or period-read contract.
 - A stored reference's `logicalId` is its stable pair-and-month or pair-and-day
   identifier. It contains no generation number or physical storage location.
   Source files use **artifact** to mean one encoded state, month, or day data
@@ -113,8 +117,9 @@ Terms used in this file:
   construct it from a provider URL and token.
 - Current collection moves only `coverage.until` forward. Historical collection
   moves only `coverage.from` backward toward the fixed `historyStart`. Repair
-  changes candles inside existing coverage and moves neither boundary. Finish
-  every RPC read before the first storage write.
+  changes candles inside existing coverage and moves neither boundary. After
+  pending publication recovery completes, finish every RPC read for the new
+  attempt before creating its publication manifest or writing market data.
 - A collection group runs its pairs in order. A pair failure other than
   cancellation does not prevent later pairs from running. After every member has
   been attempted, the group fails if any pair failed. Cancellation stops before
@@ -136,10 +141,13 @@ Terms used in this file:
   pair identity; contacts the chain; publishes or deletes data; or treats a
   symbol as an identifier. A dry run is the default. `--write` is allowed only
   after the complete candidate pair registry and collection plan both validate.
-- During publication, write immutable pair-day and pair-month files before the
-  new pair-state generation. Re-download and validate each changed day and month
-  file, publish the state last, and then re-read that exact state generation.
-  References to unchanged months must come from the previously validated state.
+- Before a pair mutation makes any RPC request, resolve its pending publication
+  manifest. After every RPC read and replacement build completes, recheck the
+  exact selected-state bytes, create the manifest as the first storage mutation,
+  write immutable pair-day and pair-month files, and write the new pair-state
+  generation last. Validate each write from the exact bytes returned by storage,
+  then re-read and validate the exact selected state. References to unchanged
+  months must come from the previously validated state.
 - Do not publish an empty pair-state file. The absence of a selected state means
   that no data has been published for that pair. Every new pair-state generation
   must directly reference at least one pair-month generation written by the same
@@ -153,16 +161,23 @@ Terms used in this file:
   list day and month files only for months changed by the operation. Full
   verification must stream month and day files in order instead of holding the
   complete candle history in memory.
-- Cleanup may use only the newly selected state and the month files changed by
-  that state update. Before deleting anything, verify every file that must
-  remain. Delete an older generation only when its pair, month or day identifier
-  is named explicitly by the selected state update. A missing reference alone is
-  never permission to delete a file.
+- Publication recovery has one closed decision based on the admitted manifest
+  and exact selected-state identity. If the previous state is selected, verify
+  its changed closure and remove only the exact unpublished next files. If the
+  next state is selected, verify its changed closure and remove only the exact
+  superseded previous files. Any other combination is stored-data corruption.
+  Remove the manifest last. A cleanup failure remains fatal and leaves the
+  manifest for the next pair mutation. A missing reference, generation number,
+  filename pattern, Release listing, or repository scan is never deletion
+  authority.
 - The GitHub storage adapter retries only bounded transport, rate-limit, request
   timeout, and server failures. Deleting an exact asset that is already absent is
   successful. After an uncertain Release creation or asset upload, read the
   exact remote identity and verify uploaded bytes before repeating the mutation.
-  Do not make cleanup non-blocking or hide an exhausted storage failure.
+  If that reconciliation read remains unavailable, stop without issuing another
+  POST. Treat only an asset admitted as an empty GitHub `starter` as incomplete;
+  contradictory asset metadata is corruption. Do not make cleanup non-blocking
+  or hide an exhausted storage failure.
 - Operational failure logs classify fatal RPC responses, stored-data integrity,
   and collector invariants at their responsible boundary. Log only fixed reason
   names and admitted numeric HTTP or JSON-RPC codes; never log endpoint URLs,
@@ -176,9 +191,11 @@ Terms used in this file:
   trade count, or source positions to a candle. Do not substitute the event's
   post-swap `sqrtPriceX96` for an executed exchange ratio.
 - Change a state, month, or day `contractVersion` only when that file's stored
-  schema or meaning changes. When stored schema and meaning remain the same,
-  runtime, RPC, retry, fallback, registry, CLI, workflow, and storage changes do
-  not change the data version or add an implementation-version field.
+  schema or meaning changes. The internal publication manifest has its own
+  schema version, which changes only when that manifest's schema or meaning
+  changes. When stored schema and meaning remain the same, runtime, RPC, retry,
+  fallback, registry, CLI, workflow, and storage changes do not change a data
+  version or add an implementation-version field.
 - Publish and read only the current stored-data contract. Replace internal
   implementations directly; do not keep old readers, old names, aliases,
   migrations, compatibility branches, or implementation markers.

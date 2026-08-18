@@ -14,6 +14,7 @@ import { DirectoryStore } from "../storage/directory-store.mjs";
 import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
+import { storagePort } from "./storage-port-fixture.mjs";
 
 async function directoryStore(registry, prefix) {
   return new DirectoryStore({
@@ -116,7 +117,7 @@ test("current, historical, and repair operations change only their assigned cove
   assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "months", "2026-08"))).length, 2);
 });
 
-test("an unfinished cleanup is retried by the next current collection", async () => {
+test("selected publication cleanup remains blocking and the next operation recovers it", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
   const activation = BigInt(pair.activation.blockNumber);
@@ -130,35 +131,33 @@ test("an unfinished cleanup is retried by the next current collection", async ()
 
   let stateSelected = false;
   let failSelectedCleanup = true;
-  const cleanupSequences = [];
-  const failingCleanupStore = {
-    readSelectedState: (...args) => store.readSelectedState(...args),
-    resolvePairMonth: (...args) => store.resolvePairMonth(...args),
-    readReferenced: (...args) => store.readReferenced(...args),
-    writeReferenced: (...args) => store.writeReferenced(...args),
+  const removedReferences = [];
+  const failingCleanupStore = storagePort(store, {
     writeState: async (...args) => {
-      await store.writeState(...args);
+      const bytes = await store.writeState(...args);
       stateSelected = true;
+      return bytes;
     },
-    cleanupSelectedGeneration: (...args) => {
-      cleanupSequences.push(args[0].selectedSequence);
+    removeReferenced: async (reference, ...rest) => {
+      removedReferences.push(reference);
       if (stateSelected && failSelectedCleanup) throw new Error("cleanup failed after state selection");
-      return store.cleanupSelectedGeneration(...args);
+      return store.removeReferenced(reference, ...rest);
     },
-  };
+  });
   const caughtUpRpc = new FakePairRpc({ registry, pair, finalizedNumber: activation + 720n });
   await assert.rejects(
     collectPairCurrent({ registry, pairId: pair.pairId, store: failingCleanupStore, rpc: caughtUpRpc }),
     /cleanup failed after state selection/,
   );
   assert.equal((await readPairState({ registry, pairId: pair.pairId, store })).sequence, 2);
-  assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "state"))).length, 2);
-  assert.deepEqual(cleanupSequences, [1, 2]);
+  assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "state"))).length, 3);
+  assert.equal((await store.readPublication(pair.pairId)).status, "uploaded");
+  assert.equal(removedReferences.length, 1);
 
   failSelectedCleanup = false;
   const retried = await collectPairCurrent({ registry, pairId: pair.pairId, store: failingCleanupStore, rpc: caughtUpRpc });
   assert.equal(retried.status, "current");
-  assert.deepEqual(cleanupSequences, [1, 2, 2]);
+  assert.equal((await store.readPublication(pair.pairId)).status, "absent");
   assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "state"))).length, 1);
   assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "months", "2026-08"))).length, 2);
 });
@@ -375,12 +374,9 @@ test("a changed child must be validated from storage before state selection", as
   const directory = await directoryStore(registry, "pair-transition-integrity-");
   let corruptNextChildRead = true;
   let stateWriteReached = false;
-  const store = {
-    readSelectedState: (...args) => directory.readSelectedState(...args),
-    resolvePairMonth: (...args) => directory.resolvePairMonth(...args),
-    writeReferenced: (...args) => directory.writeReferenced(...args),
-    readReferenced: async (...args) => {
-      const bytes = await directory.readReferenced(...args);
+  const store = storagePort(directory, {
+    writeReferenced: async (...args) => {
+      const bytes = await directory.writeReferenced(...args);
       if (!corruptNextChildRead) return bytes;
       corruptNextChildRead = false;
       const changed = Buffer.from(bytes);
@@ -391,7 +387,7 @@ test("a changed child must be validated from storage before state selection", as
       stateWriteReached = true;
       throw new Error("State publication must not be reached.");
     },
-  };
+  });
 
   await assert.rejects(
     collectPairCurrent({ registry, pairId: pair.pairId, store, rpc }),

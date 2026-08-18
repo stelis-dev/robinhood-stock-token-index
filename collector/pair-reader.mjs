@@ -8,7 +8,7 @@ import {
 } from "./pair-artifact.mjs";
 import { validatePairPeriodInput, validatePairPeriodResult } from "./pair-period.mjs";
 import { pairById } from "./pair-registry.mjs";
-import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
+import { createStateIdentity, StoredDataIntegrityError } from "../storage/stored-files.mjs";
 
 function validateStoredData(action) {
   try {
@@ -25,7 +25,7 @@ function exactReference(references, logicalId) {
   return reference;
 }
 
-export async function readPairState({ registry, pairId, store }) {
+export async function readPairStateSelection({ registry, pairId, store }) {
   pairById(registry, pairId);
   const selected = await store.readSelectedState(pairId);
   if (selected === null) return null;
@@ -35,8 +35,17 @@ export async function readPairState({ registry, pairId, store }) {
     }
     const state = decodePairState(selected.gzipBytes, { registry }, pairId);
     if (state.sequence !== selected.sequence) throw new StoredDataIntegrityError();
-    return state;
+    return {
+      state,
+      identity: createStateIdentity(selected.sequence, selected.gzipBytes, registry.collection.maximumArtifactBytes),
+      gzipBytes: selected.gzipBytes,
+    };
   });
+}
+
+export async function readPairState({ registry, pairId, store }) {
+  const selected = await readPairStateSelection({ registry, pairId, store });
+  return selected?.state ?? null;
 }
 
 export async function readPairMonth({ registry, store, reference }) {
