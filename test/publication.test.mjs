@@ -9,7 +9,7 @@ import {
   encodePublicationManifest,
   recoverPairPublication,
 } from "../collector/publication.mjs";
-import { collectPairCurrent } from "../collector/process.mjs";
+import { runRpcPairOperation } from "../collector/rpc-operation.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { GitHubReleaseStore, GitHubStorageError } from "../storage/github-release-store.mjs";
 import {
@@ -23,6 +23,10 @@ import { compactPairRegistry, FakePairRpc } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 import { FakeGitHub } from "./github-storage-fixture.mjs";
 import { storagePort } from "./storage-port-fixture.mjs";
+
+async function runCurrentPhase({ rpc, ...input }) {
+  return (await runRpcPairOperation({ operation: "current", ...input, rpcClients: [rpc] })).result;
+}
 
 const replacementTrace = Object.freeze([
   "create_publication",
@@ -65,7 +69,7 @@ async function initializedPair() {
   const activation = BigInt(pair.activation.blockNumber);
   const root = await mkdtemp(join(tmpdir(), "pair-publication-"));
   const store = directory(root, registry);
-  await collectPairCurrent({
+  await runCurrentPhase({
     registry,
     pairId: pair.pairId,
     store,
@@ -149,7 +153,7 @@ async function filesBelow(path, prefix = "") {
 }
 
 async function runReplacement({ registry, pair, activation, store }) {
-  return collectPairCurrent({
+  return runCurrentPhase({
     registry,
     pairId: pair.pairId,
     store,
@@ -220,7 +224,7 @@ test("every durable replacement boundary restarts into exactly one selected clos
     const store = directory(root, registry);
     const trace = [];
     await assert.rejects(
-      collectPairCurrent({
+      runCurrentPhase({
         registry,
         pairId: pair.pairId,
         store: interruptedStore(store, stopAfter, trace),
@@ -296,11 +300,11 @@ test("recovery proves retained data before its first superseded deletion", async
     finalizedNumber: activation + 2n,
     secondsPerBlock: 86_400,
   });
-  await collectPairCurrent({ registry, pairId: pair.pairId, store, rpc: multiDayRpc });
+  await runCurrentPhase({ registry, pairId: pair.pairId, store, rpc: multiDayRpc });
 
   const trace = [];
   await assert.rejects(
-    collectPairCurrent({
+    runCurrentPhase({
       registry,
       pairId: pair.pairId,
       store: interruptedStore(store, "write_state", trace),
@@ -374,7 +378,7 @@ test("a cold GitHub replacement follows the request trace derived from the publi
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
     fetchImplementation: githubApi.fetch,
   });
-  await collectPairCurrent({
+  await runCurrentPhase({
     registry,
     pairId: pair.pairId,
     store: createStore(),
@@ -382,7 +386,7 @@ test("a cold GitHub replacement follows the request trace derived from the publi
   });
 
   githubApi.requests.length = 0;
-  await collectPairCurrent({
+  await runCurrentPhase({
     registry,
     pairId: pair.pairId,
     store: createStore(),
@@ -411,6 +415,47 @@ test("a cold GitHub replacement follows the request trace derived from the publi
   ]);
 });
 
+test("a shared GitHub adapter preserves the warm replacement request trace", async () => {
+  const registry = await compactPairRegistry();
+  const pair = pairEntryBySymbol(registry, "NVDA").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const githubApi = new FakeGitHub();
+  const store = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    fetchImplementation: githubApi.fetch,
+  });
+  await runCurrentPhase({
+    registry,
+    pairId: pair.pairId,
+    store,
+    rpc: new FakePairRpc({ registry, pair, finalizedNumber: activation + 360n }),
+  });
+
+  githubApi.requests.length = 0;
+  await runCurrentPhase({
+    registry,
+    pairId: pair.pairId,
+    store,
+    rpc: new FakePairRpc({ registry, pair, finalizedNumber: activation + 720n }),
+  });
+  assert.deepEqual(githubRequestTrace(githubApi.requests), [
+    "upload_publication",
+    "get_asset",
+    "upload_day",
+    "get_asset",
+    "upload_month",
+    "get_asset",
+    "upload_state",
+    "get_asset",
+    "delete_asset",
+    "delete_asset",
+    "delete_asset",
+    "delete_asset",
+  ]);
+});
+
 test("a cold GitHub recovery resumes selected cleanup through its derived request trace", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
@@ -424,7 +469,7 @@ test("a cold GitHub recovery resumes selected cleanup through its derived reques
     waitImplementation: async () => {},
   });
   const firstStore = createStore();
-  await collectPairCurrent({
+  await runCurrentPhase({
     registry,
     pairId: pair.pairId,
     store: firstStore,
@@ -434,7 +479,7 @@ test("a cold GitHub recovery resumes selected cleanup through its derived reques
   const previousMonth = await readPairMonth({ registry, store: firstStore, reference: previousState.months[0] });
   githubApi.failDeleteAssetName = referenceObjectName(previousMonth.days[0]);
   await assert.rejects(
-    collectPairCurrent({
+    runCurrentPhase({
       registry,
       pairId: pair.pairId,
       store: firstStore,

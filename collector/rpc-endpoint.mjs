@@ -4,6 +4,7 @@ export const maximumRpcBatchSize = 100;
 const rpcResponseRejectionReasons = new Set([
   "activation_boundary_mismatch",
   "chain_identity_mismatch",
+  "finalized_boundary_mismatch",
   "http_rejected",
   "response_envelope_invalid",
   "response_not_json",

@@ -13,7 +13,7 @@ import {
   readPairStateSelection,
 } from "./pair-reader.mjs";
 import { pairById } from "./pair-registry.mjs";
-import { publishPairReplacement, recoverPairPublication } from "./publication.mjs";
+import { publishPairReplacement } from "./publication.mjs";
 import { RpcEndpointUnavailableError, RpcResponseRejectedError } from "./rpc-endpoint.mjs";
 import { blockTimestamp } from "./rpc-client.mjs";
 import { decodeSwapLog, validateSwapLogBlockNumber } from "./swap.mjs";
@@ -101,6 +101,34 @@ function assertFinalizedCoversStoredRange(state, pair, finalized) {
   const untilBlock = BigInt(state?.coverage.untilBlock ?? pair.activation.blockNumber);
   const requiredBlock = untilBlock === 0n ? 0n : untilBlock - 1n;
   if (BigInt(finalized.number) < requiredBlock) throw new RpcEndpointUnavailableError();
+}
+
+function sameBlock(left, right) {
+  return left.number === right.number
+    && left.hash === right.hash
+    && left.timestamp === right.timestamp;
+}
+
+async function fixedFinalizedBlock({ registry, pair, rpc, state, finalizedBoundary }) {
+  if (finalizedBoundary === null || typeof finalizedBoundary !== "object" || !Object.hasOwn(finalizedBoundary, "block")) {
+    throw new Error("Finalized boundary holder is invalid.");
+  }
+  const providerFinalized = await rpc.getBlock(registry.chain.finalityTag);
+  assertFinalizedCoversStoredRange(state, pair, providerFinalized);
+  if (finalizedBoundary.block === null) {
+    finalizedBoundary.block = Object.freeze({ ...providerFinalized });
+    return finalizedBoundary.block;
+  }
+  if (BigInt(providerFinalized.number) < BigInt(finalizedBoundary.block.number)) {
+    throw new RpcEndpointUnavailableError();
+  }
+  const providerCopy = providerFinalized.number === finalizedBoundary.block.number
+    ? providerFinalized
+    : await rpc.getBlock(BigInt(finalizedBoundary.block.number));
+  if (!sameBlock(providerCopy, finalizedBoundary.block)) {
+    throw new RpcResponseRejectedError("finalized_boundary_mismatch");
+  }
+  return finalizedBoundary.block;
 }
 
 async function verifyActivationBoundary(pair, rpc) {
@@ -368,16 +396,19 @@ async function currentRange({ registry, pair, rpc, state, finalized }) {
   const fromBlock = BigInt(state?.coverage.untilBlock ?? pair.activation.blockNumber);
   const fromSeconds = Math.floor(Date.parse(state?.coverage.untilTimestamp ?? pair.activation.timestamp) / 1000);
   const finalizedNumber = BigInt(finalized.number);
-  if (finalizedNumber < fromBlock) return null;
+  if (finalizedNumber < fromBlock) return { range: null, reachedFinalizedBoundary: true };
   const finalizedBoundarySeconds = minuteFloor(blockTimestamp(finalized), registry.collection.candleSeconds);
-  if (finalizedBoundarySeconds <= fromSeconds) return null;
+  if (finalizedBoundarySeconds <= fromSeconds) return { range: null, reachedFinalizedBoundary: true };
   const searchHigh = minimum(fromBlock + BigInt(registry.collection.maximumBlocksPerRun), finalizedNumber);
   const searchHighHeader = searchHigh === finalizedNumber ? finalized : await rpc.getBlock(searchHigh);
+  const nextDaySeconds = Math.floor(fromSeconds / 86_400) * 86_400 + 86_400;
   const untilSeconds = minimum(
     minuteFloor(blockTimestamp(searchHighHeader), registry.collection.candleSeconds),
-    finalizedBoundarySeconds,
+    minimum(finalizedBoundarySeconds, nextDaySeconds),
   );
-  if (untilSeconds <= fromSeconds) return null;
+  if (untilSeconds <= fromSeconds) {
+    return { range: null, reachedFinalizedBoundary: searchHigh === finalizedNumber };
+  }
   const untilBlock = await rpc.findFirstBlockAtOrAfterTimestamp(
     untilSeconds,
     fromBlock,
@@ -386,10 +417,13 @@ async function currentRange({ registry, pair, rpc, state, finalized }) {
   );
   if (untilBlock < fromBlock || untilBlock > searchHigh) throw new Error("Current boundary is outside its fixed block range.");
   return {
-    fromBlock: fromBlock.toString(),
-    fromTimestamp: instant(fromSeconds),
-    untilBlock: untilBlock.toString(),
-    untilTimestamp: instant(untilSeconds),
+    range: {
+      fromBlock: fromBlock.toString(),
+      fromTimestamp: instant(fromSeconds),
+      untilBlock: untilBlock.toString(),
+      untilTimestamp: instant(untilSeconds),
+    },
+    reachedFinalizedBoundary: untilSeconds === finalizedBoundarySeconds,
   };
 }
 
@@ -400,24 +434,25 @@ async function historyRange({ registry, pair, rpc, state }) {
   if (fromBlock === historyBlock && fromTimestamp === pair.historyStart.timestamp) return null;
   if (fromBlock < historyBlock || fromTimestamp < pair.historyStart.timestamp) throw new Error("Stored coverage start is before the pair historyStart boundary.");
   const nominalBlock = maximum(fromBlock - BigInt(registry.collection.maximumBlocksPerRun), historyBlock);
+  const nominalHeader = await rpc.getBlock(nominalBlock);
+  const nominalSeconds = minuteFloor(blockTimestamp(nominalHeader), registry.collection.candleSeconds);
+  const historySeconds = Math.floor(Date.parse(pair.historyStart.timestamp) / 1000);
+  const fromSeconds = Math.floor(Date.parse(fromTimestamp) / 1000);
+  const previousDaySeconds = Math.floor((fromSeconds - 1) / 86_400) * 86_400;
+  const boundarySeconds = Math.max(nominalSeconds, historySeconds, previousDaySeconds);
   let nextFromBlock;
-  let nextFromTimestamp;
-  if (nominalBlock === historyBlock) {
+  if (boundarySeconds === historySeconds) {
     nextFromBlock = historyBlock;
-    nextFromTimestamp = pair.historyStart.timestamp;
   } else {
-    const nominalHeader = await rpc.getBlock(nominalBlock);
-    const nominalSeconds = minuteFloor(blockTimestamp(nominalHeader), registry.collection.candleSeconds);
-    const historySeconds = Math.floor(Date.parse(pair.historyStart.timestamp) / 1000);
-    const boundarySeconds = Math.max(nominalSeconds, historySeconds);
+    const fromHeader = nominalBlock === fromBlock ? nominalHeader : await rpc.getBlock(fromBlock);
     nextFromBlock = await rpc.findFirstBlockAtOrAfterTimestamp(
       boundarySeconds,
       historyBlock,
-      nominalBlock,
-      { maximumBlockHeader: nominalHeader },
+      fromBlock,
+      { maximumBlockHeader: fromHeader },
     );
-    nextFromTimestamp = instant(boundarySeconds);
   }
+  const nextFromTimestamp = instant(boundarySeconds);
   if (nextFromBlock > fromBlock || nextFromTimestamp >= fromTimestamp) {
     throw new Error("History collection cannot move by one complete minute.");
   }
@@ -457,54 +492,62 @@ async function collectAndPublish({ registry, pair, store, rpc, previousSelection
   return publishReplacement({ registry, pair, store, previousSelection, phase, range, collected, signal });
 }
 
-export async function collectPairCurrent({ registry, pairId, store, rpc, signal }) {
+export async function runPairCurrentAttempt({ registry, pairId, store, rpc, finalizedBoundary, signal }) {
   throwIfAborted(signal);
   const pair = pairById(registry, pairId).pair;
-  await recoverPairPublication({ registry, pairId, store });
   await rpc.verifyChain(registry.chain.numericChainId);
   await verifyActivationBoundary(pair, rpc);
   const previousSelection = await readPairStateSelection({ registry, pairId, store });
   const previous = previousSelection?.state ?? null;
-  const finalized = await rpc.getBlock(registry.chain.finalityTag);
-  assertFinalizedCoversStoredRange(previous, pair, finalized);
-  const range = await currentRange({ registry, pair, rpc, state: previous, finalized });
-  if (range === null) {
-    return { status: "current", phase: "current", pairId, sequence: previous?.sequence ?? null };
+  const finalized = await fixedFinalizedBlock({
+    registry, pair, rpc, state: previous, finalizedBoundary,
+  });
+  const selected = await currentRange({ registry, pair, rpc, state: previous, finalized });
+  if (selected.range === null) {
+    return {
+      result: { status: "current", phase: "current", pairId, sequence: previous?.sequence ?? null },
+      reachedFinalizedBoundary: selected.reachedFinalizedBoundary,
+    };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "current", range, signal });
+  return {
+    result: await collectAndPublish({
+      registry, pair, store, rpc, previousSelection, phase: "current", range: selected.range, signal,
+    }),
+    reachedFinalizedBoundary: selected.reachedFinalizedBoundary,
+  };
 }
 
-export async function collectPairHistory({ registry, pairId, store, rpc, signal }) {
+export async function runPairHistoryAttempt({ registry, pairId, store, rpc, finalizedBoundary, signal }) {
   throwIfAborted(signal);
   const pair = pairById(registry, pairId).pair;
-  await recoverPairPublication({ registry, pairId, store });
   await rpc.verifyChain(registry.chain.numericChainId);
   await verifyActivationBoundary(pair, rpc);
   const previousSelection = await readPairStateSelection({ registry, pairId, store });
   const previous = previousSelection?.state ?? null;
-  const finalized = await rpc.getBlock(registry.chain.finalityTag);
-  assertFinalizedCoversStoredRange(previous, pair, finalized);
+  await fixedFinalizedBlock({ registry, pair, rpc, state: previous, finalizedBoundary });
   const range = await historyRange({ registry, pair, rpc, state: previous });
   if (range === null) {
-    return { status: "current", phase: "history", pairId, sequence: previous?.sequence ?? null };
+    return { result: { status: "current", phase: "history", pairId, sequence: previous?.sequence ?? null } };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "history", range, signal });
+  return {
+    result: await collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "history", range, signal }),
+  };
 }
 
-export async function repairPairIndex({ registry, pairId, store, rpc, signal }) {
+export async function runPairRepairAttempt({ registry, pairId, store, rpc, finalizedBoundary, signal }) {
   throwIfAborted(signal);
   const pair = pairById(registry, pairId).pair;
-  await recoverPairPublication({ registry, pairId, store });
   await rpc.verifyChain(registry.chain.numericChainId);
   await verifyActivationBoundary(pair, rpc);
   const previousSelection = await readPairStateSelection({ registry, pairId, store });
   const previous = previousSelection?.state ?? null;
-  if (previous === null) return { status: "empty", phase: "repair", pairId, sequence: null };
-  const finalized = await rpc.getBlock(registry.chain.finalityTag);
-  assertFinalizedCoversStoredRange(previous, pair, finalized);
+  if (previous === null) return { result: { status: "empty", phase: "repair", pairId, sequence: null } };
+  await fixedFinalizedBlock({ registry, pair, rpc, state: previous, finalizedBoundary });
   const range = await repairRange({ registry, rpc, state: previous });
   if (range === null) {
-    return { status: "current", phase: "repair", pairId, sequence: previous.sequence };
+    return { result: { status: "current", phase: "repair", pairId, sequence: previous.sequence } };
   }
-  return collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "repair", range, signal });
+  return {
+    result: await collectAndPublish({ registry, pair, store, rpc, previousSelection, phase: "repair", range, signal }),
+  };
 }

@@ -86,7 +86,11 @@ Terms used in this file:
   storage adapter cannot decode candles, calculate market data, combine pair
   data, or decide which stored generation is valid; it implements the selection
   rules supplied by the collector.
-- `cli.mjs` is the only command for pair, group, and scheduled operations.
+- `cli.mjs` is the only command for pair, group, and scheduled operations. One
+  command reuses one admitted registry, storage adapter, RPC client set,
+  cancellation signal, and log writer for every pair it runs. Group execution
+  calls the direct pair-operation owner and never invokes the top-level CLI
+  recursively.
   `.github/workflows/index.yml` must contain the same cron expressions as
   `registry/collection-plan.json` because GitHub reads schedules before
   repository code starts. The workflow passes the selected expression to
@@ -117,14 +121,22 @@ Terms used in this file:
   construct it from a provider URL and token.
 - Current collection moves only `coverage.until` forward. Historical collection
   moves only `coverage.from` backward toward the fixed `historyStart`. Repair
-  changes candles inside existing coverage and moves neither boundary. After
-  pending publication recovery completes, finish every RPC read for the new
-  attempt before creating its publication manifest or writing market data.
+  changes candles inside existing coverage and moves neither boundary. A
+  current or historical phase stops at the adjacent UTC-day boundary as well as
+  its admitted block and history limits. After pending publication recovery
+  completes, finish every RPC read for the new attempt before creating its
+  publication manifest or writing market data.
+- A pair `collect` runs at most two durable phases against one fixed finalized
+  block. The first phase is current. If it does not reach that block's complete
+  minute boundary because of the block or UTC-day limit, the second phase is
+  current again; otherwise the second phase is history. Every endpoint used by
+  either phase must reproduce the fixed finalized block before use. A published
+  first phase remains selected if the second phase fails.
 - A collection group runs its pairs in order. A pair failure other than
   cancellation does not prevent later pairs from running. After every member has
   been attempted, the group fails if any pair failed. Cancellation stops before
-  the next pair. Group execution adds no shared cursor, retry state, stored file,
-  or recovery state.
+  the next pair. The group shares only its command context; it adds no shared
+  cursor, retry state, stored file, or recovery state.
 - The current collection plan allows at most three groups, three pairs per
   group, and 720 seconds of estimated runtime per group. For capacity checks,
   add the plan's 25 percent safety margin to each measured pair runtime. Pair
@@ -182,7 +194,9 @@ Terms used in this file:
   and collector invariants at their responsible boundary. Log only fixed reason
   names and admitted numeric HTTP or JSON-RPC codes; never log endpoint URLs,
   provider messages, response bodies, tokens, or stack traces. Classification
-  does not change retry, fallback, publication, or group-failure behavior.
+  does not change retry, fallback, publication, or group-failure behavior. The
+  CLI emits one success or failure line per phase and emits a recovery line only
+  when recovery retained the previous state or selected the next state.
 - Store processed candles and continuous coverage. Do not store raw RPC
   responses, invented candles, a general transaction index, the RPC provider
   used, or a storage URL.

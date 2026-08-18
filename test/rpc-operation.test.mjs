@@ -9,7 +9,11 @@ import {
   RpcEndpointUnavailableError,
   RpcResponseRejectedError,
 } from "../collector/rpc-endpoint.mjs";
-import { RpcPairOperationUnavailableError, runRpcPairOperation } from "../collector/rpc-operation.mjs";
+import {
+  createFinalizedBoundary,
+  RpcPairOperationUnavailableError,
+  runRpcPairOperation,
+} from "../collector/rpc-operation.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
@@ -195,6 +199,44 @@ test("a committed activation mismatch is fatal rather than an availability fallb
   assert.equal(fallbackUsed, false);
 });
 
+test("a later provider must reproduce the fixed finalized block before it can continue", async () => {
+  const registry = await compactPairRegistry();
+  const pair = pairEntryBySymbol(registry, "NVDA").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const store = (await countingDirectory(registry)).directory;
+  const boundary = createFinalizedBoundary();
+  await runRpcPairOperation({
+    operation: "current",
+    registry,
+    pairId: pair.pairId,
+    store,
+    rpcClients: [new FakePairRpc({ registry, pair, finalizedNumber: activation + 360n })],
+    finalizedBoundary: boundary,
+  });
+
+  const disagreeing = new FakePairRpc({ registry, pair, finalizedNumber: activation + 720n });
+  const getBlock = disagreeing.getBlock.bind(disagreeing);
+  disagreeing.getBlock = async (selector) => {
+    const block = await getBlock(selector);
+    if (typeof selector === "bigint" && selector === activation + 360n) {
+      return { ...block, hash: `0x${"f".repeat(64)}` };
+    }
+    return block;
+  };
+  let laterFallbackUsed = false;
+  await assert.rejects(runRpcPairOperation({
+    operation: "history",
+    registry,
+    pairId: pair.pairId,
+    store,
+    rpcClients: [disagreeing, { async verifyChain() { laterFallbackUsed = true; } }],
+    finalizedBoundary: boundary,
+  }), (error) => (
+    error instanceof RpcResponseRejectedError && error.reason === "finalized_boundary_mismatch"
+  ));
+  assert.equal(laterFallbackUsed, false);
+});
+
 test("repair rejects an endpoint behind the stored range and never reads past that range on fallback", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
@@ -212,14 +254,17 @@ test("repair rejects an endpoint behind the stored range and never reads past th
   });
   const stale = new FakePairRpc({ registry, pair, finalizedNumber: activation + 358n });
   const fallback = new FakePairRpc({ registry, pair, finalizedNumber: activation + 359n });
+  const finalizedBoundary = createFinalizedBoundary();
   const completed = await runRpcPairOperation({
     operation: "repair",
     registry,
     pairId: pair.pairId,
     store: directory,
     rpcClients: [stale, fallback],
+    finalizedBoundary,
   });
   assert.equal(completed.selectedEndpointIndex, 1);
+  assert.equal(BigInt(finalizedBoundary.block.number), activation + 359n);
   assert.equal(stale.logRequests.length, 0);
   assert.ok(fallback.blockSearches.every((search) => search.maximumBlock <= activation + 359n));
 });

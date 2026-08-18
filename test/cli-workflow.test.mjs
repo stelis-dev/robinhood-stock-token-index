@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   pairOperationFailureLog,
+  pairOperationSuccessLog,
   parseArguments,
-  rpcEndpointSelectionLog,
+  publicationRecoveryLog,
   rpcEndpointSourceName,
   selectRpcUrls,
 } from "../cli.mjs";
@@ -79,10 +80,10 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
   assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
   assert.equal(rpcEndpointSourceName(2), "INDEX_RPC_FALLBACK_URL_1");
   assert.throws(() => rpcEndpointSourceName(3), /selection/);
-  assert.equal(rpcEndpointSelectionLog("history", 1, {}), null);
+  assert.equal(pairOperationSuccessLog("history", pairId, 1, {}), null);
   assert.equal(
-    rpcEndpointSelectionLog("history", 1, { GITHUB_ACTIONS: "true" }),
-    "rpc_attempt=history rpc_endpoint_source=INDEX_RPC_FALLBACK_URL_0\n",
+    pairOperationSuccessLog("history", pairId, 1, { GITHUB_ACTIONS: "true" }),
+    `pair_operation=history status=success rpc_endpoint_source=INDEX_RPC_FALLBACK_URL_0 pair_id=${pairId}\n`,
   );
   assert.equal(pairOperationFailureLog("current", pairId, {}), null);
   assert.equal(
@@ -124,6 +125,19 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
       new StoredDataIntegrityError(),
     ),
     `pair_operation=history status=failed component=stored_data reason=integrity_rejected pair_id=${pairId}\n`,
+  );
+  assert.equal(publicationRecoveryLog({ status: "idle", pairId }, { GITHUB_ACTIONS: "true" }), null);
+  assert.equal(
+    publicationRecoveryLog({
+      status: "aborted", pairId, phase: "current", selectedSequence: 4,
+    }, { GITHUB_ACTIONS: "true" }),
+    `publication_recovery outcome=previous_state_retained phase=current selected_sequence=4 pair_id=${pairId}\n`,
+  );
+  assert.equal(
+    publicationRecoveryLog({
+      status: "committed", pairId, phase: "history", selectedSequence: 5,
+    }, { GITHUB_ACTIONS: "true" }),
+    `publication_recovery outcome=next_state_selected phase=history selected_sequence=5 pair_id=${pairId}\n`,
   );
 });
 

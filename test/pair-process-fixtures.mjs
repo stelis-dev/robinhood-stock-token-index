@@ -27,6 +27,8 @@ export function pairBlock(number, timestamp) {
 
 export async function compactPairRegistry({
   activationTimestamp,
+  historyBlockOffset = 720n,
+  historySecondsOffset = 7_200,
   maximumBlocksPerRun = 360,
 } = {}) {
   const registry = structuredClone(await fixturePairRegistry());
@@ -43,8 +45,8 @@ export async function compactPairRegistry({
   const activationSeconds = Math.floor(Date.parse(pair.activation.timestamp) / 1000);
   pair.activation.hash = pairBlock(activationBlock, activationSeconds).hash;
   pair.sourceInitialization = {
-    blockNumber: (activationBlock - 720n).toString(),
-    timestamp: new Date((activationSeconds - 7_200) * 1000).toISOString(),
+    blockNumber: (activationBlock - BigInt(historyBlockOffset)).toString(),
+    timestamp: new Date((activationSeconds - historySecondsOffset) * 1000).toISOString(),
   };
   pair.historyStart = {
     blockNumber: pair.sourceInitialization.blockNumber,

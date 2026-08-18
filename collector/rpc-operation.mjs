@@ -1,4 +1,5 @@
-import { collectPairCurrent, collectPairHistory, repairPairIndex } from "./process.mjs";
+import { recoverPairPublication } from "./publication.mjs";
+import { runPairCurrentAttempt, runPairHistoryAttempt, runPairRepairAttempt } from "./process.mjs";
 import {
   maximumRpcEndpointCount,
   RpcEndpointUnavailableError,
@@ -6,9 +7,9 @@ import {
 } from "./rpc-endpoint.mjs";
 
 const operationHandlers = new Map([
-  ["current", collectPairCurrent],
-  ["history", collectPairHistory],
-  ["repair", repairPairIndex],
+  ["current", runPairCurrentAttempt],
+  ["history", runPairHistoryAttempt],
+  ["repair", runPairRepairAttempt],
 ]);
 
 export class RpcPairOperationUnavailableError extends Error {
@@ -28,19 +29,47 @@ export function rpcOperationFailureFields(error) {
   return `component=rpc reason=${error.reason}${httpStatus}${rpcCode}`;
 }
 
-export async function runRpcPairOperation({ operation, registry, pairId, store, rpcClients, signal }) {
+export function createFinalizedBoundary() {
+  return Object.seal({ block: null });
+}
+
+export async function runRpcPairOperation({
+  operation,
+  registry,
+  pairId,
+  store,
+  rpcClients,
+  finalizedBoundary = createFinalizedBoundary(),
+  onRecovery,
+  signal,
+}) {
   const handler = operationHandlers.get(operation);
   if (!handler) throw new Error("RPC pair operation must be current, history, or repair.");
   if (!Array.isArray(rpcClients) || rpcClients.length === 0 || rpcClients.length > maximumRpcEndpointCount || rpcClients.some((rpc) => rpc === null || typeof rpc !== "object")) {
     throw new Error("RPC endpoint set is invalid.");
   }
+  if (typeof onRecovery !== "undefined" && typeof onRecovery !== "function") {
+    throw new Error("Publication recovery observer is invalid.");
+  }
+
+  const recovery = await recoverPairPublication({ registry, pairId, store });
+  onRecovery?.(recovery);
 
   for (let endpointIndex = 0; endpointIndex < rpcClients.length; endpointIndex += 1) {
     signal?.throwIfAborted();
     try {
+      const completed = await handler({
+        registry,
+        pairId,
+        store,
+        rpc: rpcClients[endpointIndex],
+        finalizedBoundary,
+        signal,
+      });
       return {
-        result: await handler({ registry, pairId, store, rpc: rpcClients[endpointIndex], signal }),
+        ...completed,
         selectedEndpointIndex: endpointIndex,
+        recovery,
       };
     } catch (error) {
       if (!(error instanceof RpcEndpointUnavailableError)) throw error;

@@ -3,7 +3,11 @@
 import { pathToFileURL } from "node:url";
 import { readPairPeriod, verifyPairIndex } from "./collector/pair-reader.mjs";
 import { loadPairRegistry, pairById } from "./collector/pair-registry.mjs";
-import { rpcOperationFailureFields, runRpcPairOperation } from "./collector/rpc-operation.mjs";
+import {
+  createFinalizedBoundary,
+  rpcOperationFailureFields,
+  runRpcPairOperation,
+} from "./collector/rpc-operation.mjs";
 import { RpcClient } from "./collector/rpc-client.mjs";
 import { validateRpcUrl, maximumRpcEndpointCount } from "./collector/rpc-endpoint.mjs";
 import {
@@ -34,10 +38,11 @@ export function rpcEndpointSourceName(index) {
   return rpcEndpointSourceNames[index];
 }
 
-export function rpcEndpointSelectionLog(phase, index, environment) {
+export function pairOperationSuccessLog(phase, pairId, index, environment) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
   if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("RPC operation phase is invalid.");
-  return `rpc_attempt=${phase} rpc_endpoint_source=${rpcEndpointSourceName(index)}\n`;
+  if (typeof pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Pair operation identity is invalid.");
+  return `pair_operation=${phase} status=success rpc_endpoint_source=${rpcEndpointSourceName(index)} pair_id=${pairId}\n`;
 }
 
 export function pairOperationFailureLog(phase, pairId, environment, error) {
@@ -49,6 +54,26 @@ export function pairOperationFailureLog(phase, pairId, environment, error) {
     ?? storedDataFailureFields(error);
   const fields = failure === null ? "component=collector reason=operation_rejected" : failure;
   return `pair_operation=${phase} status=failed ${fields} pair_id=${pairId}\n`;
+}
+
+export function publicationRecoveryLog(recovery, environment) {
+  if (environment?.GITHUB_ACTIONS !== "true" || recovery?.status === "idle") return null;
+  if (recovery === null || typeof recovery !== "object" || (recovery.status !== "aborted" && recovery.status !== "committed")) {
+    throw new Error("Publication recovery result is invalid.");
+  }
+  if (typeof recovery.pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(recovery.pairId)) {
+    throw new Error("Publication recovery pair identity is invalid.");
+  }
+  if (recovery.phase !== null && recovery.phase !== "current" && recovery.phase !== "history" && recovery.phase !== "repair") {
+    throw new Error("Publication recovery phase is invalid.");
+  }
+  if (recovery.selectedSequence !== null && (!Number.isSafeInteger(recovery.selectedSequence) || recovery.selectedSequence <= 0)) {
+    throw new Error("Publication recovery sequence is invalid.");
+  }
+  const outcome = recovery.status === "committed" ? "next_state_selected" : "previous_state_retained";
+  const phase = recovery.phase === null ? "none" : recovery.phase;
+  const sequence = recovery.selectedSequence === null ? "none" : recovery.selectedSequence;
+  return `publication_recovery outcome=${outcome} phase=${phase} selected_sequence=${sequence} pair_id=${recovery.pairId}\n`;
 }
 
 export function selectRpcUrls(registry, environment) {
@@ -122,13 +147,6 @@ export function parseArguments(argv) {
   };
 }
 
-function pairArguments(options, pairId) {
-  const storage = options.store === "directory"
-    ? ["--store", "directory", "--root", options.root]
-    : ["--store", "github", "--repository", options.repository];
-  return [options.operation, "--pair", pairId, ...storage];
-}
-
 function rpcClients(registry, environment, signal) {
   return selectRpcUrls(registry, environment).map((url) => new RpcClient({
     url,
@@ -141,17 +159,32 @@ function rpcClients(registry, environment, signal) {
   }));
 }
 
-function writeSelection(phase, completed, environment) {
-  const line = rpcEndpointSelectionLog(phase, completed.selectedEndpointIndex, environment);
-  if (line !== null) process.stderr.write(line);
+function writeOperationSuccess(phase, pairId, completed, environment, writeLog) {
+  const line = pairOperationSuccessLog(phase, pairId, completed.selectedEndpointIndex, environment);
+  if (line !== null) writeLog(line);
 }
 
-function writeOperationFailure(phase, pairId, environment, error) {
+function writeOperationFailure(phase, pairId, environment, error, writeLog) {
   const line = pairOperationFailureLog(phase, pairId, environment, error);
-  if (line !== null) process.stderr.write(line);
+  if (line !== null) writeLog(line);
 }
 
-async function runPairOperation({ phase, registry, pairId, store, clients, signal, environment }) {
+function writeRecovery(recovery, environment, writeLog) {
+  const line = publicationRecoveryLog(recovery, environment);
+  if (line !== null) writeLog(line);
+}
+
+async function runPairOperation({
+  phase,
+  registry,
+  pairId,
+  store,
+  clients,
+  finalizedBoundary,
+  signal,
+  environment,
+  writeLog,
+}) {
   try {
     const completed = await runRpcPairOperation({
       operation: phase,
@@ -159,31 +192,48 @@ async function runPairOperation({ phase, registry, pairId, store, clients, signa
       pairId,
       store,
       rpcClients: clients,
+      finalizedBoundary,
+      onRecovery: (recovery) => writeRecovery(recovery, environment, writeLog),
       signal,
     });
-    writeSelection(phase, completed, environment);
-    return completed.result;
+    writeOperationSuccess(phase, pairId, completed, environment, writeLog);
+    return completed;
   } catch (error) {
-    writeOperationFailure(phase, pairId, environment, error);
+    writeOperationFailure(phase, pairId, environment, error, writeLog);
     throw error;
   }
 }
 
-async function runPairCommand(options, registry, { environment, signal }) {
-  const pairId = options.target.id;
-  pairById(registry, pairId);
-  const mutatesGitHub = options.store === "github" && (options.operation === "collect" || options.operation === "repair");
-  if (mutatesGitHub && (typeof environment.GITHUB_TOKEN !== "string" || environment.GITHUB_TOKEN.length === 0)) {
+function pairOptions(options, pairId) {
+  return { ...options, target: { kind: "pair", id: pairId } };
+}
+
+function createOperationContext(options, registry, { environment, signal, writeLog }) {
+  const mutates = options.operation === "collect" || options.operation === "repair";
+  if (options.store === "github" && mutates && (typeof environment.GITHUB_TOKEN !== "string" || environment.GITHUB_TOKEN.length === 0)) {
     throw new Error("GitHub token is required for storage mutation.");
   }
-  const store = createStore({
-    kind: options.store,
-    root: options.root,
-    repository: options.repository,
-    token: environment.GITHUB_TOKEN,
-    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+  return Object.freeze({
+    environment,
     signal,
+    writeLog,
+    store: createStore({
+      kind: options.store,
+      root: options.root,
+      repository: options.repository,
+      token: environment.GITHUB_TOKEN,
+      maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+      signal,
+    }),
+    clients: mutates ? Object.freeze(rpcClients(registry, environment, signal)) : null,
   });
+}
+
+export async function runPairCommand(options, registry, context) {
+  const pairId = options.target.id;
+  pairById(registry, pairId);
+  const { clients, environment, signal, store } = context;
+  const writeLog = context.writeLog ?? ((line) => process.stderr.write(line));
   let result;
   if (options.operation === "verify") {
     result = await verifyPairIndex({ registry, pairId, store });
@@ -194,19 +244,22 @@ async function runPairCommand(options, registry, { environment, signal }) {
       input: { pairId, from: options.from, until: options.until },
     });
   } else {
-    const clients = rpcClients(registry, environment, signal);
+    if (clients === null) throw new Error("RPC operation context is unavailable.");
+    const finalizedBoundary = createFinalizedBoundary();
     if (options.operation === "repair") {
-      result = await runPairOperation({
-        phase: "repair", registry, pairId, store, clients, signal, environment,
+      const completed = await runPairOperation({
+        phase: "repair", registry, pairId, store, clients, finalizedBoundary, signal, environment, writeLog,
       });
+      result = [completed.result];
     } else {
-      const current = await runPairOperation({
-        phase: "current", registry, pairId, store, clients, signal, environment,
+      const first = await runPairOperation({
+        phase: "current", registry, pairId, store, clients, finalizedBoundary, signal, environment, writeLog,
       });
-      const history = await runPairOperation({
-        phase: "history", registry, pairId, store, clients, signal, environment,
+      const secondPhase = first.reachedFinalizedBoundary ? "history" : "current";
+      const second = await runPairOperation({
+        phase: secondPhase, registry, pairId, store, clients, finalizedBoundary, signal, environment, writeLog,
       });
-      result = { current, history };
+      result = [first.result, second.result];
     }
   }
   return { ok: true, operation: options.operation, pairId, result };
@@ -215,26 +268,28 @@ async function runPairCommand(options, registry, { environment, signal }) {
 export async function main(argv, {
   environment = process.env,
   signal,
-  pairMain,
+  createContext = createOperationContext,
+  pairOperation = runPairCommand,
+  writeLog = (line) => process.stderr.write(line),
   writeOutput = (line) => process.stdout.write(line),
 } = {}) {
   const options = parseArguments(argv);
   const registry = await loadPairRegistry();
+  const context = createContext(options, registry, { environment, signal, writeLog });
   let envelope;
   if (options.target.kind === "pair") {
-    envelope = await runPairCommand(options, registry, { environment, signal });
+    envelope = await pairOperation(options, registry, context);
   } else {
     const collectionPlan = await loadCollectionPlan(registry);
     const groupId = options.target.kind === "group"
       ? options.target.id
       : collectionGroupBySchedule(collectionPlan, options.target.id).groupId;
-    const invokePair = pairMain ?? ((pairArgv, context) => main(pairArgv, { ...context, writeOutput }));
     const result = await runCollectionGroup({
       pairRegistry: registry,
       collectionPlan,
       groupId,
       signal,
-      runPair: (pairId) => invokePair(pairArguments(options, pairId), { environment, signal }),
+      runPair: (pairId) => pairOperation(pairOptions(options, pairId), registry, context),
     });
     envelope = {
       ok: result.status === "success",

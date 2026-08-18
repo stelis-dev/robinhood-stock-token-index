@@ -173,9 +173,10 @@ invent or query any of these market facts. Their evidence must be reviewed
 before the candidate is written.
 
 Measure the elapsed whole seconds of a representative successful
-`node cli.mjs collect --pair ...` operation, including its current and historical
-pair work. Do not include workflow checkout, dependency installation, or other
-job setup. Test the candidate without changing either registry:
+`node cli.mjs collect --pair ...` operation, including both collection phases
+selected by that command. Do not include workflow checkout, dependency
+installation, or other job setup. Test the candidate without changing either
+registry:
 
 ```sh
 node register-pair.mjs \
@@ -222,17 +223,22 @@ node cli.mjs collect --pair "${PAIR_ID}" --store directory --root "${INDEX_ROOT}
 node cli.mjs verify --pair "${PAIR_ID}" --store directory --root "${INDEX_ROOT}"
 ```
 
-`collect` first extends `coverage.until` toward the current finalized block.
-It then independently moves `coverage.from` backward toward the pair's fixed
-`historyStart`. `repair` reads the configured recent interval again and may
-replace candles inside coverage, but it changes neither coverage boundary:
+`collect` runs at most two phases against one finalized block fixed by its first
+phase. The first phase extends `coverage.until`. If its block or UTC-day limit
+stops before the fixed boundary, the second phase extends `coverage.until`
+again. Otherwise the second phase moves `coverage.from` backward toward the
+pair's fixed `historyStart`. `repair` reads the configured recent interval again
+and may replace candles inside coverage, but it changes neither coverage
+boundary:
 
 ```sh
 node cli.mjs repair --pair "${PAIR_ID}" --store directory --root "${INDEX_ROOT}"
 ```
 
-The same command can run every pair in a configured group sequentially. The
-group has no stored data or shared collection position:
+The same command can run every pair in a configured group sequentially. One
+group command reuses its registry, storage adapter, RPC clients, cancellation
+signal, and log writer across pair boundaries. The group has no stored data or
+shared collection position:
 
 ```sh
 node cli.mjs collect --group group-1 --store directory --root "${INDEX_ROOT}"
@@ -326,15 +332,27 @@ triggers before repository code runs. Tests require those two lists to be equal.
 The workflow passes the triggered cron expression to `cli.mjs`; only the
 collection plan maps that expression to a group.
 
+The current schedule starts four three-pair group runs per hour. A pair has at most
+two publishing phases. The implemented mature-state GitHub request traces use
+19 REST requests for a pair's first publishing phase in a command and 12 for
+its second phase after the same adapter has retained verified evidence. The
+normal maximum is therefore 372 REST requests and 192 content mutations per
+hour. This stays below [GitHub's documented rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
+of 1,000 REST requests per hour for a repository `GITHUB_TOKEN` and 500
+content-generating requests per hour. Recovery, rate-limit, and transport
+retries are bounded failure paths and are not counted as normal throughput.
+
 ## Pair collection and storage
 
 Current collection moves only `coverage.until` forward. Historical collection
 moves only `coverage.from` backward toward `historyStart`, which is at most
-twelve calendar months before activation. They publish independently, so a
-historical RPC failure cannot undo a current-data publication that already
-succeeded. When historical collection reaches `historyStart`, current data
-continues to accumulate. The current implementation does not delete data by
-age.
+twelve calendar months before activation. Each current or historical phase
+stops at the adjacent UTC-day boundary, so one phase replaces one pair-day and
+one pair-month even when consecutive blocks are separated by several days. The
+phases publish independently, so a second-phase failure cannot undo a
+first-phase publication. When historical collection reaches `historyStart`,
+current data continues to accumulate. The current implementation does not
+delete data by age.
 
 Missing-trade minutes remain empty. The collector never interpolates a price or
 creates a zero-price candle.
@@ -400,10 +418,11 @@ transition; it is not a distributed lock and does not merge concurrent writers.
 ## Command output and candle values
 
 Every command writes one JSON object to standard output with `ok`, `operation`,
-the target ID, and `result`. A current, historical, or repair result uses
-`phase` to identify that part of the operation. During group execution each pair
-keeps its own output, followed by one group summary containing the ordered pair
-IDs and a `success` or `failure` status.
+the target ID, and `result`. A pair `collect` result is an ordered list of its
+two completed phase results. A pair `repair` result is a one-item phase list.
+Each item uses `phase` to identify `current`, `history`, or `repair`. A group
+command writes one summary containing the ordered pair IDs and a `success` or
+`failure` status; it does not emit a separate JSON object for each pair.
 
 - `coverage` is the continuous finalized range fully queried for one pair. It
   does not prove that two RPC providers returned the same logs.
@@ -446,25 +465,34 @@ from that attempt. It starts the complete operation again from the stored pair
 state using the next endpoint. It never combines data from two providers inside
 one attempt.
 
+Both phases of one pair `collect` use one fixed finalized block. If a later
+phase or fallback endpoint is selected, that endpoint must return the same block
+number, hash, and timestamp for the fixed boundary before its data can be used.
+
 The operation stops without fallback if chain identity, activation data,
 response structure, request validity, numeric limits, cancellation, or stored
 data integrity is invalid. Those failures can indicate a request, code, or data
 defect rather than temporary endpoint unavailability.
 
-Only in GitHub Actions, standard error records the operation phase (`current`,
-`history`, or `repair`) and one fixed source name:
-`registry.chain.primaryRpcUrl`, `INDEX_RPC_FALLBACK_URL_0`, or
-`INDEX_RPC_FALLBACK_URL_1`. It never prints the URL, provider response, token,
-exception message, or stack trace. Pair failure records include only the
-operation phase, PoolId, and fixed `component`, `operation`, and `reason` codes.
+Only in GitHub Actions, standard error records one success or failure line for
+each completed or failed phase (`current`, `history`, or `repair`). A success
+line names the selected RPC source as `registry.chain.primaryRpcUrl`,
+`INDEX_RPC_FALLBACK_URL_0`, or `INDEX_RPC_FALLBACK_URL_1`. It never prints the
+URL, provider response, token, exception message, or stack trace. Pair failure
+records include only the operation phase, PoolId, and fixed `component`,
+`operation`, and `reason` codes.
+When pending publication recovery performs work, one additional fixed line says
+whether the previous state was retained or the next state was selected; idle
+recovery emits no line.
 These codes distinguish GitHub access, rate-limit, transport, HTTP, response,
 storage-limit, and immutable-byte failures without exposing a URL, response
 body, or token. Exhausting every configured RPC
 endpoint is reported as `component=rpc reason=all_endpoints_unavailable`. A fatal
 RPC response reports `component=rpc` with one of `activation_boundary_mismatch`,
-`chain_identity_mismatch`, `http_rejected`, `response_envelope_invalid`,
-`response_not_json`, `response_result_invalid`, `response_too_large`, or
-`rpc_error`. The applicable numeric facts, `http_status` and `rpc_code`, contain
+`chain_identity_mismatch`, `finalized_boundary_mismatch`, `http_rejected`,
+`response_envelope_invalid`, `response_not_json`, `response_result_invalid`,
+`response_too_large`, or `rpc_error`. The applicable numeric facts,
+`http_status` and `rpc_code`, contain
 only the admitted integer status or JSON-RPC error code. Stored bytes or a
 stored file that fails its contract reports
 `component=stored_data reason=integrity_rejected`. Only a remaining collector
