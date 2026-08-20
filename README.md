@@ -458,12 +458,32 @@ historical `eth_getLogs`, `eth_getBlockByNumber`, and JSON-RPC batch requests up
 to the configured header batch size. Every attempt also verifies the registered
 activation block number, hash, and timestamp.
 
+The collector exposes only chain verification, block, block-header batch, and
+log-read operations to its callers. Those operations validate the exact chain
+ID, block selector, batch size, address, topic, PoolId, and block-range inputs
+before making a network request. Collector callers cannot submit an arbitrary
+JSON-RPC method or parameter list. Returned blocks are converted once to a
+validated block number, hash, and UTC-representable timestamp. Every returned
+`Swap` is validated and decoded before its block headers are requested. Every
+successful header in a batch must match the requested block number, the log's
+block hash, and the fixed operation time range before a temporary error in
+another batch entry can cause retry or endpoint replacement. Block and
+transaction hashes must also remain consistent with their source coordinates
+across the complete fixed range.
+
 One current, historical, or repair attempt uses only one endpoint. If bounded
-retries exhaust a temporary endpoint failure, or the endpoint denies access or
-lacks a required RPC method, the collector discards every unpublished result
-from that attempt. It starts the complete operation again from the stored pair
-state using the next endpoint. It never combines data from two providers inside
-one attempt.
+retries exhaust a transport failure, HTTP 408, HTTP 429, a server-side HTTP
+failure, an internal JSON-RPC failure, a missing required block or resource, or
+an unassigned implementation-defined JSON-RPC server failure, the endpoint is
+unavailable for that attempt. Access denial, a missing required method, and a
+standardized pruned-history response from a required historical block or log
+read do not receive a pointless local retry. They also make the endpoint
+unavailable. In either case, the collector
+discards every unpublished result from that attempt and starts the complete
+operation again from the stored pair state using the next endpoint. It never
+combines data from two providers inside one attempt. Standard invalid-request,
+invalid-parameter, invalid-input, and transaction-rejected responses remain
+fatal because another provider must not hide a collector request defect.
 
 Both phases of one pair `collect` use one fixed finalized block. If a later
 phase or fallback endpoint is selected, that endpoint must return the same block
@@ -480,7 +500,9 @@ line names the selected RPC source as `registry.chain.primaryRpcUrl`,
 `INDEX_RPC_FALLBACK_URL_0`, or `INDEX_RPC_FALLBACK_URL_1`. It never prints the
 URL, provider response, token, exception message, or stack trace. Pair failure
 records include only the operation phase, PoolId, and fixed `component`,
-`operation`, and `reason` codes.
+`operation`, and `reason` codes. A fatal RPC response also records the applicable
+fixed `rpc_method` value: `eth_chainId`, `eth_getBlockByNumber`, or
+`eth_getLogs`.
 When pending publication recovery performs work, one additional fixed line says
 whether the previous state was retained or the next state was selected; idle
 recovery emits no line.

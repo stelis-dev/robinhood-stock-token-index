@@ -1,4 +1,5 @@
-import { sha256Hex } from "../collector/canonical.mjs";
+import { isSha256Hex, sha256Hex } from "../collector/canonical.mjs";
+import { isCanonicalBytes32 } from "../collector/hex-data.mjs";
 
 export class StoredDataIntegrityError extends Error {
   constructor() {
@@ -13,8 +14,6 @@ export function storedDataFailureFields(error) {
     : null;
 }
 
-const pairIdPattern = /^0x[0-9a-f]{64}$/;
-const digestPattern = /^[0-9a-f]{64}$/;
 const monthPattern = /^\d{4}-\d{2}$/;
 const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -24,7 +23,7 @@ function exactKeys(value, keys, label) {
 }
 
 export function validatePairId(value) {
-  if (typeof value !== "string" || !pairIdPattern.test(value)) throw new Error("Pair ID is invalid.");
+  if (!isCanonicalBytes32(value)) throw new Error("Pair ID is invalid.");
   return value;
 }
 
@@ -68,7 +67,7 @@ export function validateStoredReference(value) {
     if (!Number.isSafeInteger(value[key]) || value[key] <= 0) throw new Error(`Reference ${key} is invalid.`);
   }
   for (const key of ["gzipSha256", "jsonSha256"]) {
-    if (typeof value[key] !== "string" || !digestPattern.test(value[key])) throw new Error(`Reference ${key} is invalid.`);
+    if (!isSha256Hex(value[key])) throw new Error(`Reference ${key} is invalid.`);
   }
   return identity;
 }
@@ -77,7 +76,7 @@ export function validateStateIdentity(value) {
   exactKeys(value, ["gzipBytes", "gzipSha256", "sequence"], "state identity");
   validateGeneration(value.sequence, "state generation");
   if (!Number.isSafeInteger(value.gzipBytes) || value.gzipBytes <= 0) throw new Error("State gzip byte count is invalid.");
-  if (typeof value.gzipSha256 !== "string" || !digestPattern.test(value.gzipSha256)) throw new Error("State gzip digest is invalid.");
+  if (!isSha256Hex(value.gzipSha256)) throw new Error("State gzip digest is invalid.");
   return value;
 }
 

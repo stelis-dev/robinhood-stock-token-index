@@ -14,7 +14,7 @@ import {
   verifyStateIdentityBytes,
   verifyStoredReferenceBytes,
 } from "./stored-files.mjs";
-import { sha256Hex } from "../collector/canonical.mjs";
+import { isSha256Hex, sha256Hex } from "../collector/canonical.mjs";
 
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const maximumRequestAttempts = 3;
@@ -160,7 +160,9 @@ function validateRelease(value, tag) {
 
 function validateAsset(value) {
   const digestIsValid = value?.digest === null
-    || typeof value?.digest === "string" && /^sha256:[0-9a-f]{64}$/.test(value.digest);
+    || typeof value?.digest === "string"
+      && value.digest.startsWith("sha256:")
+      && isSha256Hex(value.digest.slice("sha256:".length));
   const stateIsValid = value?.state === "uploaded"
     ? value.size > 0 && digestIsValid
     : value?.state === "starter" && value.size === 0 && value.digest === null;
@@ -214,7 +216,7 @@ export class GitHubReleaseStore {
     signal,
     waitImplementation = (milliseconds, waitSignal) => wait(milliseconds, undefined, { signal: waitSignal }),
   }) {
-    if (!repositoryPattern.test(repository)) throw new Error("GitHub repository identity is invalid.");
+    if (typeof repository !== "string" || !repositoryPattern.test(repository)) throw new Error("GitHub repository identity is invalid.");
     if (token !== undefined && (typeof token !== "string" || token.length === 0)) throw new Error("GitHub token is invalid.");
     if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
     if (typeof waitImplementation !== "function") throw new Error("GitHub retry wait implementation is invalid.");

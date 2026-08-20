@@ -76,6 +76,8 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
   assert.throws(() => new RpcResponseRejectedError("provider_specific_reason"), /reason is invalid/);
   assert.throws(() => new RpcResponseRejectedError("http_rejected"), /HTTP status is invalid/);
   assert.throws(() => new RpcResponseRejectedError("rpc_error"), /error code is invalid/);
+  assert.throws(() => new RpcResponseRejectedError("response_result_invalid"), /method is invalid/);
+  assert.throws(() => new RpcResponseRejectedError("rpc_error", { rpcCode: -32602, rpcMethod: "provider_method" }), /method is invalid/);
   assert.equal(rpcEndpointSourceName(0), "registry.chain.primaryRpcUrl");
   assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
   assert.equal(rpcEndpointSourceName(2), "INDEX_RPC_FALLBACK_URL_1");
@@ -113,9 +115,9 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
       "history",
       pairId,
       { GITHUB_ACTIONS: "true" },
-      new RpcResponseRejectedError("rpc_error", { rpcCode: -32000 }),
+      new RpcResponseRejectedError("rpc_error", { rpcCode: -32602, rpcMethod: "eth_getLogs" }),
     ),
-    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_code=-32000 pair_id=${pairId}\n`,
+    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_method=eth_getLogs rpc_code=-32602 pair_id=${pairId}\n`,
   );
   assert.equal(
     pairOperationFailureLog(

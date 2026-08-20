@@ -1,5 +1,12 @@
 export const maximumRpcEndpointCount = 3;
 export const maximumRpcBatchSize = 100;
+export const rpcMethods = Object.freeze({
+  chainId: "eth_chainId",
+  getBlockByNumber: "eth_getBlockByNumber",
+  getLogs: "eth_getLogs",
+});
+
+const admittedRpcMethods = new Set(Object.values(rpcMethods));
 
 const rpcResponseRejectionReasons = new Set([
   "activation_boundary_mismatch",
@@ -40,8 +47,9 @@ export class RpcResponseRejectedError extends Error {
   #httpStatus;
   #reason;
   #rpcCode;
+  #rpcMethod;
 
-  constructor(reason, { httpStatus, rpcCode } = {}) {
+  constructor(reason, { httpStatus, rpcCode, rpcMethod } = {}) {
     if (!rpcResponseRejectionReasons.has(reason)) throw new Error("RPC response rejection reason is invalid.");
     const hasHttpStatus = Number.isSafeInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599;
     if ((reason === "http_rejected") !== hasHttpStatus) {
@@ -50,14 +58,19 @@ export class RpcResponseRejectedError extends Error {
     if ((reason === "rpc_error") !== Number.isSafeInteger(rpcCode)) {
       throw new Error("RPC rejected error code is invalid.");
     }
+    if (!admittedRpcMethods.has(rpcMethod)) {
+      throw new Error("RPC rejected method is invalid.");
+    }
     super("RPC response was rejected.");
     this.name = "RpcResponseRejectedError";
     this.#reason = reason;
     this.#httpStatus = httpStatus;
     this.#rpcCode = rpcCode;
+    this.#rpcMethod = rpcMethod;
   }
 
   get httpStatus() { return this.#httpStatus; }
   get reason() { return this.#reason; }
   get rpcCode() { return this.#rpcCode; }
+  get rpcMethod() { return this.#rpcMethod; }
 }

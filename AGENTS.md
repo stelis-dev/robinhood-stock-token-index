@@ -108,14 +108,32 @@ Terms used in this file:
 - Use one code path for every registered pair. Do not add behavior selected by
   ticker symbol, alternate pools, aliases, inferred addresses, multi-pool route
   prices, sampled data, or interpolated data.
+- Only `RpcClient` chain verification, block, block-header batch, and log-read
+  operations construct JSON-RPC requests. Validate their exact method inputs
+  before any network request. Do not expose a generic method-and-parameters RPC
+  entry point to collector callers.
+- Admit each block response once into a canonical internal block number, hash,
+  and UTC-representable timestamp. For a block-header batch, validate every
+  successful result against its requested number, expected log block hash, and
+  fixed operation time range before acting on any sibling availability result.
+  Validate and decode every self-contained field of a returned `Swap` page
+  before requesting its block headers. Across the complete fixed range, one
+  block number maps to one block hash and one transaction coordinate maps to one
+  transaction hash, in both directions. A later availability failure must never
+  hide malformed data already returned by the same endpoint.
 - One current, historical, or repair attempt uses one RPC endpoint and one fixed
-  block range. After bounded retries exhaust a temporary endpoint failure, or
-  the endpoint denies access or lacks a required RPC method, discard all
-  unpublished results from that attempt and restart the whole operation from
-  the stored pair state using the next endpoint. Never combine data from two RPC
-  providers in one attempt. Stop without fallback when chain identity, pool
-  activation data, response structure, request validity, numeric bounds,
-  cancellation, or stored-data integrity is invalid.
+  block range. After bounded retries exhaust a temporary transport, server, or
+  required-resource failure, or the endpoint denies access or lacks a required
+  RPC method, or the endpoint reports pruned history for a required historical
+  block or log read, discard all unpublished results from that attempt and
+  restart the whole operation from the stored pair state using the next
+  endpoint. Never combine data from two RPC providers in one attempt. Stop
+  without fallback when chain identity, pool activation data, response
+  structure, request validity, numeric bounds, cancellation, or stored-data
+  integrity is invalid. Standard invalid-request, invalid-parameter,
+  invalid-input, and transaction-rejected JSON-RPC responses remain fatal;
+  unassigned implementation-defined server errors are endpoint availability
+  failures.
 - Each optional fallback RPC is one complete URL read from its corresponding
   GitHub Actions repository secret. Do not read it from a repository variable or
   construct it from a provider URL and token.
@@ -192,11 +210,12 @@ Terms used in this file:
   or hide an exhausted storage failure.
 - Operational failure logs classify fatal RPC responses, stored-data integrity,
   and collector invariants at their responsible boundary. Log only fixed reason
-  names and admitted numeric HTTP or JSON-RPC codes; never log endpoint URLs,
-  provider messages, response bodies, tokens, or stack traces. Classification
-  does not change retry, fallback, publication, or group-failure behavior. The
-  CLI emits one success or failure line per phase and emits a recovery line only
-  when recovery retained the previous state or selected the next state.
+  names, supported RPC method names, and admitted numeric HTTP or JSON-RPC
+  codes; never log endpoint URLs, provider messages, response bodies, tokens, or
+  stack traces. Classification does not change retry, fallback, publication, or
+  group-failure behavior. The CLI emits one success or failure line per phase
+  and emits a recovery line only when recovery retained the previous state or
+  selected the next state.
 - Store processed candles and continuous coverage. Do not store raw RPC
   responses, invented candles, a general transaction index, the RPC provider
   used, or a storage URL.

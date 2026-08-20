@@ -1,4 +1,5 @@
-import { parseHexQuantity, safeHexQuantityNumber } from "./hex-quantity.mjs";
+import { isCanonicalBytes32, isCanonicalHexData } from "./hex-data.mjs";
+import { parseHexQuantity } from "./hex-quantity.mjs";
 
 const uint256Limit = 1n << 256n;
 
@@ -46,7 +47,7 @@ export function rational(numerator, denominator) {
   return { numerator: (n / divisor).toString(), denominator: (d / divisor).toString() };
 }
 
-export function validateSwapLogBlockNumber(log) {
+function validateSwapLogBlockNumber(log) {
   if (log === null || typeof log !== "object" || Array.isArray(log)) throw new Error("Swap log must be an object.");
   return parseHexQuantity(log.blockNumber, "Swap block number");
 }
@@ -57,14 +58,14 @@ export function compareRational(left, right) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-export function swapPosition(log) {
+function swapPosition(log, blockNumber) {
   const transactionIndex = parseHexQuantity(log.transactionIndex, "Swap transaction index");
   const logIndex = parseHexQuantity(log.logIndex, "Swap log index");
   if (transactionIndex > BigInt(Number.MAX_SAFE_INTEGER) || logIndex > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Swap source index exceeds the safe integer boundary.");
   }
   return {
-    blockNumber: validateSwapLogBlockNumber(log).toString(),
+    blockNumber: blockNumber.toString(),
     blockHash: log.blockHash,
     transactionIndex: Number(transactionIndex),
     transactionHash: log.transactionHash,
@@ -72,29 +73,21 @@ export function swapPosition(log) {
   };
 }
 
-export function compareSwapPosition(left, right) {
-  const block = BigInt(left.blockNumber) - BigInt(right.blockNumber);
-  if (block !== 0n) return block < 0n ? -1 : 1;
-  if (left.transactionIndex !== right.transactionIndex) return left.transactionIndex - right.transactionIndex;
-  return left.logIndex - right.logIndex;
-}
-
-export function decodeSwapLog(log, { registry, pair, block }) {
+export function decodeSwapLog(log, { registry, pair }) {
   if (log === null || typeof log !== "object" || Array.isArray(log)) throw new Error("Swap log must be an object.");
   const keys = ["address", "blockHash", "blockNumber", "data", "logIndex", "removed", "topics", "transactionHash", "transactionIndex"];
-  for (const key of keys) if (!(key in log)) throw new Error(`Swap log omitted ${key}.`);
+  for (const key of keys) if (!Object.hasOwn(log, key)) throw new Error(`Swap log omitted ${key}.`);
   if (log.address !== pair.poolManager || pair.poolManager !== registry.deployment.poolManager || log.removed !== false) {
     throw new Error("Swap log has an invalid source or removal state.");
   }
   if (!Array.isArray(log.topics) || log.topics.length !== 3 || log.topics[0] !== pair.swapTopic || pair.swapTopic !== registry.deployment.swapTopic || log.topics[1] !== pair.pairId) {
     throw new Error("Swap log topics do not match the requested pair.");
   }
-  if (!/^0x0{24}[0-9a-f]{40}$/.test(log.topics[2])) throw new Error("Swap sender topic is invalid.");
-  if (!/^0x[0-9a-f]{64}$/.test(log.blockHash) || !/^0x[0-9a-f]{64}$/.test(log.transactionHash)) throw new Error("Swap source hash is invalid.");
+  if (!isCanonicalBytes32(log.topics[2]) || !log.topics[2].startsWith(`0x${"0".repeat(24)}`)) throw new Error("Swap sender topic is invalid.");
+  if (!isCanonicalBytes32(log.blockHash) || !isCanonicalBytes32(log.transactionHash)) throw new Error("Swap source hash is invalid.");
   const logBlockNumber = validateSwapLogBlockNumber(log);
-  const swapPositionValue = swapPosition(log);
-  if (logBlockNumber !== BigInt(block.number) || log.blockHash !== block.hash) throw new Error("Swap log does not match its block header.");
-  if (!/^0x[0-9a-f]{384}$/.test(log.data)) throw new Error("Swap data must contain six ABI words.");
+  const swapPositionValue = swapPosition(log, logBlockNumber);
+  if (!isCanonicalHexData(log.data, 192)) throw new Error("Swap data must contain six ABI words.");
 
   const amount0 = signedWord(word(log.data, 0), 128);
   const amount1 = signedWord(word(log.data, 1), 128);
@@ -107,10 +100,10 @@ export function decodeSwapLog(log, { registry, pair, block }) {
     throw new Error("Non-zero Swap amounts must have opposite signs.");
   }
 
-  const blockTimestamp = safeHexQuantityNumber(block.timestamp, "Block timestamp");
   const decoded = {
+    blockHash: log.blockHash,
+    blockNumber: logBlockNumber,
     pairId: pair.pairId,
-    blockTimestamp,
     swapPosition: swapPositionValue,
     trade: null,
   };

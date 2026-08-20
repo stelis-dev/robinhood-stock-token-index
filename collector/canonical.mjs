@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 
+const sha256HexPattern = /^[0-9a-f]{64}$/;
+
 // Canonical JSON sorts object keys and normalizes values so one valid value has one byte form.
 
 function normalize(value) {
@@ -40,6 +42,10 @@ export function canonicalBytes(value) {
 
 export function sha256Hex(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+export function isSha256Hex(value) {
+  return typeof value === "string" && sha256HexPattern.test(value);
 }
 
 export function encodeArtifact(value) {

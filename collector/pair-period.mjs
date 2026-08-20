@@ -1,19 +1,11 @@
 import { canonicalBytes } from "./canonical.mjs";
 import { validatePairCandleSequence } from "./pair-artifact.mjs";
 import { pairById } from "./pair-registry.mjs";
-
-const instantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/;
+import { parseUtcInstant } from "./utc-time.mjs";
 
 function exactKeys(value, keys, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
   if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} has an invalid member set.`);
-}
-
-function instant(value, label) {
-  if (typeof value !== "string" || !instantPattern.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value || Date.parse(value) % 60_000 !== 0) {
-    throw new Error(`${label} must be a minute-aligned canonical UTC instant.`);
-  }
-  return Date.parse(value);
 }
 
 function monthBounds(value) {
@@ -26,8 +18,8 @@ function monthBounds(value) {
 export function validatePairPeriodInput(value, registry) {
   exactKeys(value, ["from", "pairId", "until"], "pair period input");
   pairById(registry, value.pairId);
-  const from = instant(value.from, "pair period from");
-  const until = instant(value.until, "pair period until");
+  const from = parseUtcInstant(value.from, "pair period from", true);
+  const until = parseUtcInstant(value.until, "pair period until", true);
   const bounds = monthBounds(value.from);
   if (from >= until || value.from < bounds.start || value.until > bounds.until) {
     throw new Error("Pair period must be a non-empty interval in one UTC calendar month.");
@@ -37,8 +29,8 @@ export function validatePairPeriodInput(value, registry) {
 
 function validateTimeRange(value, label, request) {
   exactKeys(value, ["from", "until"], label);
-  const from = instant(value.from, `${label}.from`);
-  const until = instant(value.until, `${label}.until`);
+  const from = parseUtcInstant(value.from, `${label}.from`, true);
+  const until = parseUtcInstant(value.until, `${label}.until`, true);
   if (from >= until || value.from < request.from || value.until > request.until) throw new Error(`${label} is outside the request.`);
   return value;
 }

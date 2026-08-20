@@ -118,7 +118,7 @@ test("a Swap header outside the fixed time range is fatal and cannot be dropped 
     for (const [number, header] of headers) {
       headers.set(number, {
         ...header,
-        timestamp: `0x${BigInt(Math.floor(Date.parse("2026-08-15T14:01:00.000Z") / 1000)).toString(16)}`,
+        timestampSeconds: Math.floor(Date.parse("2026-08-15T14:01:00.000Z") / 1000),
       });
     }
     return headers;
@@ -132,11 +132,71 @@ test("a Swap header outside the fixed time range is fatal and cannot be dropped 
     store,
     rpcClients: [primary, { async verifyChain() { fallbackUsed = true; } }],
   }), (error) => (
-    error instanceof RpcResponseRejectedError && error.reason === "response_result_invalid"
+    error instanceof RpcResponseRejectedError
+      && error.reason === "response_result_invalid"
+      && error.rpcMethod === "eth_getBlockByNumber"
   ));
   assert.equal(fallbackUsed, false);
   assert.deepEqual(writes, []);
   assert.equal(await directory.readSelectedState(pair.pairId), null);
+});
+
+test("malformed Swap data and source identities are fatal before a later header failure", async () => {
+  const registry = await compactPairRegistry();
+  const pair = pairEntryBySymbol(registry, "NVDA").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const makeLog = (rpc, blockOffset, logIndex = 0) => pairSwapLog({
+    registry,
+    pair,
+    block: rpc.block(activation + BigInt(blockOffset)),
+    baseAmountRaw: 10_000_000_000_000_000n,
+    quoteAmountRaw: 3_000_000n,
+    logIndex,
+  });
+  for (const malformedLogs of [
+    (rpc) => {
+      const log = makeLog(rpc, 60);
+      log.data = [log.data];
+      return [log];
+    },
+    (rpc) => {
+      const first = makeLog(rpc, 60);
+      const second = makeLog(rpc, 61);
+      second.blockHash = first.blockHash;
+      return [first, second];
+    },
+    (rpc) => {
+      const first = makeLog(rpc, 60, 0);
+      const second = makeLog(rpc, 60, 1);
+      second.transactionHash = `0x${"f".repeat(64)}`;
+      return [first, second];
+    },
+  ]) {
+    const primary = new FakePairRpc({ registry, pair, finalizedNumber: activation + 360n });
+    primary.logs.push(...malformedLogs(primary));
+    let headerRead = false;
+    primary.getBlockHeaders = async () => {
+      headerRead = true;
+      throw new RpcEndpointUnavailableError();
+    };
+    let fallbackUsed = false;
+    const { directory, store, writes } = await countingDirectory(registry);
+    await assert.rejects(runRpcPairOperation({
+      operation: "current",
+      registry,
+      pairId: pair.pairId,
+      store,
+      rpcClients: [primary, { async verifyChain() { fallbackUsed = true; } }],
+    }), (error) => (
+      error instanceof RpcResponseRejectedError
+        && error.reason === "response_result_invalid"
+        && error.rpcMethod === "eth_getLogs"
+    ));
+    assert.equal(headerRead, false);
+    assert.equal(fallbackUsed, false);
+    assert.deepEqual(writes, []);
+    assert.equal(await directory.readSelectedState(pair.pairId), null);
+  }
 });
 
 test("integrity and storage failures stop without invoking another endpoint", async () => {
@@ -264,7 +324,7 @@ test("repair rejects an endpoint behind the stored range and never reads past th
     finalizedBoundary,
   });
   assert.equal(completed.selectedEndpointIndex, 1);
-  assert.equal(BigInt(finalizedBoundary.block.number), activation + 359n);
+  assert.equal(finalizedBoundary.block.number, activation + 359n);
   assert.equal(stale.logRequests.length, 0);
   assert.ok(fallback.blockSearches.every((search) => search.maximumBlock <= activation + 359n));
 });

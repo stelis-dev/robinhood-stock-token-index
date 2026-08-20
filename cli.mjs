@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from "node:url";
+import { isCanonicalBytes32 } from "./collector/hex-data.mjs";
 import { readPairPeriod, verifyPairIndex } from "./collector/pair-reader.mjs";
 import { loadPairRegistry, pairById } from "./collector/pair-registry.mjs";
 import {
@@ -41,14 +42,14 @@ export function rpcEndpointSourceName(index) {
 export function pairOperationSuccessLog(phase, pairId, index, environment) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
   if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("RPC operation phase is invalid.");
-  if (typeof pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Pair operation identity is invalid.");
+  if (!isCanonicalBytes32(pairId)) throw new Error("Pair operation identity is invalid.");
   return `pair_operation=${phase} status=success rpc_endpoint_source=${rpcEndpointSourceName(index)} pair_id=${pairId}\n`;
 }
 
 export function pairOperationFailureLog(phase, pairId, environment, error) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
   if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("Pair operation phase is invalid.");
-  if (typeof pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Pair operation identity is invalid.");
+  if (!isCanonicalBytes32(pairId)) throw new Error("Pair operation identity is invalid.");
   const failure = githubStorageFailureFields(error)
     ?? rpcOperationFailureFields(error)
     ?? storedDataFailureFields(error);
@@ -61,7 +62,7 @@ export function publicationRecoveryLog(recovery, environment) {
   if (recovery === null || typeof recovery !== "object" || (recovery.status !== "aborted" && recovery.status !== "committed")) {
     throw new Error("Publication recovery result is invalid.");
   }
-  if (typeof recovery.pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(recovery.pairId)) {
+  if (!isCanonicalBytes32(recovery.pairId)) {
     throw new Error("Publication recovery pair identity is invalid.");
   }
   if (recovery.phase !== null && recovery.phase !== "current" && recovery.phase !== "history" && recovery.phase !== "repair") {

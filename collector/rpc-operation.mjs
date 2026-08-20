@@ -26,7 +26,7 @@ export function rpcOperationFailureFields(error) {
   if (!(error instanceof RpcResponseRejectedError)) return null;
   const httpStatus = error.httpStatus === undefined ? "" : ` http_status=${error.httpStatus}`;
   const rpcCode = error.rpcCode === undefined ? "" : ` rpc_code=${error.rpcCode}`;
-  return `component=rpc reason=${error.reason}${httpStatus}${rpcCode}`;
+  return `component=rpc reason=${error.reason} rpc_method=${error.rpcMethod}${httpStatus}${rpcCode}`;
 }
 
 export function createFinalizedBoundary() {

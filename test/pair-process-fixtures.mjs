@@ -18,11 +18,11 @@ function unsignedWord(value) {
 }
 
 export function pairBlock(number, timestamp) {
-  return {
-    number: `0x${BigInt(number).toString(16)}`,
-    timestamp: `0x${BigInt(timestamp).toString(16)}`,
+  return Object.freeze({
+    number: BigInt(number),
+    timestampSeconds: Number(timestamp),
     hash: `0x${hex(BigInt(number) + 1n)}`,
-  };
+  });
 }
 
 export async function compactPairRegistry({
@@ -84,7 +84,7 @@ export function pairSwapLog({
   return {
     address: registry.deployment.poolManager,
     blockHash: block.hash,
-    blockNumber: block.number,
+    blockNumber: `0x${block.number.toString(16)}`,
     data: `0x${[
       signedWord(amount0, 128),
       signedWord(amount1, 128),
@@ -136,11 +136,20 @@ export class FakePairRpc {
     return this.block(number);
   }
 
-  async getBlockHeaders(numbers) {
+  async getBlockHeaders(expectations, _batchSize, { minimumTimestampSeconds, maximumTimestampSeconds } = {}) {
     const output = new Map();
-    for (const number of new Set(numbers.map((entry) => BigInt(entry).toString()))) {
-      if (BigInt(number) > this.finalizedNumber) throw new Error("Fixture header is beyond finalized coverage.");
-      output.set(number, this.block(number));
+    for (const expectation of expectations) {
+      const number = BigInt(expectation.number);
+      if (number > this.finalizedNumber) throw new Error("Fixture header is beyond finalized coverage.");
+      const block = this.block(number);
+      if (
+        block.hash !== expectation.hash
+        || block.timestampSeconds < minimumTimestampSeconds
+        || block.timestampSeconds >= maximumTimestampSeconds
+      ) {
+        throw new Error("Fixture header does not satisfy its requested identity and time range.");
+      }
+      output.set(number.toString(), block);
     }
     return output;
   }
@@ -159,18 +168,18 @@ export class FakePairRpc {
   }
 
   async findFirstBlockAtOrAfterTimestamp(timestamp, minimumBlock, maximumBlock, options = {}) {
-    const target = BigInt(timestamp);
+    const target = Number(timestamp);
     let low = BigInt(minimumBlock);
     let high = BigInt(maximumBlock);
     if (low > high) throw new Error("Fixture block search bounds are invalid.");
-    if (options.maximumBlockHeader && BigInt(options.maximumBlockHeader.number) !== high) {
+    if (options.maximumBlockHeader && options.maximumBlockHeader.number !== high) {
       throw new Error("Fixture block search header does not match its upper bound.");
     }
     this.blockSearches.push({ timestamp: target, minimumBlock: low, maximumBlock: high });
-    if (BigInt(this.block(high).timestamp) < target) return high + 1n;
+    if (this.block(high).timestampSeconds < target) return high + 1n;
     while (low < high) {
       const middle = (low + high) >> 1n;
-      if (BigInt(this.block(middle).timestamp) < target) low = middle + 1n;
+      if (this.block(middle).timestampSeconds < target) low = middle + 1n;
       else high = middle;
     }
     return low;

@@ -1,10 +1,21 @@
-import { canonicalBytes, decodeArtifact, encodeArtifact, sha256Hex } from "./canonical.mjs";
+import {
+  canonicalBytes,
+  decodeArtifact,
+  encodeArtifact,
+  isSha256Hex,
+  sha256Hex,
+} from "./canonical.mjs";
+import { isCanonicalBytes32 } from "./hex-data.mjs";
 import { pairById } from "./pair-registry.mjs";
+import {
+  admitSwapPositionIdentity,
+  compareSwapPosition,
+  createSwapPositionIdentities,
+} from "./swap-position.mjs";
+import { parseUtcInstant } from "./utc-time.mjs";
 
 const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
 const monthPattern = /^\d{4}-\d{2}$/;
-const instantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/;
-const digestPattern = /^[0-9a-f]{64}$/;
 
 function exactKeys(value, keys, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -21,14 +32,6 @@ function positiveInteger(value, label) {
 function decimalString(value, label) {
   if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value)) throw new Error(`${label} is not a decimal integer string.`);
   return BigInt(value);
-}
-
-function instant(value, label, minuteAligned = true) {
-  if (typeof value !== "string" || !instantPattern.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
-    throw new Error(`${label} is not a canonical UTC instant.`);
-  }
-  if (minuteAligned && Date.parse(value) % 60_000 !== 0) throw new Error(`${label} is not minute aligned.`);
-  return Date.parse(value);
 }
 
 function day(value, label) {
@@ -56,8 +59,8 @@ export function validatePairCoverage(value, label = "coverage") {
   exactKeys(value, ["fromBlock", "fromTimestamp", "untilBlock", "untilTimestamp"], label);
   const fromBlock = decimalString(value.fromBlock, `${label}.fromBlock`);
   const untilBlock = decimalString(value.untilBlock, `${label}.untilBlock`);
-  const fromTime = instant(value.fromTimestamp, `${label}.fromTimestamp`);
-  const untilTime = instant(value.untilTimestamp, `${label}.untilTimestamp`);
+  const fromTime = parseUtcInstant(value.fromTimestamp, `${label}.fromTimestamp`, true);
+  const untilTime = parseUtcInstant(value.untilTimestamp, `${label}.untilTimestamp`, true);
   if (fromBlock > untilBlock || fromTime >= untilTime) {
     throw new Error(`${label} is inverted.`);
   }
@@ -93,60 +96,22 @@ function compareRational(left, right) {
 function validateSwapPosition(value, label) {
   exactKeys(value, ["blockHash", "blockNumber", "logIndex", "transactionHash", "transactionIndex"], label);
   decimalString(value.blockNumber, `${label}.blockNumber`);
-  if (!/^0x[0-9a-f]{64}$/.test(value.blockHash) || !/^0x[0-9a-f]{64}$/.test(value.transactionHash)) throw new Error(`${label} hash is invalid.`);
+  if (!isCanonicalBytes32(value.blockHash) || !isCanonicalBytes32(value.transactionHash)) throw new Error(`${label} hash is invalid.`);
   for (const key of ["logIndex", "transactionIndex"]) {
     if (!Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error(`${label}.${key} is invalid.`);
   }
   return value;
 }
 
-function compareSwapPositions(left, right) {
-  const block = BigInt(left.blockNumber) - BigInt(right.blockNumber);
-  if (block !== 0n) return block < 0n ? -1 : 1;
-  if (left.transactionIndex !== right.transactionIndex) return left.transactionIndex < right.transactionIndex ? -1 : 1;
-  return left.logIndex < right.logIndex ? -1 : left.logIndex > right.logIndex ? 1 : 0;
-}
-
-function swapPositionIdentities() {
-  return {
-    blockHashByNumber: new Map(),
-    blockNumberByHash: new Map(),
-    transactionHashByCoordinate: new Map(),
-    transactionCoordinateByHash: new Map(),
-  };
-}
-
 function validateSwapPositionIdentity(value, label, identities) {
   validateSwapPosition(value, label);
-  const knownBlockHash = identities.blockHashByNumber.get(value.blockNumber);
-  const knownBlockNumber = identities.blockNumberByHash.get(value.blockHash);
-  if (
-    (knownBlockHash !== undefined && knownBlockHash !== value.blockHash)
-    || (knownBlockNumber !== undefined && knownBlockNumber !== value.blockNumber)
-  ) {
-    throw new Error("Candle sources disagree on their block identity.");
-  }
-  identities.blockHashByNumber.set(value.blockNumber, value.blockHash);
-  identities.blockNumberByHash.set(value.blockHash, value.blockNumber);
-
-  const transactionCoordinate = `${value.blockNumber}:${value.transactionIndex}`;
-  const knownTransactionHash = identities.transactionHashByCoordinate.get(transactionCoordinate);
-  const knownTransactionCoordinate = identities.transactionCoordinateByHash.get(value.transactionHash);
-  if (
-    (knownTransactionHash !== undefined && knownTransactionHash !== value.transactionHash)
-    || (knownTransactionCoordinate !== undefined && knownTransactionCoordinate !== transactionCoordinate)
-  ) {
-    throw new Error("Candle sources disagree on their transaction identity.");
-  }
-  identities.transactionHashByCoordinate.set(transactionCoordinate, value.transactionHash);
-  identities.transactionCoordinateByHash.set(value.transactionHash, transactionCoordinate);
-  return value;
+  return admitSwapPositionIdentity(value, identities, "Candle sources");
 }
 
-function validateSwapPositionOrder(first, last, firstLabel, lastLabel, identities = swapPositionIdentities()) {
+function validateSwapPositionOrder(first, last, firstLabel, lastLabel, identities = createSwapPositionIdentities()) {
   validateSwapPositionIdentity(first, firstLabel, identities);
   validateSwapPositionIdentity(last, lastLabel, identities);
-  const order = compareSwapPositions(first, last);
+  const order = compareSwapPosition(first, last);
   if (order > 0) throw new Error("Candle source range is inverted.");
   const sameBlockCoordinate = first.blockNumber === last.blockNumber;
   if (sameBlockCoordinate && order < 0 && first.logIndex >= last.logIndex) {
@@ -176,8 +141,8 @@ export function validatePairCandle(value, { expectedDay, coverage } = {}) {
     "quoteVolumeRaw",
     "tradeCount",
   ], "pair candle");
-  const start = instant(value.intervalStart, "candle.intervalStart");
-  const end = instant(value.intervalEnd, "candle.intervalEnd");
+  const start = parseUtcInstant(value.intervalStart, "candle.intervalStart", true);
+  const end = parseUtcInstant(value.intervalEnd, "candle.intervalEnd", true);
   if (end - start !== 60_000 || expectedDay !== undefined && !value.intervalStart.startsWith(expectedDay)) throw new Error("Candle interval is invalid.");
   for (const key of ["open", "high", "low", "close"]) validateRational(value[key], `candle.${key}`);
   if (compareRational(value.high, value.open) < 0 || compareRational(value.high, value.close) < 0 || compareRational(value.low, value.open) > 0 || compareRational(value.low, value.close) > 0 || compareRational(value.high, value.low) < 0) {
@@ -196,7 +161,7 @@ export function validatePairCandle(value, { expectedDay, coverage } = {}) {
 
 export function validatePairCandleSequence(value, candleContext = {}) {
   if (!Array.isArray(value)) throw new Error("Pair candles must be an array.");
-  const identities = swapPositionIdentities();
+  const identities = createSwapPositionIdentities();
   let previous;
   for (const candle of value) {
     validatePairCandle(candle, candleContext);
@@ -224,7 +189,7 @@ export function validatePairCandleSequence(value, candleContext = {}) {
 
 // This ID names pair data independently of its publication generation and storage location.
 function logicalId(kind, pairId, period) {
-  if (!/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Logical pair identity is invalid.");
+  if (!isCanonicalBytes32(pairId)) throw new Error("Logical pair identity is invalid.");
   const suffix = period === undefined ? "state" : `${kind}/${period}`;
   return `pairs/${pairId}/${suffix}`;
 }
@@ -301,7 +266,7 @@ function validatePairReference(value, { logicalId: expectedLogicalId, maximumSeq
     positiveInteger(value[key], `reference.${key}`);
     if (value[key] > maximumArtifactBytes) throw new Error("Reference byte count exceeds the artifact boundary.");
   }
-  for (const key of ["jsonSha256", "gzipSha256"]) if (!digestPattern.test(value[key])) throw new Error(`reference.${key} is invalid.`);
+  for (const key of ["jsonSha256", "gzipSha256"]) if (!isSha256Hex(value[key])) throw new Error(`reference.${key} is invalid.`);
   return value;
 }
 

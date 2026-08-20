@@ -301,6 +301,12 @@ test("the pair registry validates nine specific pools and derives every PoolId f
     decimals: 18,
   };
   assert.throws(() => validatePairRegistry(zeroCurrencyErc20), /ERC-20 address/);
+  const arrayStateView = structuredClone(registry);
+  arrayStateView.deployment.stateView = [arrayStateView.deployment.stateView];
+  assert.throws(() => validatePairRegistry(arrayStateView), /Deployment identity/);
+  const arrayActivationHash = structuredClone(registry);
+  arrayActivationHash.pairs[0].pair.activation.hash = [arrayActivationHash.pairs[0].pair.activation.hash];
+  assert.throws(() => validatePairRegistry(arrayActivationHash), /activation.hash/);
   const changedQuoteDisplay = structuredClone(registry);
   for (const entry of changedQuoteDisplay.pairs) {
     entry.display.quoteName = "Changed quote display";
@@ -427,6 +433,27 @@ test("pair-day files and period reads require candles in increasing Swap order",
     () => validatePairDay({ ...values.day, coverage: widerCoverage, candles: [first, reusedNonAdjacentTransactionHash] }, values.context),
     /transaction identity/,
   );
+});
+
+test("stored hashes and digests must be primitive canonical strings", async () => {
+  const registry = await fixturePairRegistry();
+  const values = dataset(registry);
+  const candle = pairCandle();
+  candle.firstSource.blockHash = [candle.firstSource.blockHash];
+  candle.firstSource.transactionHash = [candle.firstSource.transactionHash];
+  candle.lastSource.blockNumber = (BigInt(candle.firstSource.blockNumber) + 1n).toString();
+  candle.lastSource.blockHash = [`0x${(BigInt(candle.lastSource.blockNumber) + 1n).toString(16).padStart(64, "0")}`];
+  candle.lastSource.transactionIndex = 0;
+  candle.lastSource.transactionHash = [`0x${(BigInt(candle.lastSource.blockNumber) * 100n + 1n).toString(16).padStart(64, "0")}`];
+  candle.lastSource.logIndex = 0;
+  assert.throws(
+    () => validatePairDay({ ...values.day, candles: [candle] }, values.context),
+    /hash is invalid/,
+  );
+
+  const state = structuredClone(values.state);
+  state.months[0].gzipSha256 = [state.months[0].gzipSha256];
+  assert.throws(() => validatePairState(state, values.context), /gzipSha256/);
 });
 
 test("UTC calendar subtraction clamps leap-day history without elapsed-day arithmetic", () => {

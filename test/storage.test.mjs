@@ -79,6 +79,13 @@ async function publishDataset(store, dataset) {
   await store.writeState(dataset.state.pair.pairId, dataset.state.sequence, dataset.encodedState.gzipBytes);
 }
 
+test("GitHub storage requires a primitive repository identity", () => {
+  assert.throws(() => new GitHubReleaseStore({
+    repository: ["owner/index"],
+    maximumArtifactBytes: 1_024,
+  }), /repository identity/);
+});
+
 test("directory and GitHub storage return the same selected data set", async () => {
   const registry = await fixturePairRegistry();
   const dataset = pairDataset(registry);

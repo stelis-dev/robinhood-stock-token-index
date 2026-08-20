@@ -254,7 +254,7 @@ test("one group command preserves storage evidence and RPC pacing across pair bo
     }),
     pairOperation: async (options, _registry, context) => {
       contexts.push(context);
-      assert.equal(await context.clients[0].call("eth_chainId", []), "0x1237");
+      await context.clients[0].verifyChain(0x1237);
       context.store.set(options.target.id, contexts.length);
     },
     writeOutput: () => {},

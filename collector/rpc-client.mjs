@@ -1,53 +1,102 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { isCanonicalAddress, isCanonicalBytes32 } from "./hex-data.mjs";
 import { isCanonicalHexQuantity, parseHexQuantity, safeHexQuantityNumber } from "./hex-quantity.mjs";
 import {
   validateRpcUrl,
   maximumRpcBatchSize,
+  rpcMethods,
   RpcEndpointUnavailableError,
   RpcResponseRejectedError,
 } from "./rpc-endpoint.mjs";
+import { validateUnixTimestampSeconds } from "./utc-time.mjs";
 
-const allowedMethods = new Set(["eth_chainId", "eth_getBlockByNumber", "eth_getLogs"]);
 const accessDeniedHttpStatuses = new Set([401, 403]);
-const unavailableRpcErrorCodes = new Set([-32601, -32004, -32006]);
+const immediateUnavailableRpcErrorCodes = new Set([-32601, -32004, -32006]);
+const historicalDataRpcMethods = new Set([
+  rpcMethods.getBlockByNumber,
+  rpcMethods.getLogs,
+]);
 const retryableRpcErrorCodes = new Set([-32603, -32001, -32002, -32005]);
 
-function exactBlock(candidate) {
+function responseRejected(reason, rpcMethod, facts = {}) {
+  return new RpcResponseRejectedError(reason, { ...facts, rpcMethod });
+}
+
+function rpcErrorDisposition(rpcMethod, rpcCode) {
+  if (immediateUnavailableRpcErrorCodes.has(rpcCode)) return "unavailable";
+  if (rpcCode === 4444 && historicalDataRpcMethods.has(rpcMethod)) return "unavailable";
+  if (retryableRpcErrorCodes.has(rpcCode) || (rpcCode >= -32099 && rpcCode <= -32007)) return "retryable";
+  if (rpcMethod === rpcMethods.getBlockByNumber && rpcCode === -39001) return "retryable";
+  return "rejected";
+}
+
+function exactBlock(candidate, rpcMethod) {
   if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
-    throw new RpcResponseRejectedError("response_result_invalid");
+    throw responseRejected("response_result_invalid", rpcMethod);
   }
-  if (!/^0x[0-9a-f]{64}$/.test(candidate.hash)) {
-    throw new RpcResponseRejectedError("response_result_invalid");
+  if (!isCanonicalBytes32(candidate.hash)) {
+    throw responseRejected("response_result_invalid", rpcMethod);
   }
+  let number;
+  let timestampSeconds;
   try {
-    parseHexQuantity(candidate.number, "block number");
-    parseHexQuantity(candidate.timestamp, "block timestamp");
+    number = parseHexQuantity(candidate.number, "block number");
+    timestampSeconds = validateUnixTimestampSeconds(
+      safeHexQuantityNumber(candidate.timestamp, "block timestamp"),
+      "Block timestamp",
+    );
   } catch {
-    throw new RpcResponseRejectedError("response_result_invalid");
+    throw responseRejected("response_result_invalid", rpcMethod);
   }
-  return { hash: candidate.hash, number: candidate.number, timestamp: candidate.timestamp };
+  return Object.freeze({ hash: candidate.hash, number, timestampSeconds });
+}
+
+function validateAdmittedBlock(candidate, label) {
+  if (
+    candidate === null
+    || typeof candidate !== "object"
+    || Array.isArray(candidate)
+    || JSON.stringify(Object.keys(candidate).sort()) !== JSON.stringify(["hash", "number", "timestampSeconds"])
+    || typeof candidate.number !== "bigint"
+    || candidate.number < 0n
+    || !isCanonicalBytes32(candidate.hash)
+  ) {
+    throw new Error(`${label} is invalid.`);
+  }
+  validateUnixTimestampSeconds(candidate.timestampSeconds, `${label} timestamp`);
+  return candidate;
 }
 
 function validateRpcResult(result, request) {
-  if (request.method === "eth_chainId") {
+  if (request.method === rpcMethods.chainId) {
     try {
       parseHexQuantity(result, "chain ID");
     } catch {
-      throw new RpcResponseRejectedError("response_result_invalid");
+      throw responseRejected("response_result_invalid", request.method);
     }
     return { result };
   }
-  if (request.method === "eth_getBlockByNumber") {
+  if (request.method === rpcMethods.getBlockByNumber) {
     if (result === null) return { retryable: true };
-    const block = exactBlock(result);
+    const block = exactBlock(result, request.method);
     const selector = request.params?.[0];
-    if (isCanonicalHexQuantity(selector) && BigInt(block.number) !== BigInt(selector)) {
-      throw new RpcResponseRejectedError("response_result_invalid");
+    if (isCanonicalHexQuantity(selector) && block.number !== BigInt(selector)) {
+      throw responseRejected("response_result_invalid", request.method);
+    }
+    if (
+      request.expectedBlockHash !== undefined
+      && (
+        block.hash !== request.expectedBlockHash
+        || block.timestampSeconds < request.minimumTimestampSeconds
+        || block.timestampSeconds >= request.maximumTimestampSeconds
+      )
+    ) {
+      throw responseRejected("response_result_invalid", request.method);
     }
     return { result: block };
   }
-  if (request.method === "eth_getLogs") {
-    if (!Array.isArray(result)) throw new RpcResponseRejectedError("response_result_invalid");
+  if (request.method === rpcMethods.getLogs) {
+    if (!Array.isArray(result)) throw responseRejected("response_result_invalid", request.method);
     return { result };
   }
   throw new Error("RPC response method is unsupported.");
@@ -55,30 +104,32 @@ function validateRpcResult(result, request) {
 
 function validateRpcEntry(entry, request) {
   if (entry === null || typeof entry !== "object" || Array.isArray(entry) || entry.jsonrpc !== "2.0" || entry.id !== request.id) {
-    throw new RpcResponseRejectedError("response_envelope_invalid");
+    throw responseRejected("response_envelope_invalid", request.method);
   }
   const hasResult = Object.hasOwn(entry, "result");
   const hasError = Object.hasOwn(entry, "error");
-  if (hasResult === hasError) throw new RpcResponseRejectedError("response_envelope_invalid");
+  if (hasResult === hasError) throw responseRejected("response_envelope_invalid", request.method);
   if (hasResult) return validateRpcResult(entry.result, request);
   if (entry.error === null || typeof entry.error !== "object" || Array.isArray(entry.error) || !Number.isSafeInteger(entry.error.code) || typeof entry.error.message !== "string") {
-    throw new RpcResponseRejectedError("response_envelope_invalid");
+    throw responseRejected("response_envelope_invalid", request.method);
   }
-  if (unavailableRpcErrorCodes.has(entry.error.code)) return { unavailable: true };
-  if (retryableRpcErrorCodes.has(entry.error.code)) return { retryable: true };
-  throw new RpcResponseRejectedError("rpc_error", { rpcCode: entry.error.code });
+  const disposition = rpcErrorDisposition(request.method, entry.error.code);
+  if (disposition === "unavailable") return { unavailable: true };
+  if (disposition === "retryable") return { retryable: true };
+  throw responseRejected("rpc_error", request.method, { rpcCode: entry.error.code });
 }
 
 function validateRpcResponse(value, requests, batch) {
+  const rpcMethod = requests[0].method;
   const entries = batch ? value : [value];
   if (!Array.isArray(entries) || entries.length !== requests.length) {
-    throw new RpcResponseRejectedError("response_envelope_invalid");
+    throw responseRejected("response_envelope_invalid", rpcMethod);
   }
   const expectedIds = new Set(requests.map((request) => request.id));
   const byId = new Map();
   for (const entry of entries) {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry) || !Number.isSafeInteger(entry.id) || !expectedIds.has(entry.id) || byId.has(entry.id)) {
-      throw new RpcResponseRejectedError("response_envelope_invalid");
+      throw responseRejected("response_envelope_invalid", rpcMethod);
     }
     byId.set(entry.id, entry);
   }
@@ -87,7 +138,7 @@ function validateRpcResponse(value, requests, batch) {
   let retryable = false;
   for (const request of requests) {
     const entry = byId.get(request.id);
-    if (entry === undefined) throw new RpcResponseRejectedError("response_envelope_invalid");
+    if (entry === undefined) throw responseRejected("response_envelope_invalid", rpcMethod);
     const validated = validateRpcEntry(entry, request);
     if (validated.unavailable === true) unavailable = true;
     if (validated.retryable === true) retryable = true;
@@ -97,10 +148,10 @@ function validateRpcResponse(value, requests, batch) {
   return retryable ? { retryable } : { results };
 }
 
-async function readBoundedResponse(response, maximumResponseBytes) {
+async function readBoundedResponse(response, maximumResponseBytes, rpcMethod) {
   const contentLength = response.headers?.get?.("content-length");
   if (contentLength !== null && contentLength !== undefined && Number(contentLength) > maximumResponseBytes) {
-    throw new RpcResponseRejectedError("response_too_large");
+    throw responseRejected("response_too_large", rpcMethod);
   }
   const chunks = [];
   let byteLength = 0;
@@ -116,7 +167,7 @@ async function readBoundedResponse(response, maximumResponseBytes) {
         } catch {
           // The response-size boundary remains authoritative over stream cleanup.
         }
-        throw new RpcResponseRejectedError("response_too_large");
+        throw responseRejected("response_too_large", rpcMethod);
       }
       chunks.push(Buffer.from(value));
     }
@@ -126,7 +177,7 @@ async function readBoundedResponse(response, maximumResponseBytes) {
     chunks.push(value);
   }
   const bytes = Buffer.concat(chunks, byteLength);
-  if (bytes.byteLength > maximumResponseBytes) throw new RpcResponseRejectedError("response_too_large");
+  if (bytes.byteLength > maximumResponseBytes) throw responseRejected("response_too_large", rpcMethod);
   return bytes;
 }
 
@@ -154,6 +205,10 @@ async function cancelResponseBody(response) {
 
 function isRetryableHttpStatus(status) {
   return status === 408 || status === 429 || status >= 500 && status <= 599;
+}
+
+function requestEnvelope({ jsonrpc, id, method, params }) {
+  return { jsonrpc, id, method, params };
 }
 
 export class RpcClient {
@@ -213,7 +268,11 @@ export class RpcClient {
   }
 
   async #execute(requests, batch) {
-    const payload = batch ? requests : requests[0];
+    const rpcMethod = requests[0]?.method;
+    if (rpcMethod === undefined || requests.some((request) => request.method !== rpcMethod)) {
+      throw new Error("An RPC transport request must contain one method.");
+    }
+    const payload = batch ? requests.map(requestEnvelope) : requestEnvelope(requests[0]);
     const body = JSON.stringify(payload);
     for (let attempt = 1; attempt <= this.maximumRpcAttempts; attempt += 1) {
       this.signal?.throwIfAborted();
@@ -237,7 +296,7 @@ export class RpcClient {
         await cancelResponseBody(response);
         if (accessDeniedHttpStatuses.has(response.status)) throw new RpcEndpointUnavailableError();
         if (!isRetryableHttpStatus(response.status)) {
-          throw new RpcResponseRejectedError("http_rejected", { httpStatus: response.status });
+          throw responseRejected("http_rejected", rpcMethod, { httpStatus: response.status });
         }
         const retryAfter = retryAfterMilliseconds(response.headers?.get?.("retry-after"), this.now());
         const retryDelay = retryAfter ?? this.#backoff(attempt);
@@ -249,7 +308,7 @@ export class RpcClient {
       }
       let bytes;
       try {
-        bytes = await readBoundedResponse(response, this.maximumResponseBytes);
+        bytes = await readBoundedResponse(response, this.maximumResponseBytes, rpcMethod);
       } catch (error) {
         this.signal?.throwIfAborted();
         if (error instanceof RpcResponseRejectedError) throw error;
@@ -260,7 +319,7 @@ export class RpcClient {
       try {
         value = JSON.parse(bytes.toString("utf8"));
       } catch {
-        throw new RpcResponseRejectedError("response_not_json");
+        throw responseRejected("response_not_json", rpcMethod);
       }
       const validated = validateRpcResponse(value, requests, batch);
       if (validated.unavailable === true) throw new RpcEndpointUnavailableError();
@@ -273,75 +332,116 @@ export class RpcClient {
     throw new Error("RPC attempts were exhausted.");
   }
 
-  async call(method, params) {
-    if (!allowedMethods.has(method)) throw new Error(`RPC method is unsupported: ${method}`);
+  async #call(method, params) {
     const id = ++this.#id;
     const [result] = await this.#execute([{ jsonrpc: "2.0", id, method, params }], false);
     return result;
   }
 
-  async batch(calls) {
+  async #batch(calls) {
     if (!Array.isArray(calls) || calls.length === 0 || calls.length > maximumRpcBatchSize) throw new Error("RPC batch size is invalid.");
-    const requests = calls.map(({ method, params }) => {
-      if (!allowedMethods.has(method)) throw new Error(`RPC method is unsupported: ${method}`);
-      return { jsonrpc: "2.0", id: ++this.#id, method, params };
-    });
+    const requests = calls.map((call) => ({ ...call, jsonrpc: "2.0", id: ++this.#id }));
     return this.#execute(requests, true);
   }
 
   async verifyChain(numericChainId) {
-    const observed = BigInt(await this.call("eth_chainId", []));
-    if (observed !== BigInt(numericChainId)) throw new RpcResponseRejectedError("chain_identity_mismatch");
+    if (!Number.isSafeInteger(numericChainId) || numericChainId <= 0) throw new Error("RPC chain ID is invalid.");
+    const observed = BigInt(await this.#call(rpcMethods.chainId, []));
+    if (observed !== BigInt(numericChainId)) {
+      throw responseRejected("chain_identity_mismatch", rpcMethods.chainId);
+    }
   }
 
   async getBlock(selector) {
-    return this.call("eth_getBlockByNumber", [typeof selector === "bigint" ? `0x${selector.toString(16)}` : selector, false]);
+    if (selector !== "finalized" && (typeof selector !== "bigint" || selector < 0n)) {
+      throw new Error("RPC block selector is invalid.");
+    }
+    const encoded = typeof selector === "bigint" ? `0x${selector.toString(16)}` : selector;
+    return this.#call(rpcMethods.getBlockByNumber, [encoded, false]);
   }
 
-  async getBlockHeaders(numbers, batchSize) {
-    const unique = [...new Set(numbers.map((value) => BigInt(value).toString()))].map(BigInt).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  async getBlockHeaders(expectations, batchSize, { minimumTimestampSeconds, maximumTimestampSeconds } = {}) {
+    if (!Array.isArray(expectations) || expectations.length === 0) throw new Error("RPC block header expectations are invalid.");
+    if (!Number.isSafeInteger(batchSize) || batchSize <= 0 || batchSize > maximumRpcBatchSize) {
+      throw new Error("RPC block header batch size is invalid.");
+    }
+    validateUnixTimestampSeconds(minimumTimestampSeconds, "RPC block header minimum timestamp");
+    validateUnixTimestampSeconds(maximumTimestampSeconds, "RPC block header maximum timestamp");
+    if (minimumTimestampSeconds >= maximumTimestampSeconds) throw new Error("RPC block header timestamp range is invalid.");
+    const byNumber = new Map();
+    for (const expectation of expectations) {
+      if (
+        expectation === null
+        || typeof expectation !== "object"
+        || Array.isArray(expectation)
+        || JSON.stringify(Object.keys(expectation).sort()) !== JSON.stringify(["hash", "number"])
+        || typeof expectation.number !== "bigint"
+        || expectation.number < 0n
+        || !isCanonicalBytes32(expectation.hash)
+        || byNumber.has(expectation.number.toString())
+      ) {
+        throw new Error("RPC block header expectations are invalid.");
+      }
+      byNumber.set(expectation.number.toString(), expectation);
+    }
+    const ordered = [...byNumber.values()].sort((left, right) => (
+      left.number < right.number ? -1 : left.number > right.number ? 1 : 0
+    ));
     const output = new Map();
-    for (let offset = 0; offset < unique.length; offset += batchSize) {
-      const part = unique.slice(offset, offset + batchSize);
-      const results = await this.batch(part.map((number) => ({ method: "eth_getBlockByNumber", params: [`0x${number.toString(16)}`, false] })));
+    for (let offset = 0; offset < ordered.length; offset += batchSize) {
+      const part = ordered.slice(offset, offset + batchSize);
+      const results = await this.#batch(part.map(({ number, hash }) => ({
+        method: rpcMethods.getBlockByNumber,
+        params: [`0x${number.toString(16)}`, false],
+        expectedBlockHash: hash,
+        minimumTimestampSeconds,
+        maximumTimestampSeconds,
+      })));
       for (let index = 0; index < part.length; index += 1) {
-        output.set(part[index].toString(), results[index]);
+        output.set(part[index].number.toString(), results[index]);
       }
     }
     return output;
   }
 
   async getLogs({ address, poolIds, swapTopic, fromBlock, toBlock }) {
-    return this.call("eth_getLogs", [{
+    if (!isCanonicalAddress(address) || !isCanonicalBytes32(swapTopic)) {
+      throw new Error("RPC log source is invalid.");
+    }
+    if (!Array.isArray(poolIds) || poolIds.length === 0 || poolIds.some((value) => !isCanonicalBytes32(value)) || new Set(poolIds).size !== poolIds.length) {
+      throw new Error("RPC log pool IDs are invalid.");
+    }
+    if (typeof fromBlock !== "bigint" || typeof toBlock !== "bigint" || fromBlock < 0n || fromBlock > toBlock) {
+      throw new Error("RPC log block range is invalid.");
+    }
+    return this.#call(rpcMethods.getLogs, [{
       address,
-      fromBlock: `0x${BigInt(fromBlock).toString(16)}`,
-      toBlock: `0x${BigInt(toBlock).toString(16)}`,
+      fromBlock: `0x${fromBlock.toString(16)}`,
+      toBlock: `0x${toBlock.toString(16)}`,
       topics: [swapTopic, poolIds],
     }]);
   }
 
   async findFirstBlockAtOrAfterTimestamp(timestamp, minimumBlock, maximumBlock, { maximumBlockHeader } = {}) {
-    let low = BigInt(minimumBlock);
-    let high = BigInt(maximumBlock);
+    validateUnixTimestampSeconds(timestamp, "Block search timestamp");
+    if (typeof minimumBlock !== "bigint" || typeof maximumBlock !== "bigint") {
+      throw new Error("Block search bounds are invalid.");
+    }
+    let low = minimumBlock;
+    let high = maximumBlock;
     if (low < 0n || low > high) throw new Error("Block search bounds are invalid.");
-    const target = BigInt(timestamp);
-    const highBlock = maximumBlockHeader ?? await this.getBlock(high);
-    if (BigInt(highBlock.number) !== high) throw new Error("Block search header does not match its upper bound.");
-    if (parseHexQuantity(highBlock.timestamp, "block timestamp") < target) return high + 1n;
+    const target = timestamp;
+    const highBlock = maximumBlockHeader === undefined
+      ? await this.getBlock(high)
+      : validateAdmittedBlock(maximumBlockHeader, "Block search upper-bound header");
+    if (highBlock.number !== high) throw new Error("Block search header does not match its upper bound.");
+    if (highBlock.timestampSeconds < target) return high + 1n;
     while (low < high) {
       const middle = (low + high) >> 1n;
       const block = await this.getBlock(middle);
-      if (parseHexQuantity(block.timestamp, "block timestamp") < target) low = middle + 1n;
+      if (block.timestampSeconds < target) low = middle + 1n;
       else high = middle;
     }
     return low;
-  }
-}
-
-export function blockTimestamp(block) {
-  try {
-    return safeHexQuantityNumber(block.timestamp, "Block timestamp");
-  } catch {
-    throw new RpcResponseRejectedError("response_result_invalid");
   }
 }

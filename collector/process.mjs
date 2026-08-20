@@ -14,16 +14,21 @@ import {
 } from "./pair-reader.mjs";
 import { pairById } from "./pair-registry.mjs";
 import { publishPairReplacement } from "./publication.mjs";
-import { RpcEndpointUnavailableError, RpcResponseRejectedError } from "./rpc-endpoint.mjs";
-import { blockTimestamp } from "./rpc-client.mjs";
-import { decodeSwapLog, validateSwapLogBlockNumber } from "./swap.mjs";
+import {
+  rpcMethods,
+  RpcEndpointUnavailableError,
+  RpcResponseRejectedError,
+} from "./rpc-endpoint.mjs";
+import { decodeSwapLog } from "./swap.mjs";
+import {
+  admitSwapPositionIdentity,
+  compareSwapPosition,
+  createSwapPositionIdentities,
+} from "./swap-position.mjs";
+import { formatUtcInstant, parseUtcInstantSeconds } from "./utc-time.mjs";
 
 function throwIfAborted(signal) {
   signal?.throwIfAborted();
-}
-
-function instant(seconds) {
-  return new Date(seconds * 1000).toISOString();
 }
 
 function minuteFloor(seconds, candleSeconds) {
@@ -38,12 +43,16 @@ function maximum(left, right) {
   return left > right ? left : right;
 }
 
-function admittedRpcLogBlockNumber(log) {
+function rejectRpcResponse(reason, rpcMethod) {
+  return new RpcResponseRejectedError(reason, { rpcMethod });
+}
+
+function admitRpcResponse(rpcMethod, admission) {
   try {
-    return validateSwapLogBlockNumber(log);
+    return admission();
   } catch (error) {
     if (error instanceof RpcResponseRejectedError) throw error;
-    throw new RpcResponseRejectedError("response_result_invalid");
+    throw rejectRpcResponse("response_result_invalid", rpcMethod);
   }
 }
 
@@ -100,13 +109,13 @@ function joinCoverage(existing, replacement) {
 function assertFinalizedCoversStoredRange(state, pair, finalized) {
   const untilBlock = BigInt(state?.coverage.untilBlock ?? pair.activation.blockNumber);
   const requiredBlock = untilBlock === 0n ? 0n : untilBlock - 1n;
-  if (BigInt(finalized.number) < requiredBlock) throw new RpcEndpointUnavailableError();
+  if (finalized.number < requiredBlock) throw new RpcEndpointUnavailableError();
 }
 
 function sameBlock(left, right) {
   return left.number === right.number
     && left.hash === right.hash
-    && left.timestamp === right.timestamp;
+    && left.timestampSeconds === right.timestampSeconds;
 }
 
 async function fixedFinalizedBlock({ registry, pair, rpc, state, finalizedBoundary }) {
@@ -119,14 +128,14 @@ async function fixedFinalizedBlock({ registry, pair, rpc, state, finalizedBounda
     finalizedBoundary.block = Object.freeze({ ...providerFinalized });
     return finalizedBoundary.block;
   }
-  if (BigInt(providerFinalized.number) < BigInt(finalizedBoundary.block.number)) {
+  if (providerFinalized.number < finalizedBoundary.block.number) {
     throw new RpcEndpointUnavailableError();
   }
   const providerCopy = providerFinalized.number === finalizedBoundary.block.number
     ? providerFinalized
-    : await rpc.getBlock(BigInt(finalizedBoundary.block.number));
+    : await rpc.getBlock(finalizedBoundary.block.number);
   if (!sameBlock(providerCopy, finalizedBoundary.block)) {
-    throw new RpcResponseRejectedError("finalized_boundary_mismatch");
+    throw rejectRpcResponse("finalized_boundary_mismatch", rpcMethods.getBlockByNumber);
   }
   return finalizedBoundary.block;
 }
@@ -134,11 +143,11 @@ async function fixedFinalizedBlock({ registry, pair, rpc, state, finalizedBounda
 async function verifyActivationBoundary(pair, rpc) {
   const block = await rpc.getBlock(BigInt(pair.activation.blockNumber));
   if (
-    BigInt(block.number) !== BigInt(pair.activation.blockNumber)
+    block.number !== BigInt(pair.activation.blockNumber)
     || block.hash !== pair.activation.hash
-    || instant(blockTimestamp(block)) !== pair.activation.timestamp
+    || formatUtcInstant(block.timestampSeconds, "Activation block timestamp") !== pair.activation.timestamp
   ) {
-    throw new RpcResponseRejectedError("activation_boundary_mismatch");
+    throw rejectRpcResponse("activation_boundary_mismatch", rpcMethods.getBlockByNumber);
   }
 }
 
@@ -146,8 +155,8 @@ async function coveragePartitions({ rpc, fromBlock, untilBlock, fromTimestamp, u
   const output = [];
   let cursorBlock = BigInt(fromBlock);
   const exclusiveBlock = BigInt(untilBlock);
-  let cursorSeconds = Math.floor(Date.parse(fromTimestamp) / 1000);
-  const untilSeconds = Math.floor(Date.parse(untilTimestamp) / 1000);
+  let cursorSeconds = parseUtcInstantSeconds(fromTimestamp, "Coverage start", true);
+  const untilSeconds = parseUtcInstantSeconds(untilTimestamp, "Coverage end", true);
   if (cursorBlock > exclusiveBlock || cursorSeconds >= untilSeconds) throw new Error("Coverage partition range is invalid.");
   while (cursorSeconds < untilSeconds) {
     throwIfAborted(signal);
@@ -160,12 +169,12 @@ async function coveragePartitions({ rpc, fromBlock, untilBlock, fromTimestamp, u
       throw new Error("Coverage block boundary is outside the collected range.");
     }
     output.push({
-      day: instant(cursorSeconds).slice(0, 10),
+      day: formatUtcInstant(cursorSeconds, "Coverage day boundary").slice(0, 10),
       coverage: {
         fromBlock: cursorBlock.toString(),
-        fromTimestamp: instant(cursorSeconds),
+        fromTimestamp: formatUtcInstant(cursorSeconds, "Coverage start"),
         untilBlock: segmentUntilBlock.toString(),
-        untilTimestamp: instant(segmentUntilSeconds),
+        untilTimestamp: formatUtcInstant(segmentUntilSeconds, "Coverage end"),
       },
     });
     cursorBlock = segmentUntilBlock;
@@ -174,9 +183,29 @@ async function coveragePartitions({ rpc, fromBlock, untilBlock, fromTimestamp, u
   return output;
 }
 
+function admitSwapLogPage({ logs, registry, pair, minimumBlock, maximumBlock, previousPosition, identities }) {
+  const decoded = logs.map((log) => decodeSwapLog(log, { registry, pair }))
+    .sort((left, right) => compareSwapPosition(left.swapPosition, right.swapPosition));
+  const expectedBlocks = new Map();
+  let lastPosition = previousPosition;
+  for (const swap of decoded) {
+    if (swap.blockNumber < minimumBlock || swap.blockNumber >= maximumBlock) {
+      throw new Error("Swap log is outside its requested block range.");
+    }
+    if (lastPosition !== null && compareSwapPosition(lastPosition, swap.swapPosition) >= 0) {
+      throw new Error("Swap source positions are duplicated or unordered across ranges.");
+    }
+    lastPosition = swap.swapPosition;
+    admitSwapPositionIdentity(swap.swapPosition, identities, "Swap logs");
+    const blockKey = swap.blockNumber.toString();
+    expectedBlocks.set(blockKey, { number: swap.blockNumber, hash: swap.blockHash });
+  }
+  return { decoded, expectedBlocks: [...expectedBlocks.values()], lastPosition };
+}
+
 async function collectFixedRange({ registry, pair, rpc, range, signal }) {
-  const rangeFromSeconds = Math.floor(Date.parse(range.fromTimestamp) / 1000);
-  const rangeUntilSeconds = Math.floor(Date.parse(range.untilTimestamp) / 1000);
+  const rangeFromSeconds = parseUtcInstantSeconds(range.fromTimestamp, "Collection range start", true);
+  const rangeUntilSeconds = parseUtcInstantSeconds(range.untilTimestamp, "Collection range end", true);
   const durationSeconds = rangeUntilSeconds - rangeFromSeconds;
   const maximumBuckets = Math.ceil(durationSeconds / registry.collection.candleSeconds);
   if (!Number.isSafeInteger(maximumBuckets) || maximumBuckets <= 0) throw new Error("Collection time range is invalid.");
@@ -187,6 +216,8 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
   });
   let cursor = BigInt(range.fromBlock);
   const exclusive = BigInt(range.untilBlock);
+  let previousSwapPosition = null;
+  const swapPositionIdentities = createSwapPositionIdentities();
   if (cursor > exclusive) throw new Error("Collection block range is inverted.");
   while (cursor < exclusive) {
     throwIfAborted(signal);
@@ -198,29 +229,43 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
       fromBlock: cursor,
       toBlock: rangeUntil - 1n,
     });
-    const blockNumbers = [];
-    for (const log of logs) {
-      const blockNumber = admittedRpcLogBlockNumber(log);
-      if (blockNumber < cursor || blockNumber >= rangeUntil) {
-        throw new RpcResponseRejectedError("response_result_invalid");
-      }
-      blockNumbers.push(blockNumber);
-    }
-    const headers = logs.length === 0
+    const page = admitRpcResponse(rpcMethods.getLogs, () => admitSwapLogPage({
+      logs,
+      registry,
+      pair,
+      minimumBlock: cursor,
+      maximumBlock: rangeUntil,
+      previousPosition: previousSwapPosition,
+      identities: swapPositionIdentities,
+    }));
+    previousSwapPosition = page.lastPosition;
+    const headers = page.expectedBlocks.length === 0
       ? new Map()
-      : await rpc.getBlockHeaders(blockNumbers, registry.collection.headerBatchSize);
+      : await rpc.getBlockHeaders(
+        page.expectedBlocks,
+        registry.collection.headerBatchSize,
+        { minimumTimestampSeconds: rangeFromSeconds, maximumTimestampSeconds: rangeUntilSeconds },
+      );
     const swaps = [];
-    for (let index = 0; index < logs.length; index += 1) {
-      const log = logs[index];
-      const header = headers.get(blockNumbers[index].toString());
-      if (!header) throw new RpcResponseRejectedError("response_result_invalid");
-      const decoded = decodeSwapLog(log, { registry, pair, block: header });
-      if (decoded.blockTimestamp < rangeFromSeconds || decoded.blockTimestamp >= rangeUntilSeconds) {
-        throw new RpcResponseRejectedError("response_result_invalid");
+    for (const decoded of page.decoded) {
+      const header = headers.get(decoded.blockNumber.toString());
+      if (
+        header === undefined
+        || header.number !== decoded.blockNumber
+        || header.hash !== decoded.blockHash
+        || header.timestampSeconds < rangeFromSeconds
+        || header.timestampSeconds >= rangeUntilSeconds
+      ) {
+        throw rejectRpcResponse("response_result_invalid", rpcMethods.getBlockByNumber);
       }
-      swaps.push(decoded);
+      swaps.push({
+        pairId: decoded.pairId,
+        blockTimestamp: header.timestampSeconds,
+        swapPosition: decoded.swapPosition,
+        trade: decoded.trade,
+      });
     }
-    accumulator.addSwaps(swaps);
+    admitRpcResponse(rpcMethods.getLogs, () => accumulator.addSwaps(swaps));
     cursor = rangeUntil;
   }
   return {
@@ -394,16 +439,20 @@ async function publishReplacement({ registry, pair, store, previousSelection, ph
 
 async function currentRange({ registry, pair, rpc, state, finalized }) {
   const fromBlock = BigInt(state?.coverage.untilBlock ?? pair.activation.blockNumber);
-  const fromSeconds = Math.floor(Date.parse(state?.coverage.untilTimestamp ?? pair.activation.timestamp) / 1000);
-  const finalizedNumber = BigInt(finalized.number);
+  const fromSeconds = parseUtcInstantSeconds(
+    state?.coverage.untilTimestamp ?? pair.activation.timestamp,
+    "Current range start",
+    true,
+  );
+  const finalizedNumber = finalized.number;
   if (finalizedNumber < fromBlock) return { range: null, reachedFinalizedBoundary: true };
-  const finalizedBoundarySeconds = minuteFloor(blockTimestamp(finalized), registry.collection.candleSeconds);
+  const finalizedBoundarySeconds = minuteFloor(finalized.timestampSeconds, registry.collection.candleSeconds);
   if (finalizedBoundarySeconds <= fromSeconds) return { range: null, reachedFinalizedBoundary: true };
   const searchHigh = minimum(fromBlock + BigInt(registry.collection.maximumBlocksPerRun), finalizedNumber);
   const searchHighHeader = searchHigh === finalizedNumber ? finalized : await rpc.getBlock(searchHigh);
   const nextDaySeconds = Math.floor(fromSeconds / 86_400) * 86_400 + 86_400;
   const untilSeconds = minimum(
-    minuteFloor(blockTimestamp(searchHighHeader), registry.collection.candleSeconds),
+    minuteFloor(searchHighHeader.timestampSeconds, registry.collection.candleSeconds),
     minimum(finalizedBoundarySeconds, nextDaySeconds),
   );
   if (untilSeconds <= fromSeconds) {
@@ -419,9 +468,9 @@ async function currentRange({ registry, pair, rpc, state, finalized }) {
   return {
     range: {
       fromBlock: fromBlock.toString(),
-      fromTimestamp: instant(fromSeconds),
+      fromTimestamp: formatUtcInstant(fromSeconds, "Current range start"),
       untilBlock: untilBlock.toString(),
-      untilTimestamp: instant(untilSeconds),
+      untilTimestamp: formatUtcInstant(untilSeconds, "Current range end"),
     },
     reachedFinalizedBoundary: untilSeconds === finalizedBoundarySeconds,
   };
@@ -435,9 +484,9 @@ async function historyRange({ registry, pair, rpc, state }) {
   if (fromBlock < historyBlock || fromTimestamp < pair.historyStart.timestamp) throw new Error("Stored coverage start is before the pair historyStart boundary.");
   const nominalBlock = maximum(fromBlock - BigInt(registry.collection.maximumBlocksPerRun), historyBlock);
   const nominalHeader = await rpc.getBlock(nominalBlock);
-  const nominalSeconds = minuteFloor(blockTimestamp(nominalHeader), registry.collection.candleSeconds);
-  const historySeconds = Math.floor(Date.parse(pair.historyStart.timestamp) / 1000);
-  const fromSeconds = Math.floor(Date.parse(fromTimestamp) / 1000);
+  const nominalSeconds = minuteFloor(nominalHeader.timestampSeconds, registry.collection.candleSeconds);
+  const historySeconds = parseUtcInstantSeconds(pair.historyStart.timestamp, "History boundary", true);
+  const fromSeconds = parseUtcInstantSeconds(fromTimestamp, "Stored coverage start", true);
   const previousDaySeconds = Math.floor((fromSeconds - 1) / 86_400) * 86_400;
   const boundarySeconds = Math.max(nominalSeconds, historySeconds, previousDaySeconds);
   let nextFromBlock;
@@ -452,7 +501,7 @@ async function historyRange({ registry, pair, rpc, state }) {
       { maximumBlockHeader: fromHeader },
     );
   }
-  const nextFromTimestamp = instant(boundarySeconds);
+  const nextFromTimestamp = formatUtcInstant(boundarySeconds, "History range start");
   if (nextFromBlock > fromBlock || nextFromTimestamp >= fromTimestamp) {
     throw new Error("History collection cannot move by one complete minute.");
   }
@@ -466,8 +515,8 @@ async function historyRange({ registry, pair, rpc, state }) {
 
 async function repairRange({ registry, rpc, state }) {
   if (state.coverage.fromTimestamp === state.coverage.untilTimestamp) return null;
-  const earliestSeconds = Math.floor(Date.parse(state.coverage.fromTimestamp) / 1000);
-  const untilSeconds = Math.floor(Date.parse(state.coverage.untilTimestamp) / 1000);
+  const earliestSeconds = parseUtcInstantSeconds(state.coverage.fromTimestamp, "Repair coverage start", true);
+  const untilSeconds = parseUtcInstantSeconds(state.coverage.untilTimestamp, "Repair coverage end", true);
   const targetSeconds = Math.max(
     earliestSeconds,
     minuteFloor(untilSeconds - registry.collection.repairLookbackSeconds, registry.collection.candleSeconds),
@@ -481,7 +530,7 @@ async function repairRange({ registry, rpc, state }) {
   }
   return {
     fromBlock: fromBlock.toString(),
-    fromTimestamp: instant(targetSeconds),
+    fromTimestamp: formatUtcInstant(targetSeconds, "Repair range start"),
     untilBlock: exclusiveBlock.toString(),
     untilTimestamp: state.coverage.untilTimestamp,
   };

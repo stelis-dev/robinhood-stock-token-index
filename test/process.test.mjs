@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
 import { pairById } from "../collector/pair-registry.mjs";
+import { RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
 import { createFinalizedBoundary, runRpcPairOperation } from "../collector/rpc-operation.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
@@ -287,7 +288,9 @@ test("duplicate zero-amount Swap positions are rejected before candle eligibilit
 
   await assert.rejects(
     runHistoryPhase({ registry, pairId: pair.pairId, store, rpc }),
-    /Swap source positions are duplicated or unordered across ranges/,
+    (error) => error instanceof RpcResponseRejectedError
+      && error.reason === "response_result_invalid"
+      && error.rpcMethod === "eth_getLogs",
   );
   assert.equal(await readPairState({ registry, pairId: pair.pairId, store }), null);
 });

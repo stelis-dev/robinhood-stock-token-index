@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { isCanonicalBytes32 } from "../collector/hex-data.mjs";
 import { validatePairRegistry } from "../collector/pair-registry.mjs";
 
 const collectionPlanUrl = new URL("../registry/collection-plan.json", import.meta.url);
-const pairIdPattern = /^0x[0-9a-f]{64}$/;
 
 function exactKeys(value, keys, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -69,7 +69,7 @@ export function validateCollectionPlan(candidate, pairRegistry) {
       if (!Number.isSafeInteger(estimatedRuntimeSeconds) || estimatedRuntimeSeconds > candidate.capacity.maximumGroupSeconds) {
         throw new Error("Collection group estimated runtime exceeds the configured maximum.");
       }
-      if (typeof member.pairId !== "string" || !pairIdPattern.test(member.pairId) || !knownPairIds.has(member.pairId)) {
+      if (!isCanonicalBytes32(member.pairId) || !knownPairIds.has(member.pairId)) {
         throw new Error("Collection group contains an unknown pair.");
       }
       if (assignedPairIds.has(member.pairId)) throw new Error("Collection group pair membership is duplicated.");

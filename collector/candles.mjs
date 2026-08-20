@@ -1,8 +1,7 @@
-import { compareRational, compareSwapPosition } from "./swap.mjs";
-
-function iso(seconds) {
-  return new Date(seconds * 1000).toISOString();
-}
+import { isCanonicalBytes32 } from "./hex-data.mjs";
+import { compareRational } from "./swap.mjs";
+import { compareSwapPosition } from "./swap-position.mjs";
+import { formatUtcInstant } from "./utc-time.mjs";
 
 export function compareCandleIdentity(left, right) {
   return left.intervalStart.localeCompare(right.intervalStart);
@@ -13,7 +12,7 @@ export class CandleAccumulator {
   #lastSwapPosition = null;
 
   constructor({ pairId, candleSeconds = 60, maximumBuckets = Number.MAX_SAFE_INTEGER }) {
-    if (typeof pairId !== "string" || !/^0x[0-9a-f]{64}$/.test(pairId)) throw new Error("Candle pair identity is invalid.");
+    if (!isCanonicalBytes32(pairId)) throw new Error("Candle pair identity is invalid.");
     if (!Number.isSafeInteger(candleSeconds) || candleSeconds <= 0 || !Number.isSafeInteger(maximumBuckets) || maximumBuckets <= 0) {
       throw new Error("Candle accumulator limits are invalid.");
     }
@@ -63,8 +62,8 @@ export class CandleAccumulator {
 
   values() {
     return [...this.#buckets.values()].map((bucket) => ({
-      intervalStart: iso(bucket.intervalStart),
-      intervalEnd: iso(bucket.intervalEnd),
+      intervalStart: formatUtcInstant(bucket.intervalStart, "Candle interval start"),
+      intervalEnd: formatUtcInstant(bucket.intervalEnd, "Candle interval end"),
       open: bucket.open,
       high: bucket.high,
       low: bucket.low,

@@ -1,11 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { isCanonicalAddress, isCanonicalBytes32 } from "./hex-data.mjs";
 import { derivePoolId } from "./pool-key.mjs";
 import { validateRpcUrl, maximumRpcBatchSize } from "./rpc-endpoint.mjs";
+import { parseUtcInstant } from "./utc-time.mjs";
 
-const addressPattern = /^0x[0-9a-f]{40}$/;
-const bytes32Pattern = /^0x[0-9a-f]{64}$/;
-const instantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/;
 const symbolPattern = /^[A-Z][A-Z0-9.]{0,15}$/;
 const nativeCurrency = "0x0000000000000000000000000000000000000000";
 const registryUrl = new URL("../registry/pairs.json", import.meta.url);
@@ -30,16 +29,6 @@ function decimalString(value, label) {
   return BigInt(value);
 }
 
-function instant(value, label, minuteAligned = false) {
-  if (typeof value !== "string" || !instantPattern.test(value) || Number.isNaN(Date.parse(value))) {
-    throw new Error(`${label} must be a canonical UTC instant.`);
-  }
-  if (new Date(value).toISOString() !== value || minuteAligned && Date.parse(value) % 60_000 !== 0) {
-    throw new Error(`${label} has an invalid UTC boundary.`);
-  }
-  return Date.parse(value);
-}
-
 function nonemptyText(value, label, maximumLength = 128) {
   if (typeof value !== "string" || value.length === 0 || value.length > maximumLength) {
     throw new Error(`${label} is invalid.`);
@@ -49,7 +38,7 @@ function nonemptyText(value, label, maximumLength = 128) {
 function validateAsset(value, label) {
   if (value?.kind === "erc20") {
     exactKeys(value, ["address", "decimals", "kind"], label);
-    if (!addressPattern.test(value.address) || value.address === nativeCurrency) throw new Error(`${label} ERC-20 address is invalid.`);
+    if (!isCanonicalAddress(value.address) || value.address === nativeCurrency) throw new Error(`${label} ERC-20 address is invalid.`);
   } else if (value?.kind === "native") {
     exactKeys(value, ["currency", "decimals", "kind"], label);
     if (value.currency !== nativeCurrency) {
@@ -88,18 +77,18 @@ function validateAssetFacts(asset, symbol, name, facts) {
 function validateSourceInitialization(value) {
   exactKeys(value, ["blockNumber", "timestamp"], "sourceInitialization");
   decimalString(value.blockNumber, "sourceInitialization.blockNumber");
-  instant(value.timestamp, "sourceInitialization.timestamp");
+  parseUtcInstant(value.timestamp, "sourceInitialization.timestamp");
 }
 
 function validateMinuteBoundary(value, label, withHash = false) {
   exactKeys(value, withHash ? ["blockNumber", "hash", "timestamp"] : ["blockNumber", "timestamp"], label);
   decimalString(value.blockNumber, `${label}.blockNumber`);
-  instant(value.timestamp, `${label}.timestamp`, true);
-  if (withHash && !bytes32Pattern.test(value.hash)) throw new Error(`${label}.hash is invalid.`);
+  parseUtcInstant(value.timestamp, `${label}.timestamp`, true);
+  if (withHash && !isCanonicalBytes32(value.hash)) throw new Error(`${label}.hash is invalid.`);
 }
 
 export function subtractUtcCalendarMonths(value, months) {
-  instant(value, "calendar source", true);
+  parseUtcInstant(value, "calendar source", true);
   positiveInteger(months, "calendar month count");
   const source = new Date(value);
   const absoluteMonth = source.getUTCFullYear() * 12 + source.getUTCMonth() - months;
@@ -135,7 +124,7 @@ function validatePairDescriptor(value, registry) {
     "sourceInitialization",
     "swapTopic",
   ], "pair descriptor");
-  if (!bytes32Pattern.test(value.pairId)) throw new Error("Pair ID is invalid.");
+  if (!isCanonicalBytes32(value.pairId)) throw new Error("Pair ID is invalid.");
   if (value.chainId !== registry.chain.chainId || value.finality !== registry.chain.finalityTag || value.poolManager !== registry.deployment.poolManager || value.swapTopic !== registry.deployment.swapTopic) {
     throw new Error("Pair source does not match the registry deployment.");
   }
@@ -144,7 +133,7 @@ function validatePairDescriptor(value, registry) {
   if (typeof value.baseIsCurrency0 !== "boolean") throw new Error("Pair orientation is invalid.");
   exactKeys(value.poolKey, ["currency0", "currency1", "fee", "hooks", "tickSpacing"], "poolKey");
   for (const key of ["currency0", "currency1", "hooks"]) {
-    if (!addressPattern.test(value.poolKey[key])) throw new Error(`poolKey.${key} is invalid.`);
+    if (!isCanonicalAddress(value.poolKey[key])) throw new Error(`poolKey.${key} is invalid.`);
   }
   positiveInteger(value.poolKey.fee, "poolKey.fee");
   positiveInteger(value.poolKey.tickSpacing, "poolKey.tickSpacing");
@@ -164,9 +153,9 @@ function validatePairDescriptor(value, registry) {
   const initializationBlock = decimalString(value.sourceInitialization.blockNumber, "sourceInitialization.blockNumber");
   const historyBlock = decimalString(value.historyStart.blockNumber, "historyStart.blockNumber");
   const activationBlock = decimalString(value.activation.blockNumber, "activation.blockNumber");
-  const initializationTime = instant(value.sourceInitialization.timestamp, "sourceInitialization.timestamp");
-  const historyTime = instant(value.historyStart.timestamp, "historyStart.timestamp", true);
-  const activationTime = instant(value.activation.timestamp, "activation.timestamp", true);
+  const initializationTime = parseUtcInstant(value.sourceInitialization.timestamp, "sourceInitialization.timestamp");
+  const historyTime = parseUtcInstant(value.historyStart.timestamp, "historyStart.timestamp", true);
+  const activationTime = parseUtcInstant(value.activation.timestamp, "activation.timestamp", true);
   if (initializationBlock > historyBlock || historyBlock > activationBlock || initializationTime > historyTime + 59_999 || historyTime > activationTime) {
     throw new Error("Pair source, history, and activation boundaries are inverted.");
   }
@@ -202,7 +191,7 @@ export function validatePairRegistry(candidate) {
   validateRpcUrl(candidate.chain.primaryRpcUrl, "Primary RPC URL");
 
   exactKeys(candidate.deployment, ["poolManager", "stateView", "swapTopic"], "deployment");
-  if (!addressPattern.test(candidate.deployment.poolManager) || !addressPattern.test(candidate.deployment.stateView) || !bytes32Pattern.test(candidate.deployment.swapTopic)) {
+  if (!isCanonicalAddress(candidate.deployment.poolManager) || !isCanonicalAddress(candidate.deployment.stateView) || !isCanonicalBytes32(candidate.deployment.swapTopic)) {
     throw new Error("Deployment identity is invalid.");
   }
 
