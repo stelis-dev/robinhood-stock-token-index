@@ -214,7 +214,10 @@ Terms used in this file:
   codes; never log endpoint URLs, provider messages, response bodies, tokens, or
   stack traces. Classification does not change retry, fallback, publication, or
   group-failure behavior. The CLI emits one success or failure line per phase
-  and emits a recovery line only when recovery retained the previous state or
+  and names endpoints only by their registry field or secret variable name. If
+  a later endpoint succeeds, that success line retains the fixed reason,
+  supported method, and numeric code for each earlier failed endpoint. The CLI
+  emits a recovery line only when recovery retained the previous state or
   selected the next state.
 - Store processed candles and continuous coverage. Do not store raw RPC
   responses, invented candles, a general transaction index, the RPC provider

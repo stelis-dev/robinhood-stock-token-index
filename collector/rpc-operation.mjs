@@ -19,14 +19,29 @@ export class RpcPairOperationUnavailableError extends Error {
   }
 }
 
+export function rpcEndpointFailureFacts(error) {
+  if (!(error instanceof RpcEndpointUnavailableError) && !(error instanceof RpcResponseRejectedError)) return null;
+  return Object.freeze({
+    reason: error.reason,
+    rpcMethod: error.rpcMethod ?? null,
+    httpStatus: error.httpStatus ?? null,
+    rpcCode: error.rpcCode ?? null,
+  });
+}
+
+function rpcFailureFields(failure) {
+  const rpcMethod = failure.rpcMethod === null ? "" : ` rpc_method=${failure.rpcMethod}`;
+  const httpStatus = failure.httpStatus === null ? "" : ` http_status=${failure.httpStatus}`;
+  const rpcCode = failure.rpcCode === null ? "" : ` rpc_code=${failure.rpcCode}`;
+  return `component=rpc reason=${failure.reason}${rpcMethod}${httpStatus}${rpcCode}`;
+}
+
 export function rpcOperationFailureFields(error) {
   if (error instanceof RpcPairOperationUnavailableError) {
     return "component=rpc reason=all_endpoints_unavailable";
   }
-  if (!(error instanceof RpcResponseRejectedError)) return null;
-  const httpStatus = error.httpStatus === undefined ? "" : ` http_status=${error.httpStatus}`;
-  const rpcCode = error.rpcCode === undefined ? "" : ` rpc_code=${error.rpcCode}`;
-  return `component=rpc reason=${error.reason} rpc_method=${error.rpcMethod}${httpStatus}${rpcCode}`;
+  const failure = rpcEndpointFailureFacts(error);
+  return failure === null ? null : rpcFailureFields(failure);
 }
 
 export function createFinalizedBoundary() {
@@ -40,6 +55,7 @@ export async function runRpcPairOperation({
   store,
   rpcClients,
   finalizedBoundary = createFinalizedBoundary(),
+  onEndpointFailure,
   onRecovery,
   signal,
 }) {
@@ -50,6 +66,9 @@ export async function runRpcPairOperation({
   }
   if (typeof onRecovery !== "undefined" && typeof onRecovery !== "function") {
     throw new Error("Publication recovery observer is invalid.");
+  }
+  if (typeof onEndpointFailure !== "undefined" && typeof onEndpointFailure !== "function") {
+    throw new Error("RPC endpoint failure observer is invalid.");
   }
 
   const recovery = await recoverPairPublication({ registry, pairId, store });
@@ -72,6 +91,8 @@ export async function runRpcPairOperation({
         recovery,
       };
     } catch (error) {
+      const failure = rpcEndpointFailureFacts(error);
+      if (failure !== null) onEndpointFailure?.(Object.freeze({ endpointIndex, error }));
       if (!(error instanceof RpcEndpointUnavailableError)) throw error;
     }
   }

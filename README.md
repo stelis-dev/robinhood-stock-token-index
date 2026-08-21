@@ -502,7 +502,11 @@ URL, provider response, token, exception message, or stack trace. Pair failure
 records include only the operation phase, PoolId, and fixed `component`,
 `operation`, and `reason` codes. A fatal RPC response also records the applicable
 fixed `rpc_method` value: `eth_chainId`, `eth_getBlockByNumber`, or
-`eth_getLogs`.
+`eth_getLogs`, its numeric `rpc_code` or `http_status` when present, and the
+variable name of the endpoint that returned it. If a later endpoint succeeds,
+the same success line includes each earlier failed endpoint variable name and
+its fixed reason, method, and numeric code. These fields report endpoint order
+without exposing or storing an endpoint URL.
 When pending publication recovery performs work, one additional fixed line says
 whether the previous state was retained or the next state was selected; idle
 recovery emits no line.

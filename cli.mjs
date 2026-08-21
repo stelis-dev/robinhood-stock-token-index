@@ -6,11 +6,15 @@ import { readPairPeriod, verifyPairIndex } from "./collector/pair-reader.mjs";
 import { loadPairRegistry, pairById } from "./collector/pair-registry.mjs";
 import {
   createFinalizedBoundary,
+  rpcEndpointFailureFacts,
   rpcOperationFailureFields,
   runRpcPairOperation,
 } from "./collector/rpc-operation.mjs";
 import { RpcClient } from "./collector/rpc-client.mjs";
-import { validateRpcUrl, maximumRpcEndpointCount } from "./collector/rpc-endpoint.mjs";
+import {
+  validateRpcUrl,
+  maximumRpcEndpointCount,
+} from "./collector/rpc-endpoint.mjs";
 import {
   collectionGroupBySchedule,
   loadCollectionPlan,
@@ -39,22 +43,75 @@ export function rpcEndpointSourceName(index) {
   return rpcEndpointSourceNames[index];
 }
 
-export function pairOperationSuccessLog(phase, pairId, index, environment) {
+function validateEndpointFailures(failures) {
+  if (!Array.isArray(failures) || failures.length > maximumRpcEndpointCount) {
+    throw new Error("RPC endpoint failure list is invalid.");
+  }
+  for (let index = 0; index < failures.length; index += 1) {
+    const entry = failures[index];
+    if (
+      entry === null
+      || typeof entry !== "object"
+      || Array.isArray(entry)
+      || entry.endpointIndex !== index
+      || rpcEndpointFailureFacts(entry.error) === null
+    ) {
+      throw new Error("RPC endpoint failure is invalid.");
+    }
+  }
+  return failures;
+}
+
+function sameRpcFailure(left, right) {
+  return left.reason === right.reason
+    && left.rpcMethod === right.rpcMethod
+    && left.httpStatus === right.httpStatus
+    && left.rpcCode === right.rpcCode;
+}
+
+function failedEndpointFields(failures) {
+  return failures.map(({ endpointIndex, error }, index) => {
+    const failure = rpcEndpointFailureFacts(error);
+    const prefix = `failed_rpc_${index}`;
+    const method = failure.rpcMethod === null ? "" : ` ${prefix}_method=${failure.rpcMethod}`;
+    const httpStatus = failure.httpStatus === null ? "" : ` ${prefix}_http_status=${failure.httpStatus}`;
+    const rpcCode = failure.rpcCode === null ? "" : ` ${prefix}_code=${failure.rpcCode}`;
+    return `${prefix}_endpoint_source=${rpcEndpointSourceName(endpointIndex)} ${prefix}_reason=${failure.reason}${method}${httpStatus}${rpcCode}`;
+  }).join(" ");
+}
+
+export function pairOperationSuccessLog(phase, pairId, index, environment, endpointFailures = []) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
   if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("RPC operation phase is invalid.");
   if (!isCanonicalBytes32(pairId)) throw new Error("Pair operation identity is invalid.");
-  return `pair_operation=${phase} status=success rpc_endpoint_source=${rpcEndpointSourceName(index)} pair_id=${pairId}\n`;
+  validateEndpointFailures(endpointFailures);
+  if (endpointFailures.length !== index) throw new Error("RPC endpoint success attempts are inconsistent.");
+  const failed = failedEndpointFields(endpointFailures);
+  return `pair_operation=${phase} status=success rpc_endpoint_source=${rpcEndpointSourceName(index)}${failed === "" ? "" : ` ${failed}`} pair_id=${pairId}\n`;
 }
 
-export function pairOperationFailureLog(phase, pairId, environment, error) {
+export function pairOperationFailureLog(phase, pairId, environment, error, endpointFailures = []) {
   if (environment?.GITHUB_ACTIONS !== "true") return null;
   if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("Pair operation phase is invalid.");
   if (!isCanonicalBytes32(pairId)) throw new Error("Pair operation identity is invalid.");
+  validateEndpointFailures(endpointFailures);
   const failure = githubStorageFailureFields(error)
     ?? rpcOperationFailureFields(error)
     ?? storedDataFailureFields(error);
   const fields = failure === null ? "component=collector reason=operation_rejected" : failure;
-  return `pair_operation=${phase} status=failed ${fields} pair_id=${pairId}\n`;
+  const directRpcFailure = rpcEndpointFailureFacts(error);
+  let currentEndpoint = "";
+  let previousFailures = endpointFailures;
+  if (directRpcFailure !== null && endpointFailures.length > 0) {
+    const current = endpointFailures.at(-1);
+    if (!sameRpcFailure(rpcEndpointFailureFacts(current.error), directRpcFailure)) {
+      throw new Error("RPC endpoint failure facts are inconsistent.");
+    }
+    currentEndpoint = ` rpc_endpoint_source=${rpcEndpointSourceName(current.endpointIndex)}`;
+    previousFailures = endpointFailures.slice(0, -1);
+  }
+  const failed = failedEndpointFields(previousFailures);
+  return `pair_operation=${phase} status=failed ${fields}${currentEndpoint}${failed === "" ? "" : ` ${failed}`} pair_id=${pairId}\n`;
 }
 
 export function publicationRecoveryLog(recovery, environment) {
@@ -161,12 +218,18 @@ function rpcClients(registry, environment, signal) {
 }
 
 function writeOperationSuccess(phase, pairId, completed, environment, writeLog) {
-  const line = pairOperationSuccessLog(phase, pairId, completed.selectedEndpointIndex, environment);
+  const line = pairOperationSuccessLog(
+    phase,
+    pairId,
+    completed.selectedEndpointIndex,
+    environment,
+    completed.endpointFailures,
+  );
   if (line !== null) writeLog(line);
 }
 
-function writeOperationFailure(phase, pairId, environment, error, writeLog) {
-  const line = pairOperationFailureLog(phase, pairId, environment, error);
+function writeOperationFailure(phase, pairId, environment, error, endpointFailures, writeLog) {
+  const line = pairOperationFailureLog(phase, pairId, environment, error, endpointFailures);
   if (line !== null) writeLog(line);
 }
 
@@ -186,6 +249,7 @@ async function runPairOperation({
   environment,
   writeLog,
 }) {
+  const endpointFailures = [];
   try {
     const completed = await runRpcPairOperation({
       operation: phase,
@@ -194,13 +258,16 @@ async function runPairOperation({
       store,
       rpcClients: clients,
       finalizedBoundary,
+      onEndpointFailure: (failure) => endpointFailures.push(failure),
       onRecovery: (recovery) => writeRecovery(recovery, environment, writeLog),
       signal,
     });
-    writeOperationSuccess(phase, pairId, completed, environment, writeLog);
-    return completed;
+    const observed = Object.freeze([...endpointFailures]);
+    const result = { ...completed, endpointFailures: observed };
+    writeOperationSuccess(phase, pairId, result, environment, writeLog);
+    return result;
   } catch (error) {
-    writeOperationFailure(phase, pairId, environment, error, writeLog);
+    writeOperationFailure(phase, pairId, environment, error, endpointFailures, writeLog);
     throw error;
   }
 }

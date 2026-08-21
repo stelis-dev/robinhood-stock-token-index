@@ -22,6 +22,14 @@ function responseRejected(reason, rpcMethod, facts = {}) {
   return new RpcResponseRejectedError(reason, { ...facts, rpcMethod });
 }
 
+function endpointFailure(reason, rpcMethod, facts = {}) {
+  return Object.freeze({ reason, rpcMethod, ...facts });
+}
+
+function endpointUnavailable(failure) {
+  return new RpcEndpointUnavailableError(failure.reason, failure);
+}
+
 function rpcErrorDisposition(rpcMethod, rpcCode) {
   if (immediateUnavailableRpcErrorCodes.has(rpcCode)) return "unavailable";
   if (rpcCode === 4444 && historicalDataRpcMethods.has(rpcMethod)) return "unavailable";
@@ -77,7 +85,11 @@ function validateRpcResult(result, request) {
     return { result };
   }
   if (request.method === rpcMethods.getBlockByNumber) {
-    if (result === null) return { retryable: true };
+    if (result === null) {
+      return {
+        retryable: endpointFailure("required_resource_unavailable", request.method),
+      };
+    }
     const block = exactBlock(result, request.method);
     const selector = request.params?.[0];
     if (isCanonicalHexQuantity(selector) && block.number !== BigInt(selector)) {
@@ -114,8 +126,9 @@ function validateRpcEntry(entry, request) {
     throw responseRejected("response_envelope_invalid", request.method);
   }
   const disposition = rpcErrorDisposition(request.method, entry.error.code);
-  if (disposition === "unavailable") return { unavailable: true };
-  if (disposition === "retryable") return { retryable: true };
+  const failure = endpointFailure("rpc_error", request.method, { rpcCode: entry.error.code });
+  if (disposition === "unavailable") return { unavailable: failure };
+  if (disposition === "retryable") return { retryable: failure };
   throw responseRejected("rpc_error", request.method, { rpcCode: entry.error.code });
 }
 
@@ -134,18 +147,18 @@ function validateRpcResponse(value, requests, batch) {
     byId.set(entry.id, entry);
   }
   const results = [];
-  let unavailable = false;
-  let retryable = false;
+  let unavailable = null;
+  let retryable = null;
   for (const request of requests) {
     const entry = byId.get(request.id);
     if (entry === undefined) throw responseRejected("response_envelope_invalid", rpcMethod);
     const validated = validateRpcEntry(entry, request);
-    if (validated.unavailable === true) unavailable = true;
-    if (validated.retryable === true) retryable = true;
+    if (validated.unavailable !== undefined && unavailable === null) unavailable = validated.unavailable;
+    if (validated.retryable !== undefined && retryable === null) retryable = validated.retryable;
     results.push(validated.result);
   }
-  if (unavailable) return { unavailable };
-  return retryable ? { retryable } : { results };
+  if (unavailable !== null) return { unavailable };
+  return retryable === null ? { results } : { retryable };
 }
 
 async function readBoundedResponse(response, maximumResponseBytes, rpcMethod) {
@@ -262,8 +275,8 @@ export class RpcClient {
     );
   }
 
-  async #retry(attempt, milliseconds = this.#backoff(attempt)) {
-    if (attempt === this.maximumRpcAttempts) throw new RpcEndpointUnavailableError();
+  async #retry(attempt, failure, milliseconds = this.#backoff(attempt)) {
+    if (attempt === this.maximumRpcAttempts) throw endpointUnavailable(failure);
     await this.sleep(milliseconds, this.signal);
   }
 
@@ -289,21 +302,24 @@ export class RpcClient {
         });
       } catch (error) {
         this.signal?.throwIfAborted();
-        await this.#retry(attempt);
+        await this.#retry(attempt, endpointFailure("transport_unavailable", rpcMethod));
         continue;
       }
       if (!response.ok) {
         await cancelResponseBody(response);
-        if (accessDeniedHttpStatuses.has(response.status)) throw new RpcEndpointUnavailableError();
+        if (accessDeniedHttpStatuses.has(response.status)) {
+          throw endpointUnavailable(endpointFailure("access_denied", rpcMethod, { httpStatus: response.status }));
+        }
         if (!isRetryableHttpStatus(response.status)) {
           throw responseRejected("http_rejected", rpcMethod, { httpStatus: response.status });
         }
+        const failure = endpointFailure("http_unavailable", rpcMethod, { httpStatus: response.status });
         const retryAfter = retryAfterMilliseconds(response.headers?.get?.("retry-after"), this.now());
         const retryDelay = retryAfter ?? this.#backoff(attempt);
         if (retryDelay > this.maximumRpcRetryDelayMilliseconds) {
-          throw new RpcEndpointUnavailableError();
+          throw endpointUnavailable(failure);
         }
-        await this.#retry(attempt, retryDelay);
+        await this.#retry(attempt, failure, retryDelay);
         continue;
       }
       let bytes;
@@ -312,7 +328,7 @@ export class RpcClient {
       } catch (error) {
         this.signal?.throwIfAborted();
         if (error instanceof RpcResponseRejectedError) throw error;
-        await this.#retry(attempt);
+        await this.#retry(attempt, endpointFailure("transport_unavailable", rpcMethod));
         continue;
       }
       let value;
@@ -322,9 +338,9 @@ export class RpcClient {
         throw responseRejected("response_not_json", rpcMethod);
       }
       const validated = validateRpcResponse(value, requests, batch);
-      if (validated.unavailable === true) throw new RpcEndpointUnavailableError();
-      if (validated.retryable === true) {
-        await this.#retry(attempt);
+      if (validated.unavailable !== undefined) throw endpointUnavailable(validated.unavailable);
+      if (validated.retryable !== undefined) {
+        await this.#retry(attempt, validated.retryable);
         continue;
       }
       return validated.results;

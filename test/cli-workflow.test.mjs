@@ -11,7 +11,10 @@ import {
 } from "../cli.mjs";
 import { loadPairRegistry } from "../collector/pair-registry.mjs";
 import { RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
-import { RpcPairOperationUnavailableError } from "../collector/rpc-operation.mjs";
+import {
+  rpcEndpointFailureFacts,
+  RpcPairOperationUnavailableError,
+} from "../collector/rpc-operation.mjs";
 import { loadCollectionPlan } from "../scheduler/collection-plan.mjs";
 import { GitHubStorageError } from "../storage/github-release-store.mjs";
 import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
@@ -73,6 +76,14 @@ test("the CLI fixes the registry primary and validates only two contiguous secre
 
 test("Actions logging reveals fixed operation, endpoint, and failure classifications only", () => {
   const pairId = `0x${"1".repeat(64)}`;
+  const primaryError = new RpcResponseRejectedError("rpc_error", {
+    rpcCode: -32000,
+    rpcMethod: "eth_getLogs",
+  });
+  const primaryFailure = Object.freeze({
+    endpointIndex: 0,
+    error: primaryError,
+  });
   assert.throws(() => new RpcResponseRejectedError("provider_specific_reason"), /reason is invalid/);
   assert.throws(() => new RpcResponseRejectedError("http_rejected"), /HTTP status is invalid/);
   assert.throws(() => new RpcResponseRejectedError("rpc_error"), /error code is invalid/);
@@ -84,8 +95,8 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
   assert.throws(() => rpcEndpointSourceName(3), /selection/);
   assert.equal(pairOperationSuccessLog("history", pairId, 1, {}), null);
   assert.equal(
-    pairOperationSuccessLog("history", pairId, 1, { GITHUB_ACTIONS: "true" }),
-    `pair_operation=history status=success rpc_endpoint_source=INDEX_RPC_FALLBACK_URL_0 pair_id=${pairId}\n`,
+    pairOperationSuccessLog("history", pairId, 1, { GITHUB_ACTIONS: "true" }, [primaryFailure]),
+    `pair_operation=history status=success rpc_endpoint_source=INDEX_RPC_FALLBACK_URL_0 failed_rpc_0_endpoint_source=registry.chain.primaryRpcUrl failed_rpc_0_reason=rpc_error failed_rpc_0_method=eth_getLogs failed_rpc_0_code=-32000 pair_id=${pairId}\n`,
   );
   assert.equal(pairOperationFailureLog("current", pairId, {}), null);
   assert.equal(
@@ -115,10 +126,18 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
       "history",
       pairId,
       { GITHUB_ACTIONS: "true" },
-      new RpcResponseRejectedError("rpc_error", { rpcCode: -32602, rpcMethod: "eth_getLogs" }),
+      primaryError,
+      [primaryFailure],
     ),
-    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_method=eth_getLogs rpc_code=-32602 pair_id=${pairId}\n`,
+    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_method=eth_getLogs rpc_code=-32000 rpc_endpoint_source=registry.chain.primaryRpcUrl pair_id=${pairId}\n`,
   );
+  assert.throws(() => pairOperationSuccessLog(
+    "history",
+    pairId,
+    1,
+    { GITHUB_ACTIONS: "true" },
+    [{ endpointIndex: 0, error: new Error("provider message") }],
+  ), /failure/);
   assert.equal(
     pairOperationFailureLog(
       "history",

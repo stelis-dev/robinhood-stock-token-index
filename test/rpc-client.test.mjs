@@ -202,6 +202,8 @@ test("RPC failures do not expose endpoint or untrusted provider text", async () 
   await assert.rejects(transport.verifyChain(0x1237), (error) => {
     assert.ok(error instanceof RpcEndpointUnavailableError);
     assert.equal(error.message, "RPC endpoint is unavailable.");
+    assert.equal(error.reason, "transport_unavailable");
+    assert.equal(error.rpcMethod, "eth_chainId");
     assert.doesNotMatch(error.message, new RegExp(endpointToken));
     return true;
   });
@@ -259,6 +261,9 @@ test("endpoint access denial skips local retries without exposing provider text"
   await assert.rejects(client.verifyChain(0x1237), (error) => {
     assert.ok(error instanceof RpcEndpointUnavailableError);
     assert.equal(error.message, "RPC endpoint is unavailable.");
+    assert.equal(error.reason, "access_denied");
+    assert.equal(error.rpcMethod, "eth_chainId");
+    assert.equal(error.httpStatus, 403);
     return true;
   });
   assert.equal(attempts, 1);
@@ -335,6 +340,9 @@ test("the RPC client bounds repeated transient failures", async () => {
   }));
   await assert.rejects(client.verifyChain(0x1237), (error) => {
     assert.ok(error instanceof RpcEndpointUnavailableError);
+    assert.equal(error.reason, "http_unavailable");
+    assert.equal(error.rpcMethod, "eth_chainId");
+    assert.equal(error.httpStatus, 503);
     return true;
   });
   assert.equal(attempts, 3);
@@ -574,6 +582,9 @@ test("repeated JSON-RPC resource-not-found errors exhaust to the endpoint availa
   await assert.rejects(client.verifyChain(0x1237), (error) => {
     assert.ok(error instanceof RpcEndpointUnavailableError);
     assert.equal(error.message, "RPC endpoint is unavailable.");
+    assert.equal(error.reason, "rpc_error");
+    assert.equal(error.rpcMethod, "eth_chainId");
+    assert.equal(error.rpcCode, -32001);
     return true;
   });
   assert.equal(attempts, 3);
@@ -594,7 +605,12 @@ test("JSON-RPC internal errors receive the configured retries", async () => {
     sleepImplementation: async () => {},
     nowImplementation: () => 10_000,
   }));
-  await assert.rejects(client.verifyChain(0x1237), (error) => error instanceof RpcEndpointUnavailableError);
+  await assert.rejects(client.verifyChain(0x1237), (error) => (
+    error instanceof RpcEndpointUnavailableError
+      && error.reason === "rpc_error"
+      && error.rpcMethod === "eth_chainId"
+      && error.rpcCode === -32603
+  ));
   assert.equal(attempts, 2);
 });
 

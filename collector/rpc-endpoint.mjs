@@ -8,6 +8,15 @@ export const rpcMethods = Object.freeze({
 
 const admittedRpcMethods = new Set(Object.values(rpcMethods));
 
+const rpcEndpointUnavailableReasons = new Set([
+  "access_denied",
+  "endpoint_unavailable",
+  "http_unavailable",
+  "required_resource_unavailable",
+  "rpc_error",
+  "transport_unavailable",
+]);
+
 const rpcResponseRejectionReasons = new Set([
   "activation_boundary_mismatch",
   "chain_identity_mismatch",
@@ -37,10 +46,37 @@ export function validateRpcUrl(value, label = "RPC URL") {
 }
 
 export class RpcEndpointUnavailableError extends Error {
-  constructor() {
+  #httpStatus;
+  #reason;
+  #rpcCode;
+  #rpcMethod;
+
+  constructor(reason = "endpoint_unavailable", { httpStatus, rpcCode, rpcMethod } = {}) {
+    if (!rpcEndpointUnavailableReasons.has(reason)) throw new Error("RPC endpoint-unavailable reason is invalid.");
+    const hasHttpStatus = Number.isSafeInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599;
+    const hasRpcCode = Number.isSafeInteger(rpcCode);
+    const hasRpcMethod = admittedRpcMethods.has(rpcMethod);
+    if ((reason === "access_denied" || reason === "http_unavailable") !== hasHttpStatus) {
+      throw new Error("RPC endpoint-unavailable HTTP status is invalid.");
+    }
+    if ((reason === "rpc_error") !== hasRpcCode) {
+      throw new Error("RPC endpoint-unavailable error code is invalid.");
+    }
+    if ((reason !== "endpoint_unavailable") !== hasRpcMethod) {
+      throw new Error("RPC endpoint-unavailable method is invalid.");
+    }
     super("RPC endpoint is unavailable.");
     this.name = "RpcEndpointUnavailableError";
+    this.#reason = reason;
+    this.#httpStatus = httpStatus;
+    this.#rpcCode = rpcCode;
+    this.#rpcMethod = rpcMethod;
   }
+
+  get httpStatus() { return this.#httpStatus; }
+  get reason() { return this.#reason; }
+  get rpcCode() { return this.#rpcCode; }
+  get rpcMethod() { return this.#rpcMethod; }
 }
 
 export class RpcResponseRejectedError extends Error {

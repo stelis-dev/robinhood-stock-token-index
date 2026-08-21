@@ -109,7 +109,11 @@ function joinCoverage(existing, replacement) {
 function assertFinalizedCoversStoredRange(state, pair, finalized) {
   const untilBlock = BigInt(state?.coverage.untilBlock ?? pair.activation.blockNumber);
   const requiredBlock = untilBlock === 0n ? 0n : untilBlock - 1n;
-  if (finalized.number < requiredBlock) throw new RpcEndpointUnavailableError();
+  if (finalized.number < requiredBlock) {
+    throw new RpcEndpointUnavailableError("required_resource_unavailable", {
+      rpcMethod: rpcMethods.getBlockByNumber,
+    });
+  }
 }
 
 function sameBlock(left, right) {
@@ -129,7 +133,9 @@ async function fixedFinalizedBlock({ registry, pair, rpc, state, finalizedBounda
     return finalizedBoundary.block;
   }
   if (providerFinalized.number < finalizedBoundary.block.number) {
-    throw new RpcEndpointUnavailableError();
+    throw new RpcEndpointUnavailableError("required_resource_unavailable", {
+      rpcMethod: rpcMethods.getBlockByNumber,
+    });
   }
   const providerCopy = providerFinalized.number === finalizedBoundary.block.number
     ? providerFinalized
