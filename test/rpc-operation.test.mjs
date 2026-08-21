@@ -9,6 +9,7 @@ import {
   RpcEndpointUnavailableError,
   RpcResponseRejectedError,
 } from "../collector/rpc-endpoint.mjs";
+import { RpcClient } from "../collector/rpc-client.mjs";
 import {
   createFinalizedBoundary,
   rpcEndpointFailureFacts,
@@ -55,10 +56,30 @@ test("availability after partial reads restarts the entire unpublished pair atte
     quoteAmountRaw: 2_500_000n,
   }));
   const primaryGetLogs = primary.getLogs.bind(primary);
+  const primaryRequestBodies = [];
+  const primaryTransport = new RpcClient({
+    url: "https://primary.example/private",
+    requestDelayMilliseconds: 1,
+    requestTimeoutMilliseconds: 1000,
+    maximumResponseBytes: 4096,
+    maximumRpcAttempts: 2,
+    maximumRpcRetryDelayMilliseconds: 10_000,
+    fetchImplementation: async (_url, init) => {
+      primaryRequestBodies.push(init.body);
+      const request = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32000, message: "provider details must remain private" },
+      }));
+    },
+    sleepImplementation: async () => {},
+    nowImplementation: () => 10_000,
+  });
   let primaryRanges = 0;
   primary.getLogs = async (input) => {
     primaryRanges += 1;
-    if (primaryRanges === 2) throw new RpcEndpointUnavailableError();
+    if (primaryRanges === 2) return primaryTransport.getLogs(input);
     return primaryGetLogs(input);
   };
   const fallback = new FakePairRpc({ registry, pair, finalizedNumber: activation + 360n });
@@ -89,11 +110,13 @@ test("availability after partial reads restarts the entire unpublished pair atte
   assert.equal(endpointFailures.length, 1);
   assert.equal(endpointFailures[0].endpointIndex, 0);
   assert.deepEqual(rpcEndpointFailureFacts(endpointFailures[0].error), {
-    reason: "endpoint_unavailable",
-    rpcMethod: null,
+    reason: "rpc_error",
+    rpcMethod: "eth_getLogs",
     httpStatus: null,
-    rpcCode: null,
+    rpcCode: -32000,
   });
+  assert.equal(primaryRequestBodies.length, 2);
+  assert.equal(new Set(primaryRequestBodies).size, 1);
   assert.equal(primary.logRequests[0].from, fallback.logRequests[0].from);
   assert.equal(primary.logRequests[0].to, fallback.logRequests[0].to);
   const state = await readPairState({ registry, pairId: pair.pairId, store: directory });
@@ -111,23 +134,34 @@ test("availability after partial reads restarts the entire unpublished pair atte
   assert.equal(writes.at(-1), "state");
 });
 
-test("the endpoint observer admits a fatal RPC code without provider text or URL", async () => {
+test("invalid RPC parameters remain fatal without exposing provider text or URL", async () => {
   const registry = await compactPairRegistry();
   const pair = pairEntryBySymbol(registry, "NVDA").pair;
-  const providerText = "private provider details https://secret.example/token";
+  const activation = BigInt(pair.activation.blockNumber);
   const observed = [];
+  const requestBodies = [];
   let fallbackUsed = false;
-  const fatalError = new RpcResponseRejectedError("rpc_error", {
-    rpcCode: -32000,
-    rpcMethod: "eth_getLogs",
-  });
-  const rejected = {
-    async verifyChain() {
-      throw fatalError;
+  const rejected = new FakePairRpc({ registry, pair, finalizedNumber: activation + 360n });
+  const invalidTransport = new RpcClient({
+    url: "https://primary.example/private",
+    requestDelayMilliseconds: 1,
+    requestTimeoutMilliseconds: 1000,
+    maximumResponseBytes: 4096,
+    maximumRpcAttempts: 2,
+    maximumRpcRetryDelayMilliseconds: 10_000,
+    fetchImplementation: async (_url, init) => {
+      requestBodies.push(init.body);
+      const request = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32602, message: "private provider details https://secret.example/token" },
+      }));
     },
-    providerText,
-  };
-  const store = (await countingDirectory(registry)).directory;
+    sleepImplementation: async () => {},
+  });
+  rejected.getLogs = (input) => invalidTransport.getLogs(input);
+  const { directory, store, writes } = await countingDirectory(registry);
   await assert.rejects(runRpcPairOperation({
     operation: "current",
     registry,
@@ -135,18 +169,20 @@ test("the endpoint observer admits a fatal RPC code without provider text or URL
     store,
     rpcClients: [rejected, { async verifyChain() { fallbackUsed = true; } }],
     onEndpointFailure: (failure) => observed.push(failure),
-  }), (error) => error instanceof RpcResponseRejectedError && error.rpcCode === -32000);
+  }), (error) => error instanceof RpcResponseRejectedError && error.rpcCode === -32602);
   assert.equal(fallbackUsed, false);
+  assert.equal(requestBodies.length, 1);
   assert.equal(observed.length, 1);
   assert.equal(observed[0].endpointIndex, 0);
-  assert.equal(observed[0].error, fatalError);
   assert.deepEqual(rpcEndpointFailureFacts(observed[0].error), {
     reason: "rpc_error",
     rpcMethod: "eth_getLogs",
     httpStatus: null,
-    rpcCode: -32000,
+    rpcCode: -32602,
   });
   assert.doesNotMatch(JSON.stringify(observed), /secret|provider details/);
+  assert.deepEqual(writes, []);
+  assert.equal(await directory.readSelectedState(pair.pairId), null);
 });
 
 test("a Swap header outside the fixed time range is fatal and cannot be dropped or retried on another endpoint", async () => {

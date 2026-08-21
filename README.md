@@ -481,9 +481,12 @@ read do not receive a pointless local retry. They also make the endpoint
 unavailable. In either case, the collector
 discards every unpublished result from that attempt and starts the complete
 operation again from the stored pair state using the next endpoint. It never
-combines data from two providers inside one attempt. Standard invalid-request,
-invalid-parameter, invalid-input, and transaction-rejected responses remain
-fatal because another provider must not hide a collector request defect.
+combines data from two providers inside one attempt. A `-32000` response to a
+read request already admitted by `RpcClient` receives the same bounded retry
+and endpoint replacement because provider implementations use that code for
+temporary read failures. Standard invalid-request (`-32600`), invalid-parameter
+(`-32602`), and transaction-rejected (`-32003`) responses remain fatal because
+another provider must not hide a collector request defect.
 
 Both phases of one pair `collect` use one fixed finalized block. If a later
 phase or fallback endpoint is selected, that endpoint must return the same block

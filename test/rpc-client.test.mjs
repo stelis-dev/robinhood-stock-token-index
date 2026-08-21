@@ -364,8 +364,8 @@ test("all server-side HTTP failures receive the configured retries", async () =>
   assert.equal(attempts, 2);
 });
 
-test("unassigned implementation-defined server errors retry the identical admitted request", async () => {
-  for (const code of [-32099, -32007]) {
+test("validated read server errors retry the identical admitted request", async () => {
+  for (const code of [-32099, -32007, -32000]) {
     const bodies = [];
     let attempts = 0;
     const client = new RpcClient(clientOptions({
@@ -397,20 +397,25 @@ test("unassigned implementation-defined server errors retry the identical admitt
       return new Response(JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
-        error: { code: -32099, message: "provider server details must remain private" },
+        error: { code: -32000, message: "provider server details must remain private" },
       }));
     },
     sleepImplementation: async () => {},
   }));
   await assert.rejects(
     exhausted.getLogs(logRequest),
-    (error) => error instanceof RpcEndpointUnavailableError,
+    (error) => (
+      error instanceof RpcEndpointUnavailableError
+        && error.reason === "rpc_error"
+        && error.rpcCode === -32000
+        && error.rpcMethod === "eth_getLogs"
+    ),
   );
   assert.equal(exhaustedAttempts, 2);
 });
 
-test("Ethereum invalid-input responses remain fatal", async () => {
-  for (const code of [-32000, -32003]) {
+test("invalid request, invalid parameters, and transaction rejection remain fatal", async () => {
+  for (const code of [-32600, -32602, -32003]) {
     let attempts = 0;
     const client = new RpcClient(clientOptions({
       fetchImplementation: async () => {

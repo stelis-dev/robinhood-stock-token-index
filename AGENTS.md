@@ -130,10 +130,13 @@ Terms used in this file:
   endpoint. Never combine data from two RPC providers in one attempt. Stop
   without fallback when chain identity, pool activation data, response
   structure, request validity, numeric bounds, cancellation, or stored-data
-  integrity is invalid. Standard invalid-request, invalid-parameter,
-  invalid-input, and transaction-rejected JSON-RPC responses remain fatal;
-  unassigned implementation-defined server errors are endpoint availability
-  failures.
+  integrity is invalid. Standard invalid-request (`-32600`), invalid-parameter
+  (`-32602`), and transaction-rejected (`-32003`) JSON-RPC responses remain
+  fatal. A `-32000` response to
+  a read request already admitted by `RpcClient` is an endpoint availability
+  failure: retry the identical request within the configured bound and then
+  restart the complete operation on the next endpoint. Unassigned
+  implementation-defined server errors are also endpoint availability failures.
 - Each optional fallback RPC is one complete URL read from its corresponding
   GitHub Actions repository secret. Do not read it from a repository variable or
   construct it from a provider URL and token.

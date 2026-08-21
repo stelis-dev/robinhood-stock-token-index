@@ -10,7 +10,7 @@ import {
   selectRpcUrls,
 } from "../cli.mjs";
 import { loadPairRegistry } from "../collector/pair-registry.mjs";
-import { RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
+import { RpcEndpointUnavailableError, RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
 import {
   rpcEndpointFailureFacts,
   RpcPairOperationUnavailableError,
@@ -76,7 +76,7 @@ test("the CLI fixes the registry primary and validates only two contiguous secre
 
 test("Actions logging reveals fixed operation, endpoint, and failure classifications only", () => {
   const pairId = `0x${"1".repeat(64)}`;
-  const primaryError = new RpcResponseRejectedError("rpc_error", {
+  const primaryError = new RpcEndpointUnavailableError("rpc_error", {
     rpcCode: -32000,
     rpcMethod: "eth_getLogs",
   });
@@ -126,10 +126,18 @@ test("Actions logging reveals fixed operation, endpoint, and failure classificat
       "history",
       pairId,
       { GITHUB_ACTIONS: "true" },
-      primaryError,
+      new RpcPairOperationUnavailableError(),
       [primaryFailure],
     ),
-    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_method=eth_getLogs rpc_code=-32000 rpc_endpoint_source=registry.chain.primaryRpcUrl pair_id=${pairId}\n`,
+    `pair_operation=history status=failed component=rpc reason=all_endpoints_unavailable failed_rpc_0_endpoint_source=registry.chain.primaryRpcUrl failed_rpc_0_reason=rpc_error failed_rpc_0_method=eth_getLogs failed_rpc_0_code=-32000 pair_id=${pairId}\n`,
+  );
+  const invalidParameters = new RpcResponseRejectedError("rpc_error", {
+    rpcCode: -32602,
+    rpcMethod: "eth_getLogs",
+  });
+  assert.equal(
+    pairOperationFailureLog("history", pairId, { GITHUB_ACTIONS: "true" }, invalidParameters),
+    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_method=eth_getLogs rpc_code=-32602 pair_id=${pairId}\n`,
   );
   assert.throws(() => pairOperationSuccessLog(
     "history",

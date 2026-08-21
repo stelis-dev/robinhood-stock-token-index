@@ -16,7 +16,7 @@ const historicalDataRpcMethods = new Set([
   rpcMethods.getBlockByNumber,
   rpcMethods.getLogs,
 ]);
-const retryableRpcErrorCodes = new Set([-32603, -32001, -32002, -32005]);
+const retryableValidatedReadRpcErrorCodes = new Set([-32603, -32000, -32001, -32002, -32005]);
 
 function responseRejected(reason, rpcMethod, facts = {}) {
   return new RpcResponseRejectedError(reason, { ...facts, rpcMethod });
@@ -33,7 +33,7 @@ function endpointUnavailable(failure) {
 function rpcErrorDisposition(rpcMethod, rpcCode) {
   if (immediateUnavailableRpcErrorCodes.has(rpcCode)) return "unavailable";
   if (rpcCode === 4444 && historicalDataRpcMethods.has(rpcMethod)) return "unavailable";
-  if (retryableRpcErrorCodes.has(rpcCode) || (rpcCode >= -32099 && rpcCode <= -32007)) return "retryable";
+  if (retryableValidatedReadRpcErrorCodes.has(rpcCode) || (rpcCode >= -32099 && rpcCode <= -32007)) return "retryable";
   if (rpcMethod === rpcMethods.getBlockByNumber && rpcCode === -39001) return "retryable";
   return "rejected";
 }
