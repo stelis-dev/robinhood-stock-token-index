@@ -29,14 +29,14 @@ test("the CLI validates one PoolId and sends read and storage options to their r
     store: "directory",
     root: "/tmp/index",
     repository: undefined,
-    from: undefined,
-    until: undefined,
+    month: undefined,
+    resolution: undefined,
   });
   assert.deepEqual(parseArguments([
     "read",
     "--pair", pairId,
-    "--from", "2026-08-14T14:01:00.000Z",
-    "--until", "2026-08-14T15:01:00.000Z",
+    "--month", "2026-08",
+    "--resolution", "4h",
     "--store", "github",
     "--repository", "owner/repo",
   ]), {
@@ -45,12 +45,12 @@ test("the CLI validates one PoolId and sends read and storage options to their r
     store: "github",
     root: undefined,
     repository: "owner/repo",
-    from: "2026-08-14T14:01:00.000Z",
-    until: "2026-08-14T15:01:00.000Z",
+    month: "2026-08",
+    resolution: "4h",
   });
   assert.throws(() => parseArguments(["verify", "--store", "directory", "--root", "/tmp/index"]), /exactly one/);
-  assert.throws(() => parseArguments(["read", "--pair", pairId, "--store", "directory", "--root", "/tmp/index"]), /--from and --until/);
-  assert.throws(() => parseArguments(["collect", "--pair", pairId, "--from", "2026-08-14T14:01:00.000Z", "--store", "directory", "--root", "/tmp/index"]), /Only read/);
+  assert.throws(() => parseArguments(["read", "--pair", pairId, "--store", "directory", "--root", "/tmp/index"]), /--month and --resolution/);
+  assert.throws(() => parseArguments(["collect", "--pair", pairId, "--month", "2026-08", "--store", "directory", "--root", "/tmp/index"]), /Only read/);
   assert.throws(() => parseArguments(["collect", "--pair", pairId, "--store", "github", "--repository", "owner/repo", "--root", "/tmp/index"]), /cannot cross/);
 });
 

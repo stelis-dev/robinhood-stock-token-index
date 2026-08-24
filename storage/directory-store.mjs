@@ -5,7 +5,6 @@ import {
   validateStoredReference,
   validateGeneration,
   validatePairId,
-  validatePairMonth,
   validateStateIdentity,
   validateStateBytes,
   parseStateObjectName,
@@ -75,7 +74,7 @@ async function immutableWrite(path, bytes, maximumBytes) {
 function referenceDirectory(root, reference) {
   const identity = validateStoredReference(reference);
   const pairRoot = join(root, "pairs", identity.pairId);
-  const pairMonth = identity.kind === "month" ? identity.period : identity.period.slice(0, 7);
+  const pairMonth = identity.kind === "day" ? identity.period.slice(0, 7) : identity.period;
   return join(pairRoot, "months", pairMonth);
 }
 
@@ -134,12 +133,6 @@ export class DirectoryStore {
       await readBoundedFile(referencePath(this.root, reference), this.maximumArtifactBytes),
       this.maximumArtifactBytes,
     );
-  }
-
-  async resolvePairMonth(pairId, pairMonth) {
-    validatePairId(pairId);
-    validatePairMonth(pairMonth);
-    return "present";
   }
 
   async writeReferenced(reference, gzipBytes) {

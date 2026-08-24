@@ -2,7 +2,7 @@
 
 import { pathToFileURL } from "node:url";
 import { isCanonicalBytes32 } from "./collector/hex-data.mjs";
-import { readPairPeriod, verifyPairIndex } from "./collector/pair-reader.mjs";
+import { readPairMonthResolution, verifyPairIndex } from "./collector/pair-reader.mjs";
 import { loadPairRegistry, pairById } from "./collector/pair-registry.mjs";
 import {
   createFinalizedBoundary,
@@ -17,6 +17,7 @@ import {
 } from "./collector/rpc-endpoint.mjs";
 import {
   collectionGroupBySchedule,
+  githubMutationIntervalMilliseconds,
   loadCollectionPlan,
 } from "./scheduler/collection-plan.mjs";
 import { runCollectionGroup } from "./scheduler/run-collection-group.mjs";
@@ -25,7 +26,7 @@ import { githubStorageFailureFields } from "./storage/github-release-store.mjs";
 import { storedDataFailureFields } from "./storage/stored-files.mjs";
 
 const operations = new Set(["collect", "read", "repair", "verify"]);
-const flags = new Set(["--from", "--group", "--pair", "--repository", "--root", "--schedule", "--store", "--until"]);
+const flags = new Set(["--group", "--month", "--pair", "--repository", "--resolution", "--root", "--schedule", "--store"]);
 const fallbackEnvironmentNames = Object.freeze([
   "INDEX_RPC_FALLBACK_URL_0",
   "INDEX_RPC_FALLBACK_URL_1",
@@ -191,17 +192,19 @@ export function parseArguments(argv) {
   if (store === "directory" && !values["--root"]) throw new Error("Directory storage requires --root.");
   if (store === "github" && !values["--repository"]) throw new Error("GitHub storage requires --repository.");
   if (store === "directory" && values["--repository"] || store === "github" && values["--root"]) throw new Error("Storage options cannot cross adapter boundaries.");
-  const hasPeriod = values["--from"] !== undefined || values["--until"] !== undefined;
-  if (operation === "read" && (!values["--from"] || !values["--until"])) throw new Error("Read requires --from and --until.");
-  if (operation !== "read" && hasPeriod) throw new Error("Only read accepts --from and --until.");
+  const hasStoredSelection = values["--month"] !== undefined || values["--resolution"] !== undefined;
+  if (operation === "read" && (!values["--month"] || !values["--resolution"])) {
+    throw new Error("Read requires --month and --resolution.");
+  }
+  if (operation !== "read" && hasStoredSelection) throw new Error("Only read accepts --month and --resolution.");
   return {
     operation,
     target: { kind: targetKind, id: targetId },
     store,
     root: values["--root"],
     repository: values["--repository"],
-    from: values["--from"],
-    until: values["--until"],
+    month: values["--month"],
+    resolution: values["--resolution"],
   };
 }
 
@@ -276,8 +279,9 @@ function pairOptions(options, pairId) {
   return { ...options, target: { kind: "pair", id: pairId } };
 }
 
-function createOperationContext(options, registry, { environment, signal, writeLog }) {
+function createOperationContext(options, registry, { collectionPlan, environment, signal, writeLog }) {
   const mutates = options.operation === "collect" || options.operation === "repair";
+  if (mutates && collectionPlan === null) throw new Error("Collection plan is required for a mutation.");
   if (options.store === "github" && mutates && (typeof environment.GITHUB_TOKEN !== "string" || environment.GITHUB_TOKEN.length === 0)) {
     throw new Error("GitHub token is required for storage mutation.");
   }
@@ -291,6 +295,7 @@ function createOperationContext(options, registry, { environment, signal, writeL
       repository: options.repository,
       token: environment.GITHUB_TOKEN,
       maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+      minimumMutationIntervalMilliseconds: mutates ? githubMutationIntervalMilliseconds(collectionPlan) : 0,
       signal,
     }),
     clients: mutates ? Object.freeze(rpcClients(registry, environment, signal)) : null,
@@ -306,10 +311,12 @@ export async function runPairCommand(options, registry, context) {
   if (options.operation === "verify") {
     result = await verifyPairIndex({ registry, pairId, store });
   } else if (options.operation === "read") {
-    result = await readPairPeriod({
+    result = await readPairMonthResolution({
       registry,
+      pairId,
+      ownerMonth: options.month,
+      resolution: options.resolution,
       store,
-      input: { pairId, from: options.from, until: options.until },
     });
   } else {
     if (clients === null) throw new Error("RPC operation context is unavailable.");
@@ -343,12 +350,14 @@ export async function main(argv, {
 } = {}) {
   const options = parseArguments(argv);
   const registry = await loadPairRegistry();
-  const context = createContext(options, registry, { environment, signal, writeLog });
+  const mutates = options.operation === "collect" || options.operation === "repair";
+  const collectionPlan = mutates ? await loadCollectionPlan(registry) : null;
+  const context = createContext(options, registry, { collectionPlan, environment, signal, writeLog });
   let envelope;
   if (options.target.kind === "pair") {
     envelope = await pairOperation(options, registry, context);
   } else {
-    const collectionPlan = await loadCollectionPlan(registry);
+    if (collectionPlan === null) throw new Error("Collection plan is unavailable for a group operation.");
     const groupId = options.target.kind === "group"
       ? options.target.id
       : collectionGroupBySchedule(collectionPlan, options.target.id).groupId;

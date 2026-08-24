@@ -1,15 +1,23 @@
+import { pairDayLogicalId, pairMonthLogicalId } from "./pair-file-identity.mjs";
 import {
-  createPairReference,
-  encodePairDay,
-  encodePairMonth,
-  encodePairState,
-  pairDayLogicalId,
-  pairMonthLogicalId,
-} from "./pair-artifact.mjs";
+  affectedResolutionOwnerMonths,
+  candleResolutionCatalog,
+  createResolutionArtifacts,
+} from "./candle-resolution.mjs";
+import { canonicalBytes } from "./canonical.mjs";
 import { CandleAccumulator, mergePairCandles } from "./candles.mjs";
+import {
+  createPairFileReference,
+  encodePairDayFile,
+  encodePairMonthFile,
+  encodePairStateFile,
+  encodeResolutionArtifact,
+  pairMonthSourceIds,
+} from "./pair-files.mjs";
 import {
   readPairDay,
   readPairMonth,
+  readPairResolution,
   readPairStateSelection,
 } from "./pair-reader.mjs";
 import { pairById } from "./pair-registry.mjs";
@@ -61,8 +69,13 @@ function replaceReference(references, replacement) {
     .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
 }
 
+function replaceResolutionReference(references, replacement) {
+  return [...references.filter((reference) => reference.logicalId !== replacement.logicalId), replacement]
+    .sort((left, right) => left.intervalSeconds - right.intervalSeconds);
+}
+
 function coverageFromReferences(references) {
-  if (!Array.isArray(references) || references.length === 0) throw new Error("An index artifact cannot be built without child references.");
+  if (!Array.isArray(references) || references.length === 0) throw new Error("A parent file cannot be built without child references.");
   return {
     fromBlock: references[0].coverage.fromBlock,
     fromTimestamp: references[0].coverage.fromTimestamp,
@@ -293,23 +306,50 @@ async function assertSelectedStateUnchanged({ registry, pairId, store, previousS
   }
 }
 
-async function loadAffectedArtifacts({ registry, pair, store, state, partitions }) {
+function utcDays(fromTimestamp, untilTimestamp) {
+  const output = [];
+  const cursor = new Date(fromTimestamp);
+  cursor.setUTCHours(0, 0, 0, 0);
+  while (cursor.getTime() < Date.parse(untilTimestamp)) {
+    output.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return output;
+}
+
+function createArtifactLoader({ registry, pair, store, state }) {
   const months = new Map();
   const days = new Map();
-  const affectedMonths = [...new Set(partitions.map((partition) => partition.day.slice(0, 7)))].sort();
-  for (const pairMonth of affectedMonths) {
-    const monthReference = state?.months.find((candidate) => candidate.logicalId === pairMonthLogicalId(pair.pairId, pairMonth));
-    const month = monthReference ? await readPairMonth({ registry, store, reference: monthReference }) : null;
-    months.set(pairMonth, { value: month, reference: monthReference ?? null });
-    for (const partition of partitions.filter((candidate) => candidate.day.startsWith(`${pairMonth}-`))) {
-      const reference = month?.days.find((candidate) => candidate.logicalId === pairDayLogicalId(pair.pairId, partition.day));
-      days.set(partition.day, {
-        value: reference ? await readPairDay({ registry, store, reference }) : null,
-        reference: reference ?? null,
-      });
-    }
-  }
-  return { months, days };
+  const resolutions = new Map();
+  return {
+    async month(pairMonth) {
+      if (months.has(pairMonth)) return months.get(pairMonth);
+      const reference = state?.months.find((candidate) => candidate.logicalId === pairMonthLogicalId(pair.pairId, pairMonth)) ?? null;
+      const value = reference === null ? null : await readPairMonth({ registry, store, reference });
+      const entry = { value, reference };
+      months.set(pairMonth, entry);
+      return entry;
+    },
+    async day(period) {
+      if (days.has(period)) return days.get(period);
+      const month = await this.month(period.slice(0, 7));
+      const reference = month.value?.days.find((candidate) => candidate.logicalId === pairDayLogicalId(pair.pairId, period)) ?? null;
+      const value = reference === null ? null : await readPairDay({ registry, store, reference });
+      const entry = { value, reference };
+      days.set(period, entry);
+      return entry;
+    },
+    async resolution(ownerMonth, intervalSeconds) {
+      const key = `${ownerMonth}:${intervalSeconds}`;
+      if (resolutions.has(key)) return resolutions.get(key);
+      const month = await this.month(ownerMonth);
+      const reference = month.value?.resolutions.find((candidate) => candidate.intervalSeconds === intervalSeconds) ?? null;
+      const value = reference === null ? null : await readPairResolution({ registry, store, reference });
+      const entry = { value, reference };
+      resolutions.set(key, entry);
+      return entry;
+    },
+  };
 }
 
 function expectedStateCoverage(previous, pair, range, phase) {
@@ -338,10 +378,44 @@ function expectedStateCoverage(previous, pair, range, phase) {
   return { ...existing };
 }
 
+function joinTimeCoverage(existing, replacement) {
+  if (existing === null) return { ...replacement };
+  const ordered = [existing, replacement].sort((left, right) => left.fromTimestamp.localeCompare(right.fromTimestamp));
+  if (ordered[0].untilTimestamp < ordered[1].fromTimestamp) throw new Error("Resolution replacement would create a time-coverage gap.");
+  return {
+    fromTimestamp: ordered[0].fromTimestamp,
+    untilTimestamp: ordered[0].untilTimestamp >= ordered[1].untilTimestamp
+      ? ordered[0].untilTimestamp
+      : ordered[1].untilTimestamp,
+  };
+}
+
+function mergeResolutionArtifact(existing, replacement, sequence) {
+  if (replacement === null) return existing;
+  if (existing === null) return { ...replacement, sequence };
+  if (
+    existing.pair.pairId !== replacement.pair.pairId
+    || existing.ownerMonth !== replacement.ownerMonth
+    || existing.intervalSeconds !== replacement.intervalSeconds
+  ) throw new Error("Resolution replacement identity is invalid.");
+  return {
+    ...existing,
+    sequence,
+    timeCoverage: joinTimeCoverage(existing.timeCoverage, replacement.timeCoverage),
+    candles: [
+      ...existing.candles.filter((candle) => (
+        candle.intervalStart < replacement.timeCoverage.fromTimestamp
+        || candle.intervalStart >= replacement.timeCoverage.untilTimestamp
+      )),
+      ...replacement.candles,
+    ].sort((left, right) => left.intervalStart.localeCompare(right.intervalStart)),
+  };
+}
+
 async function buildReplacement({ registry, pair, store, previousSelection, phase, range, collected }) {
   const previous = previousSelection?.state ?? null;
   const expectedCoverage = expectedStateCoverage(previous, pair, range, phase);
-  const existing = await loadAffectedArtifacts({ registry, pair, store, state: previous, partitions: collected.partitions });
+  const loader = createArtifactLoader({ registry, pair, store, state: previous });
   const sequence = previous === null ? 1 : previous.sequence + 1;
   const candlesByDay = new Map();
   for (const candle of collected.candles) {
@@ -352,12 +426,11 @@ async function buildReplacement({ registry, pair, store, previousSelection, phas
   }
 
   const encodedDays = [];
-  const replacementDays = new Map();
+  const candidateDays = new Map();
   for (const partition of collected.partitions) {
-    const currentEntry = existing.days.get(partition.day);
+    const currentEntry = await loader.day(partition.day);
     const current = currentEntry?.value ?? null;
     const day = {
-      contractVersion: "1",
       kind: "pair_candle_day",
       pair,
       sequence,
@@ -370,42 +443,128 @@ async function buildReplacement({ registry, pair, store, previousSelection, phas
         partition.coverage.untilTimestamp,
       ),
     };
-    const encoded = encodePairDay(day, { registry });
-    const reference = createPairReference({ encoded, context: { registry } });
+    const encoded = encodePairDayFile(day, { registry });
+    const reference = createPairFileReference({ encoded, context: { registry } });
     encodedDays.push({
       value: day,
       reference,
       encoded,
       previousReference: currentEntry?.reference ?? null,
     });
-    replacementDays.set(partition.day, reference);
+    candidateDays.set(partition.day, { value: day, reference });
+  }
+
+  const canonicalChangedMonths = new Set(collected.partitions.map((partition) => partition.day.slice(0, 7)));
+  const affectedByResolution = new Map();
+  const ownerMonths = new Set(canonicalChangedMonths);
+  for (const definition of candleResolutionCatalog.slice(1)) {
+    const owners = affectedResolutionOwnerMonths({
+      fromTimestamp: range.fromTimestamp,
+      untilTimestamp: range.untilTimestamp,
+      intervalSeconds: definition.intervalSeconds,
+    });
+    affectedByResolution.set(definition.intervalSeconds, owners);
+    for (const owner of owners) ownerMonths.add(owner);
+  }
+
+  async function candidateDay(period) {
+    return candidateDays.get(period) ?? loader.day(period);
+  }
+
+  const resolutionRequests = [];
+  for (const definition of candleResolutionCatalog.slice(1)) {
+    const intervalMilliseconds = definition.intervalSeconds * 1_000;
+    const from = Math.floor(Date.parse(range.fromTimestamp) / intervalMilliseconds) * intervalMilliseconds;
+    const until = Math.ceil(Date.parse(range.untilTimestamp) / intervalMilliseconds) * intervalMilliseconds;
+    const fromTimestamp = new Date(Math.max(from, Date.parse(expectedCoverage.fromTimestamp))).toISOString();
+    const untilTimestamp = new Date(Math.min(until, Date.parse(expectedCoverage.untilTimestamp))).toISOString();
+    if (fromTimestamp >= untilTimestamp) continue;
+    for (const ownerMonth of affectedByResolution.get(definition.intervalSeconds)) {
+      resolutionRequests.push({
+        sequence,
+        ownerMonth,
+        intervalSeconds: definition.intervalSeconds,
+        fromTimestamp,
+        untilTimestamp,
+      });
+    }
+  }
+  const sourceFrom = resolutionRequests.reduce(
+    (value, request) => value === null || request.fromTimestamp < value ? request.fromTimestamp : value,
+    null,
+  );
+  const sourceUntil = resolutionRequests.reduce(
+    (value, request) => value === null || request.untilTimestamp > value ? request.untilTimestamp : value,
+    null,
+  );
+  const resolutionSourceEntries = [];
+  if (sourceFrom !== null && sourceUntil !== null) {
+    for (const period of utcDays(sourceFrom, sourceUntil)) {
+      const entry = await candidateDay(period);
+      if (entry.value === null) throw new Error("Resolution source day is unavailable inside candidate coverage.");
+      resolutionSourceEntries.push(entry);
+    }
+  }
+  const fragments = resolutionRequests.length === 0 ? [] : createResolutionArtifacts({
+    registry,
+    pair,
+    sourceCoverage: coverageFromReferences(resolutionSourceEntries.map((entry) => entry.reference)),
+    candles: resolutionSourceEntries.flatMap((entry) => entry.value.candles),
+    requests: resolutionRequests,
+  });
+  const encodedResolutions = [];
+  const candidateResolutionReferences = new Map();
+  for (const fragmentEntry of fragments) {
+    const { artifact: fragment, ownerMonth, intervalSeconds } = fragmentEntry;
+    if (fragment === null) continue;
+    const currentEntry = await loader.resolution(ownerMonth, intervalSeconds);
+    const value = mergeResolutionArtifact(currentEntry.value, fragment, sequence);
+    const unchanged = currentEntry.value !== null
+      && canonicalBytes({ ...value, sequence: currentEntry.value.sequence }).equals(canonicalBytes(currentEntry.value));
+    if (unchanged) {
+      candidateResolutionReferences.set(`${ownerMonth}:${intervalSeconds}`, currentEntry.reference);
+      continue;
+    }
+    const encoded = encodeResolutionArtifact(value, { registry });
+    const reference = createPairFileReference({ encoded, context: { registry } });
+    encodedResolutions.push({ value, reference, encoded, previousReference: currentEntry.reference });
+    candidateResolutionReferences.set(`${ownerMonth}:${intervalSeconds}`, reference);
   }
 
   const encodedMonths = [];
   const replacementMonths = new Map();
-  for (const pairMonth of [...new Set(collected.partitions.map((partition) => partition.day.slice(0, 7)))].sort()) {
-    const currentEntry = existing.months.get(pairMonth);
-    let references = [...(currentEntry?.value?.days ?? [])];
-    for (const [day, replacement] of replacementDays) {
-      if (day.startsWith(`${pairMonth}-`)) references = replaceReference(references, replacement);
+  for (const pairMonth of [...ownerMonths].sort()) {
+    const currentEntry = await loader.month(pairMonth);
+    if (currentEntry.value === null && !canonicalChangedMonths.has(pairMonth)) continue;
+    let dayReferences = [...(currentEntry.value?.days ?? [])];
+    for (const [period, entry] of candidateDays) {
+      if (period.startsWith(`${pairMonth}-`)) dayReferences = replaceReference(dayReferences, entry.reference);
     }
+    if (dayReferences.length === 0) continue;
+    let resolutionReferences = [...(currentEntry.value?.resolutions ?? [])];
+    for (const definition of candleResolutionCatalog.slice(1)) {
+      const replacement = candidateResolutionReferences.get(`${pairMonth}:${definition.intervalSeconds}`);
+      if (replacement !== undefined) resolutionReferences = replaceResolutionReference(resolutionReferences, replacement);
+    }
+    if (![...dayReferences, ...resolutionReferences].some((reference) => reference.sequence === sequence)) continue;
     const month = {
-      contractVersion: "1",
       kind: "pair_candle_month",
       pair,
       sequence,
       month: pairMonth,
-      coverage: coverageFromReferences(references),
-      days: references,
+      coverage: coverageFromReferences(dayReferences),
+      days: dayReferences,
+      sourceMonths: pairMonthSourceIds(pair.pairId, pairMonth, resolutionReferences),
+      resolutions: resolutionReferences,
     };
-    const encoded = encodePairMonth(month, { registry });
-    const reference = createPairReference({ encoded, context: { registry } });
+    const encoded = encodePairMonthFile(month, { registry });
+    const reference = createPairFileReference({ encoded, context: { registry } });
     encodedMonths.push({
       value: month,
       reference,
       encoded,
-      previousReference: currentEntry?.reference ?? null,
-      previousValue: currentEntry?.value ?? null,
+      previousReference: currentEntry.reference,
+      previousValue: currentEntry.value,
     });
     replacementMonths.set(pairMonth, reference);
   }
@@ -415,15 +574,15 @@ async function buildReplacement({ registry, pair, store, previousSelection, phas
   const derivedCoverage = coverageFromReferences(monthReferences);
   if (!sameCoverage(derivedCoverage, expectedCoverage)) throw new Error("Rebuilt pair state does not match the operation coverage.");
   const state = {
-    contractVersion: "1",
     kind: "pair_candle_state",
     pair,
     sequence,
     coverage: expectedCoverage,
+    resolutions: candleResolutionCatalog,
     months: monthReferences,
   };
-  const encodedState = encodePairState(state, { registry });
-  return { state, encodedState, encodedDays, encodedMonths };
+  const encodedState = encodePairStateFile(state, { registry });
+  return { state, encodedState, encodedDays, encodedResolutions, encodedMonths };
 }
 
 async function publishReplacement({ registry, pair, store, previousSelection, phase, range, collected, signal }) {

@@ -1,5 +1,9 @@
 import { isSha256Hex, sha256Hex } from "../collector/canonical.mjs";
 import { isCanonicalBytes32 } from "../collector/hex-data.mjs";
+import {
+  pairDayResolutionLabel,
+  parsePairFileLogicalId,
+} from "../collector/pair-file-identity.mjs";
 
 export class StoredDataIntegrityError extends Error {
   constructor() {
@@ -13,9 +17,6 @@ export function storedDataFailureFields(error) {
     ? "component=stored_data reason=integrity_rejected"
     : null;
 }
-
-const monthPattern = /^\d{4}-\d{2}$/;
-const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
 
 function exactKeys(value, keys, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -32,36 +33,29 @@ export function validateGeneration(value, label = "generation") {
   return value;
 }
 
-function canonicalPeriod(value, kind) {
-  const pattern = kind === "month" ? monthPattern : dayPattern;
-  if (typeof value !== "string" || !pattern.test(value)) throw new Error(`Reference ${kind} is invalid.`);
-  const instant = kind === "month" ? `${value}-01T00:00:00.000Z` : `${value}T00:00:00.000Z`;
-  const width = kind === "month" ? 7 : 10;
-  if (Number.isNaN(Date.parse(instant)) || new Date(instant).toISOString().slice(0, width) !== value) {
-    throw new Error(`Reference ${kind} is invalid.`);
-  }
-  return value;
-}
-
-export function validatePairMonth(value) {
-  return canonicalPeriod(value, "month");
-}
-
-export function parseStoredReferenceId(value) {
-  if (typeof value !== "string") throw new Error("Stored reference ID is invalid.");
-  const match = value.match(/^pairs\/(0x[0-9a-f]{64})\/(months|days)\/(.+)$/);
-  if (!match) throw new Error("Stored reference ID is invalid.");
-  const kind = match[2] === "months" ? "month" : "day";
-  return {
-    pairId: validatePairId(match[1]),
-    kind,
-    period: canonicalPeriod(match[3], kind),
-  };
-}
-
 export function validateStoredReference(value) {
+  const identity = parsePairFileLogicalId(value?.logicalId);
+  if (identity.kind === "resolution") {
+    exactKeys(value, ["gzipBytes", "gzipSha256", "intervalSeconds", "jsonBytes", "jsonSha256", "logicalId", "sequence", "timeCoverage"], "stored resolution reference");
+    if (value.intervalSeconds !== identity.intervalSeconds) throw new Error("Stored resolution interval is invalid.");
+    exactKeys(value.timeCoverage, ["fromTimestamp", "untilTimestamp"], "stored resolution coverage");
+    if (
+      typeof value.timeCoverage.fromTimestamp !== "string"
+      || typeof value.timeCoverage.untilTimestamp !== "string"
+      || value.timeCoverage.fromTimestamp >= value.timeCoverage.untilTimestamp
+    ) {
+      throw new Error("Stored resolution coverage is invalid.");
+    }
+    validateGeneration(value.sequence, "reference generation");
+    for (const key of ["gzipBytes", "jsonBytes"]) {
+      if (!Number.isSafeInteger(value[key]) || value[key] <= 0) throw new Error(`Reference ${key} is invalid.`);
+    }
+    for (const key of ["gzipSha256", "jsonSha256"]) {
+      if (!isSha256Hex(value[key])) throw new Error(`Reference ${key} is invalid.`);
+    }
+    return identity;
+  }
   exactKeys(value, ["coverage", "gzipBytes", "gzipSha256", "jsonBytes", "jsonSha256", "logicalId", "sequence"], "stored reference");
-  const identity = parseStoredReferenceId(value.logicalId);
   validateGeneration(value.sequence, "reference generation");
   for (const key of ["gzipBytes", "jsonBytes"]) {
     if (!Number.isSafeInteger(value[key]) || value[key] <= 0) throw new Error(`Reference ${key} is invalid.`);
@@ -102,7 +96,11 @@ export const publicationObjectName = "publication.json.gz";
 
 export function referenceObjectName(reference) {
   const identity = validateStoredReference(reference);
-  return `${identity.kind}-${identity.period}-g${generation(reference.sequence)}-${reference.gzipSha256}.json.gz`;
+  if (identity.kind === "day") {
+    return `candles-${identity.period}-${pairDayResolutionLabel}-g${generation(reference.sequence)}-${reference.gzipSha256}.json.gz`;
+  }
+  if (identity.kind === "resolution") return `candles-${identity.period}-${identity.label}-g${generation(reference.sequence)}-${reference.gzipSha256}.json.gz`;
+  return `month-${identity.period}-g${generation(reference.sequence)}-${reference.gzipSha256}.json.gz`;
 }
 
 export function verifyStoredReferenceBytes(reference, bytes, maximumArtifactBytes) {

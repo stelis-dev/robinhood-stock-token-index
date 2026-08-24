@@ -11,7 +11,12 @@ import {
   planPairRegistration,
   registrationCapacity,
 } from "../register-pair.mjs";
-import { estimatedPairRuntimeSeconds, validateCollectionPlan, loadCollectionPlan } from "../scheduler/collection-plan.mjs";
+import {
+  collectionPlanGithubLoad,
+  estimatedPairRuntimeSeconds,
+  validateCollectionPlan,
+  loadCollectionPlan,
+} from "../scheduler/collection-plan.mjs";
 import { fixturePairRegistry } from "./pair-fixtures.mjs";
 
 function novelCandidate(registry) {
@@ -66,11 +71,12 @@ test("registration reports capacity calculated from the validated collection pla
   const collectionPlan = await loadCollectionPlan(pairRegistry);
   assert.deepEqual(registrationCapacity(collectionPlan), {
     durationPaddingPercent: 25,
+    github: { ...collectionPlan.capacity.github, ...collectionPlanGithubLoad(collectionPlan) },
     groupCount: 3,
     groups: [
-      { estimatedRuntimeSeconds: 582, groupId: "group-1", pairCount: 3, remainingPairSlots: 0, remainingSeconds: 138 },
-      { estimatedRuntimeSeconds: 599, groupId: "group-2", pairCount: 3, remainingPairSlots: 0, remainingSeconds: 121 },
-      { estimatedRuntimeSeconds: 589, groupId: "group-3", pairCount: 3, remainingPairSlots: 0, remainingSeconds: 131 },
+      { estimatedRuntimeSeconds: 667, groupId: "group-1", pairCount: 3, remainingPairSlots: 0, remainingSeconds: 53 },
+      { estimatedRuntimeSeconds: 684, groupId: "group-2", pairCount: 3, remainingPairSlots: 0, remainingSeconds: 36 },
+      { estimatedRuntimeSeconds: 674, groupId: "group-3", pairCount: 3, remainingPairSlots: 0, remainingSeconds: 46 },
     ],
     maximumGroupCount: 3,
     maximumGroupSeconds: 720,
@@ -84,7 +90,7 @@ test("registration selects the eligible group with the lowest estimated runtime 
   const planned = planPairRegistration({ ...fixture, measuredSeconds: 145 });
   assert.deepEqual(planned.result, {
     estimatedRuntimeSeconds: 182,
-    groupEstimatedRuntimeSeconds: 599,
+    groupEstimatedRuntimeSeconds: 684,
     groupId: "group-2",
     measuredSeconds: 145,
     pairId: fixture.candidate.pair.pairId,

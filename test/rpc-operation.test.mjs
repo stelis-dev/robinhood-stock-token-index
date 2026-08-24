@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readPairPeriod, readPairState } from "../collector/pair-reader.mjs";
+import { readPairMonthResolution, readPairStateSelection } from "../collector/pair-reader.mjs";
 import {
   maximumRpcEndpointCount,
   RpcEndpointUnavailableError,
@@ -16,10 +16,15 @@ import {
   RpcPairOperationUnavailableError,
   runRpcPairOperation,
 } from "../collector/rpc-operation.mjs";
+
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 import { storagePort } from "./storage-port-fixture.mjs";
+
+async function readPairState(input) {
+  return (await readPairStateSelection(input))?.state ?? null;
+}
 
 async function countingDirectory(registry) {
   const directory = new DirectoryStore({
@@ -120,17 +125,16 @@ test("availability after partial reads restarts the entire unpublished pair atte
   assert.equal(primary.logRequests[0].from, fallback.logRequests[0].from);
   assert.equal(primary.logRequests[0].to, fallback.logRequests[0].to);
   const state = await readPairState({ registry, pairId: pair.pairId, store: directory });
-  const period = await readPairPeriod({
+  const period = await readPairMonthResolution({
     registry,
+    pairId: pair.pairId,
+    ownerMonth: pair.activation.timestamp.slice(0, 7),
+    resolution: "1m",
     store: directory,
-    input: {
-      pairId: pair.pairId,
-      from: pair.activation.timestamp,
-      until: state.coverage.untilTimestamp,
-    },
   });
-  assert.equal(period.candles.length, 1);
-  assert.deepEqual(period.candles[0].close, { numerator: "310", denominator: "1" });
+  const candles = period.files.flatMap(({ value }) => value.candles);
+  assert.equal(candles.length, 1);
+  assert.deepEqual(candles[0].close, { numerator: "310", denominator: "1" });
   assert.equal(writes.at(-1), "state");
 });
 

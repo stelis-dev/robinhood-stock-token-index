@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { canonicalBytes } from "./canonical.mjs";
 import { isCanonicalAddress, isCanonicalBytes32 } from "./hex-data.mjs";
 import { derivePoolId } from "./pool-key.mjs";
 import { validateRpcUrl, maximumRpcBatchSize } from "./rpc-endpoint.mjs";
@@ -244,4 +245,12 @@ export function pairById(registry, pairId) {
   const entry = registry.pairs.find((candidate) => candidate.pair.pairId === pairId);
   if (!entry) throw new Error(`Unknown pair: ${pairId}`);
   return entry;
+}
+
+export function validateRegisteredPairDescriptor(value, registry) {
+  const expected = pairById(registry, value?.pairId).pair;
+  if (!canonicalBytes(value).equals(canonicalBytes(expected))) {
+    throw new Error("Pair descriptor does not match the registry.");
+  }
+  return expected;
 }

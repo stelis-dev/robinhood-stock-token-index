@@ -4,7 +4,6 @@ import {
   validateStoredReference,
   validateGeneration,
   validatePairId,
-  validatePairMonth,
   validateStateIdentity,
   validateStateBytes,
   parseStateObjectName,
@@ -21,6 +20,7 @@ const maximumRequestAttempts = 3;
 const maximumRetryDelayMilliseconds = 60_000;
 const transientRetryDelayMilliseconds = 1_000;
 const rateLimitRetryDelayMilliseconds = 60_000;
+const contentRequestMethods = new Set(["DELETE", "PATCH", "POST", "PUT"]);
 const githubFailureReasons = new Set([
   "access_denied",
   "immutable_conflict",
@@ -187,12 +187,12 @@ function stateTag(pairId) {
 }
 
 function monthTag(pairId, pairMonth) {
-  return `pair-${validatePairId(pairId)}-month-${validatePairMonth(pairMonth)}`;
+  return `pair-${validatePairId(pairId)}-month-${pairMonth}`;
 }
 
 function referenceTag(reference) {
   const identity = validateStoredReference(reference);
-  const pairMonth = identity.kind === "month" ? identity.period : identity.period.slice(0, 7);
+  const pairMonth = identity.kind === "day" ? identity.period.slice(0, 7) : identity.period;
   return monthTag(identity.pairId, pairMonth);
 }
 
@@ -207,23 +207,34 @@ export class GitHubReleaseStore {
   #assets = new Map();
   #verifiedAssets = new Map();
   #wait;
+  #now;
+  #minimumMutationIntervalMilliseconds;
+  #nextMutationAt = 0;
 
   constructor({
     repository,
     token,
     maximumArtifactBytes,
+    minimumMutationIntervalMilliseconds = 0,
     fetchImplementation = fetch,
+    nowImplementation = Date.now,
     signal,
     waitImplementation = (milliseconds, waitSignal) => wait(milliseconds, undefined, { signal: waitSignal }),
   }) {
     if (typeof repository !== "string" || !repositoryPattern.test(repository)) throw new Error("GitHub repository identity is invalid.");
     if (token !== undefined && (typeof token !== "string" || token.length === 0)) throw new Error("GitHub token is invalid.");
     if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
+    if (!Number.isSafeInteger(minimumMutationIntervalMilliseconds) || minimumMutationIntervalMilliseconds < 0) {
+      throw new Error("GitHub mutation interval is invalid.");
+    }
     if (typeof waitImplementation !== "function") throw new Error("GitHub retry wait implementation is invalid.");
+    if (typeof nowImplementation !== "function") throw new Error("GitHub clock implementation is invalid.");
     this.repository = repository;
     this.#token = token;
     this.#maximumArtifactBytes = maximumArtifactBytes;
+    this.#minimumMutationIntervalMilliseconds = minimumMutationIntervalMilliseconds;
     this.#wait = waitImplementation;
+    this.#now = nowImplementation;
     this.fetch = fetchImplementation;
     this.signal = signal;
   }
@@ -232,12 +243,29 @@ export class GitHubReleaseStore {
     if (this.#token === undefined) throw new Error("GitHub token is required for storage mutation.");
   }
 
+  async #paceMutation(operation, method) {
+    if (!contentRequestMethods.has(method) || this.#minimumMutationIntervalMilliseconds === 0) return;
+    const now = this.#now();
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("GitHub clock returned an invalid instant.");
+    const scheduled = Math.max(now, this.#nextMutationAt);
+    const delay = scheduled - now;
+    this.#nextMutationAt = scheduled + this.#minimumMutationIntervalMilliseconds;
+    if (delay === 0) return;
+    try {
+      await this.#wait(delay, this.signal);
+    } catch {
+      this.signal?.throwIfAborted();
+      throw new GitHubStorageError(operation, "transport", { retryable: true });
+    }
+  }
+
   async #fetchResponse(target, operation, {
     method = "GET",
     body,
     headers,
   } = {}) {
     this.signal?.throwIfAborted();
+    await this.#paceMutation(operation, method);
     try {
       return await this.fetch(target, {
         method,
@@ -662,12 +690,6 @@ export class GitHubReleaseStore {
       await this.#readAdmittedUploadedAsset(release.id, asset),
       this.#maximumArtifactBytes,
     );
-  }
-
-  async resolvePairMonth(pairId, pairMonth) {
-    validatePairId(pairId);
-    validatePairMonth(pairMonth);
-    return "present";
   }
 
   async writeReferenced(reference, gzipBytes) {

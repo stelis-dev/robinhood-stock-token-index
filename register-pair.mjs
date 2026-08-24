@@ -7,6 +7,7 @@ import {
   estimatedPairRuntimeSeconds,
   validateCollectionPlan,
   collectionGroupEstimatedRuntime,
+  collectionPlanGithubLoad,
 } from "./scheduler/collection-plan.mjs";
 
 const defaultPairRegistryPath = new URL("./registry/pairs.json", import.meta.url);
@@ -57,6 +58,10 @@ export function parseRegistrationArguments(argv) {
 export function registrationCapacity(collectionPlan) {
   return {
     durationPaddingPercent: collectionPlan.capacity.durationPaddingPercent,
+    github: {
+      ...collectionPlan.capacity.github,
+      ...collectionPlanGithubLoad(collectionPlan),
+    },
     groupCount: collectionPlan.groups.length,
     groups: collectionPlan.groups.map((group) => {
       const estimatedRuntimeSeconds = collectionGroupEstimatedRuntime(collectionPlan, group);
@@ -98,10 +103,14 @@ export function planPairRegistration({ pairRegistry, collectionPlan, candidate, 
       group,
       index,
       currentSeconds: collectionGroupEstimatedRuntime(validCollectionPlan, group),
+      nextSeconds: collectionGroupEstimatedRuntime(validCollectionPlan, {
+        ...group,
+        members: [...group.members, { measuredSeconds, pairId }],
+      }),
     }))
-    .filter(({ group, currentSeconds }) => (
+    .filter(({ group, nextSeconds }) => (
       group.members.length < validCollectionPlan.capacity.maximumPairsPerGroup
-      && currentSeconds + estimatedRuntimeSeconds <= validCollectionPlan.capacity.maximumGroupSeconds
+      && nextSeconds <= validCollectionPlan.capacity.maximumGroupSeconds
     ))
     .sort((left, right) => left.currentSeconds - right.currentSeconds || left.index - right.index);
   if (candidates.length === 0) {
@@ -118,7 +127,7 @@ export function planPairRegistration({ pairRegistry, collectionPlan, candidate, 
     collectionPlan: nextCollectionPlan,
     result: {
       estimatedRuntimeSeconds,
-      groupEstimatedRuntimeSeconds: selected.currentSeconds + estimatedRuntimeSeconds,
+      groupEstimatedRuntimeSeconds: selected.nextSeconds,
       groupId: selected.group.groupId,
       measuredSeconds,
       pairId,

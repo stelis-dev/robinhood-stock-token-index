@@ -3,7 +3,13 @@ import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
+import {
+  readPairMonth,
+  readPairMonthResolution,
+  readPairResolution,
+  readPairStateSelection,
+  verifyPairIndex,
+} from "../collector/pair-reader.mjs";
 import { pairById } from "../collector/pair-registry.mjs";
 import { RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
 import { createFinalizedBoundary, runRpcPairOperation } from "../collector/rpc-operation.mjs";
@@ -12,6 +18,10 @@ import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
 import { compactPairRegistry, FakePairRpc, pairSwapLog } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 import { storagePort } from "./storage-port-fixture.mjs";
+
+async function readPairState(input) {
+  return (await readPairStateSelection(input))?.state ?? null;
+}
 
 async function runProcessPhase(operation, { rpc, ...input }) {
   return (await runRpcPairOperation({ operation, ...input, rpcClients: [rpc] })).result;
@@ -26,6 +36,44 @@ async function directoryStore(registry, prefix) {
     root: await mkdtemp(join(tmpdir(), prefix)),
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
   });
+}
+
+async function selectedResolutionArtifacts({ registry, pairId, store }) {
+  const state = await readPairState({ registry, pairId, store });
+  const output = new Map();
+  for (const monthReference of state.months) {
+    const month = await readPairMonth({ registry, store, reference: monthReference });
+    for (const reference of month.resolutions) {
+      output.set(`${month.month}:${reference.intervalSeconds}`, {
+        reference,
+        value: await readPairResolution({ registry, store, reference }),
+      });
+    }
+  }
+  return { state, output };
+}
+
+async function readOneMinuteRange({ registry, pairId, store, from, until }) {
+  const candles = [];
+  const cursor = new Date(from);
+  cursor.setUTCDate(1);
+  cursor.setUTCHours(0, 0, 0, 0);
+  while (cursor.getTime() < Date.parse(until)) {
+    const result = await readPairMonthResolution({
+      registry,
+      pairId,
+      ownerMonth: cursor.toISOString().slice(0, 7),
+      resolution: "1m",
+      store,
+    });
+    if (result.status === "read") {
+      candles.push(...result.files.flatMap(({ value }) => value.candles).filter((candle) => (
+        candle.intervalStart >= from && candle.intervalEnd <= until
+      )));
+    }
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+  return candles;
 }
 
 test("current, historical, and repair operations change only their assigned coverage boundaries", async () => {
@@ -103,23 +151,94 @@ test("current, historical, and repair operations change only their assigned cove
   const afterRepair = await readPairState({ registry, pairId: pair.pairId, store });
   assert.deepEqual(afterRepair.coverage, beforeRepair.coverage);
 
-  const period = await readPairPeriod({
+  const candles = await readOneMinuteRange({
     registry,
+    pairId: pair.pairId,
     store,
-    input: {
-      pairId: pair.pairId,
-      from: "2026-08-14T13:01:00.000Z",
-      until: "2026-08-14T15:01:00.000Z",
-    },
+    from: "2026-08-14T13:01:00.000Z",
+    until: "2026-08-14T15:01:00.000Z",
   });
-  assert.equal(period.candles.length, 2);
-  assert.deepEqual(period.candles.find((candle) => candle.intervalStart === "2026-08-14T14:11:00.000Z").close, {
+  assert.equal(candles.length, 2);
+  assert.deepEqual(candles.find((candle) => candle.intervalStart === "2026-08-14T14:11:00.000Z").close, {
     numerator: "320",
     denominator: "1",
   });
   assert.equal((await verifyPairIndex({ registry, pairId: pair.pairId, store })).status, "verified");
   assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "state"))).length, 1);
-  assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "months", "2026-08"))).length, 2);
+  assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "months", "2026-08"))).length, 6);
+});
+
+test("repair replaces every and only derived natural interval overlapping changed one-minute data", async () => {
+  const registry = await compactPairRegistry({
+    activationTimestamp: "2026-08-31T00:00:00.000Z",
+    maximumBlocksPerRun: 2_000,
+  });
+  const pair = pairEntryBySymbol(registry, "NVDA").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const rpc = new FakePairRpc({
+    registry,
+    pair,
+    finalizedNumber: activation + 4_320n,
+    secondsPerBlock: 60,
+  });
+  const earlyBlock = activation + 3_491n;
+  const changedBlock = activation + 4_091n;
+  rpc.logs.push(
+    pairSwapLog({
+      registry,
+      pair,
+      block: rpc.block(earlyBlock),
+      baseAmountRaw: 10_000_000_000_000_000n,
+      quoteAmountRaw: 3_000_000n,
+    }),
+    pairSwapLog({
+      registry,
+      pair,
+      block: rpc.block(changedBlock),
+      baseAmountRaw: 10_000_000_000_000_000n,
+      quoteAmountRaw: 3_100_000n,
+    }),
+  );
+  const store = await directoryStore(registry, "pair-resolution-repair-");
+  for (let day = 0; day < 3; day += 1) {
+    const result = await runCurrentPhase({ registry, pairId: pair.pairId, store, rpc });
+    assert.equal(result.status, "published");
+  }
+  const before = await selectedResolutionArtifacts({ registry, pairId: pair.pairId, store });
+  assert.equal(before.state.coverage.untilTimestamp, "2026-09-03T00:00:00.000Z");
+
+  rpc.logs[1] = pairSwapLog({
+    registry,
+    pair,
+    block: rpc.block(changedBlock),
+    baseAmountRaw: 10_000_000_000_000_000n,
+    quoteAmountRaw: 3_200_000n,
+  });
+  const repaired = await runRepairPhase({ registry, pairId: pair.pairId, store, rpc });
+  assert.equal(repaired.sequence, 4);
+  const after = await selectedResolutionArtifacts({ registry, pairId: pair.pairId, store });
+  assert.deepEqual(after.state.coverage, before.state.coverage);
+
+  const changedInstant = rpc.block(changedBlock).timestampSeconds * 1_000;
+  for (const [key, beforeEntry] of before.output) {
+    const afterEntry = after.output.get(key);
+    assert.ok(afterEntry);
+    const intervalMilliseconds = beforeEntry.value.intervalSeconds * 1_000;
+    const changedIntervalStart = new Date(Math.floor(changedInstant / intervalMilliseconds) * intervalMilliseconds).toISOString();
+    const beforeChanged = beforeEntry.value.candles.find((candle) => candle.intervalStart === changedIntervalStart);
+    const afterChanged = afterEntry.value.candles.find((candle) => candle.intervalStart === changedIntervalStart);
+    const intervalWasComplete = beforeChanged !== undefined;
+    if (intervalWasComplete) {
+      assert.equal(afterEntry.reference.sequence, 4);
+      assert.notDeepEqual(afterChanged, beforeChanged);
+    } else {
+      assert.deepEqual(afterEntry, beforeEntry);
+    }
+    assert.deepEqual(
+      afterEntry.value.candles.filter((candle) => candle.intervalStart !== changedIntervalStart),
+      beforeEntry.value.candles.filter((candle) => candle.intervalStart !== changedIntervalStart),
+    );
+  }
 });
 
 test("selected publication cleanup remains blocking and the next operation recovers it", async () => {
@@ -164,7 +283,7 @@ test("selected publication cleanup remains blocking and the next operation recov
   assert.equal(retried.status, "current");
   assert.equal((await store.readPublication(pair.pairId)).status, "absent");
   assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "state"))).length, 1);
-  assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "months", "2026-08"))).length, 2);
+  assert.equal((await readdir(join(store.root, "pairs", pair.pairId, "months", "2026-08"))).length, 5);
 });
 
 test("a first historical publication can start at history and end exactly at activation", async () => {
@@ -197,17 +316,15 @@ test("native ETH and stock-token pairs use the same base-to-USDG candle calculat
   const store = await directoryStore(registry, "pair-native-eth-");
   await runCurrentPhase({ registry, pairId: pair.pairId, store, rpc });
   const state = await readPairState({ registry, pairId: pair.pairId, store });
-  const period = await readPairPeriod({
+  const candles = await readOneMinuteRange({
     registry,
+    pairId: pair.pairId,
     store,
-    input: {
-      pairId: pair.pairId,
-      from: pair.activation.timestamp,
-      until: state.coverage.untilTimestamp,
-    },
+    from: pair.activation.timestamp,
+    until: state.coverage.untilTimestamp,
   });
-  assert.equal(period.candles.length, 1);
-  assert.deepEqual(period.candles[0].close, { numerator: "3000", denominator: "1" });
+  assert.equal(candles.length, 1);
+  assert.deepEqual(candles[0].close, { numerator: "3000", denominator: "1" });
   assert.equal(state.pair.baseAsset.kind, "native");
   assert.equal(state.pair.quoteAsset.address, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
 });
@@ -247,28 +364,26 @@ test("a Swap with a zero amount does not block history or contribute a candle pr
 
   const collected = await runHistoryPhase({ registry, pairId: pair.pairId, store, rpc });
   const state = await readPairState({ registry, pairId: pair.pairId, store });
-  const period = await readPairPeriod({
+  const candles = await readOneMinuteRange({
     registry,
+    pairId: pair.pairId,
     store,
-    input: {
-      pairId: pair.pairId,
-      from: state.coverage.fromTimestamp,
-      until: state.coverage.untilTimestamp,
-    },
+    from: state.coverage.fromTimestamp,
+    until: state.coverage.untilTimestamp,
   });
 
   assert.equal(collected.status, "published");
   assert.equal(collected.phase, "history");
   assert.equal(state.coverage.fromTimestamp, "2026-08-14T13:01:00.000Z");
   assert.equal(state.coverage.untilTimestamp, pair.activation.timestamp);
-  assert.equal(period.candles.length, 1);
-  assert.deepEqual(period.candles[0].open, { numerator: "3000", denominator: "1" });
-  assert.deepEqual(period.candles[0].close, { numerator: "3200", denominator: "1" });
-  assert.equal(period.candles[0].baseVolumeRaw, "2000000000000000000");
-  assert.equal(period.candles[0].quoteVolumeRaw, "6200000000");
-  assert.equal(period.candles[0].tradeCount, 2);
-  assert.equal(period.candles[0].firstSource.transactionIndex, 0);
-  assert.equal(period.candles[0].lastSource.transactionIndex, 2);
+  assert.equal(candles.length, 1);
+  assert.deepEqual(candles[0].open, { numerator: "3000", denominator: "1" });
+  assert.deepEqual(candles[0].close, { numerator: "3200", denominator: "1" });
+  assert.equal(candles[0].baseVolumeRaw, "2000000000000000000");
+  assert.equal(candles[0].quoteVolumeRaw, "6200000000");
+  assert.equal(candles[0].tradeCount, 2);
+  assert.equal(candles[0].firstSource.transactionIndex, 0);
+  assert.equal(candles[0].lastSource.transactionIndex, 2);
 });
 
 test("duplicate zero-amount Swap positions are rejected before candle eligibility is considered", async () => {
@@ -310,26 +425,14 @@ test("adjacent current phases preserve continuity across a UTC month and year bo
   assert.equal(second.fromTimestamp, first.untilTimestamp);
   state = await readPairState({ registry, pairId: pair.pairId, store });
   assert.deepEqual(state.months.map((reference) => reference.logicalId.slice(-7)), ["2026-12", "2027-01"]);
-  const december = await readPairPeriod({
-    registry,
-    store,
-    input: {
-      pairId: pair.pairId,
-      from: "2026-12-31T23:30:00.000Z",
-      until: "2027-01-01T00:00:00.000Z",
-    },
+  const december = await readPairMonthResolution({
+    registry, pairId: pair.pairId, ownerMonth: "2026-12", resolution: "1m", store,
   });
-  const january = await readPairPeriod({
-    registry,
-    store,
-    input: {
-      pairId: pair.pairId,
-      from: "2027-01-01T00:00:00.000Z",
-      until: "2027-01-01T00:30:00.000Z",
-    },
+  const january = await readPairMonthResolution({
+    registry, pairId: pair.pairId, ownerMonth: "2027-01", resolution: "1m", store,
   });
-  assert.deepEqual(december.available, [{ from: december.requested.from, until: december.requested.until }]);
-  assert.deepEqual(january.available, [{ from: january.requested.from, until: january.requested.until }]);
+  assert.equal(december.status, "read");
+  assert.equal(january.status, "read");
 });
 
 test("block limits move to the complete minute boundary instead of publishing partial candles", async () => {
@@ -386,7 +489,7 @@ test("multi-day block gaps advance one UTC day per phase and resume at the exact
   }
   const verified = await verifyPairIndex({ registry, pairId: pair.pairId, store });
   assert.equal(verified.dayCount, 7);
-  assert.equal(verified.candleCount, 0);
+  assert.equal(verified.sourceCandleCount, 0);
   assert.ok(rpc.blockSearches.every((search) => search.minimumBlock <= search.maximumBlock));
 });
 

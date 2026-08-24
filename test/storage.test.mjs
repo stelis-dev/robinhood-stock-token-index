@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  createPairReference,
-  encodePairDay,
-  encodePairMonth,
-  encodePairState,
-} from "../collector/pair-artifact.mjs";
-import { readPairPeriod, readPairState, verifyPairIndex } from "../collector/pair-reader.mjs";
+  createPairFileReference,
+  encodePairDayFile,
+  encodePairMonthFile,
+  encodePairStateFile,
+} from "../collector/pair-files.mjs";
+import { candleResolutionCatalog } from "../collector/candle-resolution.mjs";
+import { readPairMonthResolution, readPairStateSelection, verifyPairIndex } from "../collector/pair-reader.mjs";
 import {
   createStateIdentity,
   publicationObjectName,
@@ -22,6 +23,11 @@ import { DirectoryStore } from "../storage/directory-store.mjs";
 import { GitHubReleaseStore, GitHubStorageError } from "../storage/github-release-store.mjs";
 import { fixturePairRegistry, pairCandle, pairEntryBySymbol } from "./pair-fixtures.mjs";
 import { FakeGitHub, jsonResponse } from "./github-storage-fixture.mjs";
+import { githubMutationIntervalMilliseconds, loadCollectionPlan } from "../scheduler/collection-plan.mjs";
+
+async function readPairState(input) {
+  return (await readPairStateSelection(input))?.state ?? null;
+}
 
 function pairDataset(registry, sequence = 1) {
   const entry = pairEntryBySymbol(registry, "NVDA");
@@ -34,7 +40,6 @@ function pairDataset(registry, sequence = 1) {
     untilTimestamp: "2026-08-14T14:03:00.000Z",
   };
   const day = {
-    contractVersion: "1",
     kind: "pair_candle_day",
     pair,
     sequence,
@@ -42,28 +47,29 @@ function pairDataset(registry, sequence = 1) {
     coverage,
     candles: [pairCandle()],
   };
-  const encodedDay = encodePairDay(day, context);
-  const dayReference = createPairReference({ encoded: encodedDay, context });
+  const encodedDay = encodePairDayFile(day, context);
+  const dayReference = createPairFileReference({ encoded: encodedDay, context });
   const month = {
-    contractVersion: "1",
     kind: "pair_candle_month",
     pair,
     sequence,
     month: "2026-08",
     coverage,
     days: [dayReference],
+    sourceMonths: [`pairs/${pair.pairId}/months/2026-08`],
+    resolutions: [],
   };
-  const encodedMonth = encodePairMonth(month, context);
-  const monthReference = createPairReference({ encoded: encodedMonth, context });
+  const encodedMonth = encodePairMonthFile(month, context);
+  const monthReference = createPairFileReference({ encoded: encodedMonth, context });
   const state = {
-    contractVersion: "1",
     kind: "pair_candle_state",
     pair,
     sequence,
     coverage,
+    resolutions: candleResolutionCatalog,
     months: [monthReference],
   };
-  const encodedState = encodePairState(state, context);
+  const encodedState = encodePairStateFile(state, context);
   return {
     state,
     encodedState,
@@ -84,6 +90,39 @@ test("GitHub storage requires a primitive repository identity", () => {
     repository: ["owner/index"],
     maximumArtifactBytes: 1_024,
   }), /repository identity/);
+});
+
+test("one GitHub adapter paces every content-generating request", async () => {
+  const registry = await fixturePairRegistry();
+  const dataset = pairDataset(registry);
+  const intervalMilliseconds = githubMutationIntervalMilliseconds(await loadCollectionPlan(registry));
+  const githubApi = new FakeGitHub();
+  let now = 1_000;
+  const waits = [];
+  const mutationInstants = [];
+  const store = new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    minimumMutationIntervalMilliseconds: intervalMilliseconds,
+    nowImplementation: () => now,
+    waitImplementation: async (milliseconds) => {
+      waits.push(milliseconds);
+      now += milliseconds;
+    },
+    fetchImplementation: async (target, init = {}) => {
+      if (init.method === "POST" || init.method === "DELETE") mutationInstants.push(now);
+      return githubApi.fetch(target, init);
+    },
+  });
+
+  await publishDataset(store, dataset);
+  await store.removeReferenced(dataset.children[0].reference);
+  assert.ok(mutationInstants.length > 1);
+  for (let index = 1; index < mutationInstants.length; index += 1) {
+    assert.ok(mutationInstants[index] - mutationInstants[index - 1] >= intervalMilliseconds);
+  }
+  assert.deepEqual(waits, Array(mutationInstants.length - 1).fill(intervalMilliseconds));
 });
 
 test("directory and GitHub storage return the same selected data set", async () => {
@@ -110,11 +149,14 @@ test("directory and GitHub storage return the same selected data set", async () 
   assert.deepEqual(githubVerification, {
     status: "verified",
     pairId: dataset.state.pair.pairId,
-    sequence: 1,
+    selectedState: createStateIdentity(1, dataset.encodedState.gzipBytes, maximumArtifactBytes),
+    catalog: candleResolutionCatalog,
     coverage: dataset.state.coverage,
     monthCount: 1,
     dayCount: 1,
-    candleCount: 1,
+    sourceCandleCount: 1,
+    resolutionArtifactCount: 0,
+    resolutionCandleCount: 0,
   });
   assert.doesNotMatch(JSON.stringify(github), /test-token/);
 
@@ -138,8 +180,8 @@ test("directory and GitHub storage return the same selected data set", async () 
   githubApi.requests.length = 0;
   assert.equal(githubApi.releases.get(unrelatedTag).assets.size, 1);
   assert.ok(githubApi.requests.every((request) => !request.target.includes(unrelatedTag)));
-  assert.equal((await verifyPairIndex({ registry, pairId: replacement.state.pair.pairId, store: directory })).sequence, 2);
-  assert.equal((await verifyPairIndex({ registry, pairId: replacement.state.pair.pairId, store: github })).sequence, 2);
+  assert.equal((await verifyPairIndex({ registry, pairId: replacement.state.pair.pairId, store: directory })).selectedState.sequence, 2);
+  assert.equal((await verifyPairIndex({ registry, pairId: replacement.state.pair.pairId, store: github })).selectedState.sequence, 2);
 });
 
 test("an uncertain GitHub deletion is reconciled by retrying the same asset until it is absent", async () => {
@@ -179,7 +221,7 @@ test("an uncertain GitHub deletion is reconciled by retrying the same asset unti
     registry,
     pairId: selected.state.pair.pairId,
     store: github,
-  })).sequence, 2);
+  })).selectedState.sequence, 2);
 });
 
 test("a terminal GitHub exact deletion failure preserves the selected data set", async () => {
@@ -214,7 +256,7 @@ test("a terminal GitHub exact deletion failure preserves the selected data set",
     registry,
     pairId: selected.state.pair.pairId,
     store: github,
-  })).sequence, 2);
+  })).selectedState.sequence, 2);
 });
 
 test("GitHub rate-limit retries honor Retry-After without exposing the response body", async () => {
@@ -620,60 +662,48 @@ test("public GitHub reads omit authorization while every mutation requires a tok
   assert.equal(githubApi.requests.length, before);
 });
 
-test("a bounded period read touches only its selected pair and month and reports uncovered time", async () => {
+test("one-minute month reads touch only their selected month and explicit source files", async () => {
   const registry = await fixturePairRegistry();
   const dataset = pairDataset(registry);
   const directory = new DirectoryStore({
-    root: await mkdtemp(join(tmpdir(), "stock-token-pair-period-")),
+    root: await mkdtemp(join(tmpdir(), "stock-token-pair-resolution-read-")),
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
   });
   await publishDataset(directory, dataset);
   const logicalReads = [];
   const store = {
     readSelectedState: (...args) => directory.readSelectedState(...args),
-    resolvePairMonth: (...args) => directory.resolvePairMonth(...args),
     readReferenced: async (reference) => {
       logicalReads.push(reference.logicalId);
       return directory.readReferenced(reference);
     },
   };
-  const result = await readPairPeriod({
+  const result = await readPairMonthResolution({
     registry,
+    pairId: dataset.state.pair.pairId,
+    ownerMonth: "2026-08",
+    resolution: "1m",
     store,
-    input: {
-      pairId: dataset.state.pair.pairId,
-      from: "2026-08-14T14:00:00.000Z",
-      until: "2026-08-14T14:03:00.000Z",
-    },
   });
-  assert.deepEqual(result.available, [{ from: "2026-08-14T14:01:00.000Z", until: "2026-08-14T14:03:00.000Z" }]);
-  assert.deepEqual(result.unavailable, [{ from: "2026-08-14T14:00:00.000Z", until: "2026-08-14T14:01:00.000Z" }]);
-  assert.equal(result.candles.length, 1);
+  assert.equal(result.status, "read");
+  assert.equal(result.files.length, 1);
+  assert.equal(result.files[0].value.candles.length, 1);
   assert.deepEqual(logicalReads, [
     `pairs/${dataset.state.pair.pairId}/months/2026-08`,
     `pairs/${dataset.state.pair.pairId}/days/2026-08-14`,
   ]);
 
-  const unavailableReads = [];
-  const unavailable = await readPairPeriod({
+  logicalReads.length = 0;
+  const absent = await readPairMonthResolution({
     registry,
-    input: {
-      pairId: dataset.state.pair.pairId,
-      from: "2026-08-14T14:01:00.000Z",
-      until: "2026-08-14T14:03:00.000Z",
-    },
-    store: {
-      readSelectedState: (...args) => directory.readSelectedState(...args),
-      resolvePairMonth: async () => "unavailable",
-      readReferenced: async (reference) => {
-        unavailableReads.push(reference.logicalId);
-        return directory.readReferenced(reference);
-      },
-    },
+    pairId: dataset.state.pair.pairId,
+    ownerMonth: "2026-09",
+    resolution: "1m",
+    store,
   });
-  assert.deepEqual(unavailable.available, []);
-  assert.deepEqual(unavailable.unavailable, [{ from: unavailable.requested.from, until: unavailable.requested.until }]);
-  assert.deepEqual(unavailableReads, []);
+  assert.equal(absent.status, "absent");
+  assert.equal(absent.reason, "month_not_selected");
+  assert.deepEqual(logicalReads, []);
 });
 
 test("stored generation mismatch, missing referenced files, and changed immutable state bytes fail", async () => {
@@ -688,20 +718,20 @@ test("stored generation mismatch, missing referenced files, and changed immutabl
     (error) => error instanceof StoredDataIntegrityError,
   );
 
-  const cleanStore = new DirectoryStore({
+  const missingReferenceStore = new DirectoryStore({
     root: await mkdtemp(join(tmpdir(), "stock-token-pair-missing-")),
     maximumArtifactBytes: registry.collection.maximumArtifactBytes,
   });
-  await cleanStore.writeState(dataset.state.pair.pairId, 1, dataset.encodedState.gzipBytes);
+  await missingReferenceStore.writeState(dataset.state.pair.pairId, 1, dataset.encodedState.gzipBytes);
   await assert.rejects(
-    verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store: cleanStore }),
+    verifyPairIndex({ registry, pairId: dataset.state.pair.pairId, store: missingReferenceStore }),
     /ENOENT/,
   );
 
   const different = Buffer.from(dataset.encodedState.gzipBytes);
   different[different.byteLength - 1] ^= 1;
   await assert.rejects(
-    cleanStore.writeState(dataset.state.pair.pairId, 1, different),
+    missingReferenceStore.writeState(dataset.state.pair.pairId, 1, different),
     /immutable bytes differ/,
   );
 });

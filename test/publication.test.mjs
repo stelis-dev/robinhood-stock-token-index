@@ -3,26 +3,35 @@ import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readPairMonth, readPairState } from "../collector/pair-reader.mjs";
+import { runPairCommand } from "../cli.mjs";
+import { readPairMonth, readPairResolution, readPairStateSelection } from "../collector/pair-reader.mjs";
 import {
-  decodePublicationManifest,
-  encodePublicationManifest,
   recoverPairPublication,
 } from "../collector/publication.mjs";
+import { candleResolutionCatalog } from "../collector/candle-resolution.mjs";
+import {
+  decodePairPublicationManifest,
+  encodePairPublicationManifest,
+} from "../collector/publication-manifest.mjs";
 import { runRpcPairOperation } from "../collector/rpc-operation.mjs";
 import { DirectoryStore } from "../storage/directory-store.mjs";
 import { GitHubReleaseStore, GitHubStorageError } from "../storage/github-release-store.mjs";
 import {
-  parseStoredReferenceId,
   publicationObjectName,
   referenceObjectName,
   stateObjectName,
   StoredDataIntegrityError,
 } from "../storage/stored-files.mjs";
+import { parsePairFileLogicalId } from "../collector/pair-file-identity.mjs";
+import { githubMutationIntervalMilliseconds, loadCollectionPlan } from "../scheduler/collection-plan.mjs";
 import { compactPairRegistry, FakePairRpc } from "./pair-process-fixtures.mjs";
 import { pairEntryBySymbol } from "./pair-fixtures.mjs";
 import { FakeGitHub } from "./github-storage-fixture.mjs";
 import { storagePort } from "./storage-port-fixture.mjs";
+
+async function readPairState(input) {
+  return (await readPairStateSelection(input))?.state ?? null;
+}
 
 async function runCurrentPhase({ rpc, ...input }) {
   return (await runRpcPairOperation({ operation: "current", ...input, rpcClients: [rpc] })).result;
@@ -31,9 +40,14 @@ async function runCurrentPhase({ rpc, ...input }) {
 const replacementTrace = Object.freeze([
   "create_publication",
   "write_day",
+  "write_resolution",
+  "write_resolution",
+  "write_resolution",
   "write_month",
   "write_state",
   "remove_day",
+  "remove_resolution",
+  "remove_resolution",
   "remove_month",
   "remove_state",
   "remove_publication",
@@ -41,6 +55,8 @@ const replacementTrace = Object.freeze([
 const firstPublicationTrace = Object.freeze([
   "create_publication",
   "write_day",
+  "write_resolution",
+  "write_resolution",
   "write_month",
   "write_state",
   "remove_publication",
@@ -51,8 +67,8 @@ function directory(root, registry) {
 }
 
 function referenceFile(root, reference) {
-  const identity = parseStoredReferenceId(reference.logicalId);
-  const pairMonth = identity.kind === "month" ? identity.period : identity.period.slice(0, 7);
+  const identity = parsePairFileLogicalId(reference.logicalId);
+  const pairMonth = identity.kind === "day" ? identity.period.slice(0, 7) : identity.period;
   return join(root, "pairs", identity.pairId, "months", pairMonth, referenceObjectName(reference));
 }
 
@@ -92,12 +108,12 @@ function interruptedStore(store, stopAfter, trace, onManifest) {
       return afterMutation("create_publication", await store.createPublication(pairId, bytes));
     },
     writeReferenced: async (reference, bytes) => afterMutation(
-      `write_${parseStoredReferenceId(reference.logicalId).kind}`,
+      `write_${parsePairFileLogicalId(reference.logicalId).kind}`,
       await store.writeReferenced(reference, bytes),
     ),
     writeState: async (...args) => afterMutation("write_state", await store.writeState(...args)),
     removeReferenced: async (reference, ...rest) => afterMutation(
-      `remove_${parseStoredReferenceId(reference.logicalId).kind}`,
+      `remove_${parsePairFileLogicalId(reference.logicalId).kind}`,
       await store.removeReferenced(reference, ...rest),
     ),
     removeState: async (...args) => afterMutation("remove_state", await store.removeState(...args)),
@@ -118,20 +134,23 @@ async function assertOnlySelectedClosure({ registry, pair, root, store, expected
   const expectedByMonth = new Map();
   for (const monthReference of state.months) {
     const month = await readPairMonth({ registry, store, reference: monthReference });
-    const pairMonth = parseStoredReferenceId(monthReference.logicalId).period;
+    const pairMonth = parsePairFileLogicalId(monthReference.logicalId).period;
     expectedByMonth.set(pairMonth, [
       referenceObjectName(monthReference),
       ...month.days.map(referenceObjectName),
+      ...month.resolutions.map(referenceObjectName),
     ].sort());
   }
   const monthRoot = join(root, "pairs", pair.pairId, "months");
-  const actualMonths = (await readdir(monthRoot)).sort();
+  const actualFiles = new Map();
+  for (const pairMonth of await readdir(monthRoot)) {
+    const files = (await readdir(join(monthRoot, pairMonth))).sort();
+    if (files.length > 0) actualFiles.set(pairMonth, files);
+  }
+  const actualMonths = [...actualFiles.keys()].sort();
   assert.deepEqual(actualMonths, [...expectedByMonth.keys()].sort());
   for (const pairMonth of actualMonths) {
-    assert.deepEqual(
-      (await readdir(join(monthRoot, pairMonth))).sort(),
-      expectedByMonth.get(pairMonth),
-    );
+    assert.deepEqual(actualFiles.get(pairMonth), expectedByMonth.get(pairMonth));
   }
 }
 
@@ -161,13 +180,54 @@ async function runReplacement({ registry, pair, activation, store }) {
   });
 }
 
+async function initializedCrossMonthPair() {
+  const registry = await compactPairRegistry({
+    activationTimestamp: "2026-08-31T00:00:00.000Z",
+    maximumBlocksPerRun: 2_000,
+  });
+  const pair = pairEntryBySymbol(registry, "NVDA").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const root = await mkdtemp(join(tmpdir(), "pair-cross-month-publication-"));
+  const store = directory(root, registry);
+  const rpc = new FakePairRpc({
+    registry,
+    pair,
+    finalizedNumber: activation + 2_880n,
+    secondsPerBlock: 60,
+  });
+  await runCurrentPhase({ registry, pairId: pair.pairId, store, rpc });
+  return { registry, pair, activation, root, store, rpc };
+}
+
+async function runCrossMonthReplacement({ registry, pair, store, rpc }) {
+  return runCurrentPhase({ registry, pairId: pair.pairId, store, rpc });
+}
+
+async function assertCrossMonthResolution({ registry, pair, store }) {
+  const state = await readPairState({ registry, pairId: pair.pairId, store });
+  const augustReference = state.months.find((reference) => parsePairFileLogicalId(reference.logicalId).period === "2026-08");
+  const august = await readPairMonth({ registry, store, reference: augustReference });
+  const reference = august.resolutions.find((candidate) => candidate.intervalSeconds === 172_800);
+  assert.ok(reference);
+  assert.deepEqual(august.sourceMonths, [
+    `pairs/${pair.pairId}/months/2026-08`,
+    `pairs/${pair.pairId}/months/2026-09`,
+  ]);
+  const resolution = await readPairResolution({ registry, store, reference });
+  assert.deepEqual(resolution.timeCoverage, {
+    fromTimestamp: "2026-08-31T00:00:00.000Z",
+    untilTimestamp: "2026-09-02T00:00:00.000Z",
+  });
+}
+
 function githubRequestTrace(requests) {
   return requests.map((request) => {
     const url = new URL(request.target);
     if (request.method === "POST" && url.hostname === "uploads.github.com") {
       const name = url.searchParams.get("name");
       if (name === publicationObjectName) return "upload_publication";
-      if (name.startsWith("day-")) return "upload_day";
+      if (name.startsWith("candles-") && name.includes("-1m-g")) return "upload_day";
+      if (name.startsWith("candles-")) return "upload_resolution";
       if (name.startsWith("month-")) return "upload_month";
       if (name.startsWith("state-")) return "upload_state";
     }
@@ -177,6 +237,12 @@ function githubRequestTrace(requests) {
     if (request.method === "DELETE") return "delete_asset";
     return `${request.method} ${url.hostname}${url.pathname}`;
   });
+}
+
+function requestMethodCounts(requests) {
+  const counts = {};
+  for (const request of requests) counts[request.method] = (counts[request.method] ?? 0) + 1;
+  return counts;
 }
 
 test("every durable replacement boundary restarts into exactly one selected closure", async () => {
@@ -249,6 +315,44 @@ test("every durable replacement boundary restarts into exactly one selected clos
   }
 });
 
+test("a cross-month two-day candle and both parent months share one recoverable selection", async () => {
+  const complete = await initializedCrossMonthPair();
+  const completeTrace = [];
+  const completed = await runCrossMonthReplacement({
+    ...complete,
+    store: interruptedStore(complete.store, Number.POSITIVE_INFINITY, completeTrace),
+  });
+  assert.equal(completed.sequence, 2);
+  assert.equal(completeTrace.filter((entry) => entry === "write_resolution").length, 9);
+  assert.equal(completeTrace.filter((entry) => entry === "write_month").length, 2);
+  await assertOnlySelectedClosure({ ...complete, store: complete.store, expectedSequence: 2 });
+  await assertCrossMonthResolution({ ...complete, store: complete.store });
+
+  const stateMutation = completeTrace.indexOf("write_state") + 1;
+  assert.ok(stateMutation > 1);
+  for (const stopAfter of [stateMutation - 1, stateMutation]) {
+    const fixture = await initializedCrossMonthPair();
+    const trace = [];
+    await assert.rejects(
+      runCrossMonthReplacement({
+        ...fixture,
+        store: interruptedStore(fixture.store, stopAfter, trace),
+      }),
+      /Simulated process termination/,
+    );
+    const restarted = directory(fixture.root, fixture.registry);
+    const recovered = await recoverPairPublication({
+      registry: fixture.registry,
+      pairId: fixture.pair.pairId,
+      store: restarted,
+    });
+    const selected = stopAfter >= stateMutation;
+    assert.equal(recovered.status, selected ? "committed" : "aborted");
+    await assertOnlySelectedClosure({ ...fixture, store: restarted, expectedSequence: selected ? 2 : 1 });
+    if (selected) await assertCrossMonthResolution({ ...fixture, store: restarted });
+  }
+});
+
 test("the fixed publication slot rejects a different transition before any child write", async () => {
   const fixture = await initializedPair();
   let manifestBytes;
@@ -261,11 +365,11 @@ test("the fixed publication slot rejects a different transition before any child
     /Simulated process termination/,
   );
   assert.deepEqual(trace, ["create_publication"]);
-  const admitted = decodePublicationManifest(manifestBytes, {
+  const admitted = decodePairPublicationManifest(manifestBytes, {
     registry: fixture.registry,
     expectedPairId: fixture.pair.pairId,
   });
-  const conflicting = encodePublicationManifest({ ...admitted, phase: "history" }, {
+  const conflicting = encodePairPublicationManifest({ ...admitted, phase: "history" }, {
     registry: fixture.registry,
     expectedPairId: fixture.pair.pairId,
   });
@@ -400,9 +504,17 @@ test("a cold GitHub replacement follows the request trace derived from the publi
     "list_assets",
     "get_asset",
     "get_asset",
+    "get_asset",
+    "get_asset",
     "upload_publication",
     "get_asset",
     "upload_day",
+    "get_asset",
+    "upload_resolution",
+    "get_asset",
+    "upload_resolution",
+    "get_asset",
+    "upload_resolution",
     "get_asset",
     "upload_month",
     "get_asset",
@@ -412,7 +524,83 @@ test("a cold GitHub replacement follows the request trace derived from the publi
     "delete_asset",
     "delete_asset",
     "delete_asset",
+    "delete_asset",
+    "delete_asset",
   ]);
+});
+
+test("one maximum scheduled pair collect stays inside its complete GitHub request trace", async () => {
+  const registry = await compactPairRegistry({
+    activationTimestamp: "2026-08-01T00:00:00.000Z",
+    maximumBlocksPerRun: 2_000,
+  });
+  const pair = pairEntryBySymbol(registry, "NVDA").pair;
+  const activation = BigInt(pair.activation.blockNumber);
+  const githubApi = new FakeGitHub();
+  const collectionPlan = await loadCollectionPlan(registry);
+  let now = 1_000;
+  const pacingWaits = [];
+  const createStore = ({ paced = false } = {}) => new GitHubReleaseStore({
+    repository: "owner/index",
+    token: "test-token",
+    maximumArtifactBytes: registry.collection.maximumArtifactBytes,
+    minimumMutationIntervalMilliseconds: paced ? githubMutationIntervalMilliseconds(collectionPlan) : 0,
+    nowImplementation: () => now,
+    waitImplementation: async (milliseconds) => {
+      pacingWaits.push(milliseconds);
+      now += milliseconds;
+    },
+    fetchImplementation: githubApi.fetch,
+  });
+  for (let day = 1; day <= 3; day += 1) {
+    await runCurrentPhase({
+      registry,
+      pairId: pair.pairId,
+      store: createStore(),
+      rpc: new FakePairRpc({
+        registry,
+        pair,
+        finalizedNumber: activation + BigInt(day * 1_440),
+        secondsPerBlock: 60,
+      }),
+    });
+  }
+
+  githubApi.requests.length = 0;
+  const collected = await runPairCommand({
+    operation: "collect",
+    target: { kind: "pair", id: pair.pairId },
+  }, registry, {
+    store: createStore({ paced: true }),
+    clients: [new FakePairRpc({
+      registry,
+      pair,
+      finalizedNumber: activation + 5_820n,
+      secondsPerBlock: 60,
+    })],
+    environment: {},
+    writeLog: () => {},
+  });
+  assert.deepEqual(collected.result.map((entry) => entry.status), ["published", "published"]);
+  assert.equal(githubRequestTrace(githubApi.requests).filter((entry) => entry === "upload_resolution").length, 12);
+  const uploadedNames = githubApi.requests
+    .filter((request) => request.method === "POST" && new URL(request.target).hostname === "uploads.github.com")
+    .map((request) => new URL(request.target).searchParams.get("name"));
+  assert.ok(uploadedNames.some((name) => name.includes("-1m-g")));
+  for (const definition of candleResolutionCatalog.slice(1)) {
+    assert.ok(uploadedNames.some((name) => name.includes(`-${definition.label}-g`)));
+  }
+  assert.deepEqual(requestMethodCounts(githubApi.requests), { GET: 36, POST: 20, DELETE: 18 });
+  assert.equal(githubApi.requests.length, collectionPlan.capacity.github.estimatedRequestsPerPairCollect);
+  assert.equal(
+    githubApi.requests.filter((request) => request.method === "POST" || request.method === "DELETE").length,
+    collectionPlan.capacity.github.estimatedContentRequestsPerPairCollect,
+  );
+  assert.deepEqual(
+    pacingWaits,
+    Array(collectionPlan.capacity.github.estimatedContentRequestsPerPairCollect - 1)
+      .fill(githubMutationIntervalMilliseconds(collectionPlan)),
+  );
 });
 
 test("a shared GitHub adapter preserves the warm replacement request trace", async () => {
@@ -445,10 +633,18 @@ test("a shared GitHub adapter preserves the warm replacement request trace", asy
     "get_asset",
     "upload_day",
     "get_asset",
+    "upload_resolution",
+    "get_asset",
+    "upload_resolution",
+    "get_asset",
+    "upload_resolution",
+    "get_asset",
     "upload_month",
     "get_asset",
     "upload_state",
     "get_asset",
+    "delete_asset",
+    "delete_asset",
     "delete_asset",
     "delete_asset",
     "delete_asset",
@@ -500,6 +696,12 @@ test("a cold GitHub recovery resumes selected cleanup through its derived reques
     "get_release",
     "list_assets",
     "get_asset",
+    "get_asset",
+    "get_asset",
+    "get_asset",
+    "get_asset",
+    "delete_asset",
+    "delete_asset",
     "delete_asset",
     "delete_asset",
     "delete_asset",

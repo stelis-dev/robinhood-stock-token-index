@@ -4,11 +4,12 @@ Read this file before every task in this repository.
 
 ## Project and terms
 
-This repository reads finalized Uniswap V4 `Swap` events on Robinhood Chain and
-stores one-minute open, high, low, and close (OHLC) candles for registered
-trading pairs. It currently uses a local directory or GitHub Releases as
-storage. GitHub is a development and test storage service, not the source of
-market data and not a production-availability claim.
+This repository reads finalized Uniswap V4 `Swap` events on Robinhood Chain,
+stores canonical one-minute candles for registered trading pairs, and stores
+the fixed derived candle resolutions calculated directly from those one-minute
+candles. It uses a local directory or GitHub Releases as storage. GitHub is a
+development and test storage service, not the source of market data and not a
+production-availability claim.
 
 Terms used in this file:
 
@@ -39,27 +40,34 @@ Terms used in this file:
 - An **RPC endpoint** is a JSON-RPC server used to read chain data. A **finalized
   block** is the block returned for Ethereum's `finalized` tag. Do not publish
   data from a newer unfinalized block.
-- A **pair-day file** stores one pair's candles and coverage for part or all of
-  one UTC day. A **pair-month file** lists that pair's day files for one UTC
-  month. A **pair-state file** lists the months currently available for one pair
-  and records its current and historical collection boundaries.
+- A **pair-day file** stores one pair's canonical one-minute candles and
+  coverage for part or all of one UTC day. A **resolution artifact** stores one
+  derived resolution for one owner month. A **pair-month file** selects that
+  pair's day and resolution files for one UTC month. A **pair-state file** lists
+  the months currently available for one pair, the complete resolution catalog,
+  and its current and historical collection boundaries.
+- The fixed resolution catalog is `1m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`,
+  `12h`, `1d`, and `2d`. `1m` remains day-partitioned. Every other resolution is
+  independently month-partitioned and calculated directly from `1m`; a stored
+  derived resolution is never the source of another one.
 - A **publication manifest** is one internal stored file that gives an
   unfinished pair publication exact ownership of its previous and next state,
-  changed month files, and changed day files. It is not part of the public
-  pair-state, month, day, or period-read contract.
-- A stored reference's `logicalId` is its stable pair-and-month or pair-and-day
-  identifier. It contains no generation number or physical storage location.
-  Source files use **artifact** to mean one encoded state, month, or day data
-  file.
+  changed month, day, and resolution files. It is not part of the public
+  pair-state, month, day, resolution, or read contract.
+- A stored reference's `logicalId` is its stable pair-and-period identity. It
+  contains no generation number or physical storage location. Source files use
+  **artifact** to mean one encoded state, month, day, or resolution data file.
 - A **generation** is the integer sequence number used to publish a replacement
-  state, month, or day file without overwriting the preceding file. The
+  state, month, day, or resolution file without overwriting the preceding file. The
   **selected pair state** is the latest valid pair-state generation returned by
   the storage adapter.
-- `contractVersion` identifies a stored file's schema and meaning. It is not a
-  publication generation or a package version. **Canonical JSON** means that
-  one valid value has one deterministic JSON byte representation for hashing.
+- Stored files have one strict current schema and contain no schema revision or
+  implementation marker. **Canonical JSON** means that one valid value has one
+  deterministic JSON byte representation for hashing.
 - **Validation** checks one input or one stored file. Full **verification** loads
-  the selected pair state and validates every referenced month and day file.
+  the selected pair state, validates every referenced month, day, and resolution
+  file, and re-derives every resolution directly from the selected one-minute
+  files.
 - A **collection group** is only an ordered list of pair IDs run sequentially by
   one scheduled job. It owns no candle data or collection progress.
 - An operation's `phase` is `current`, `history`, or `repair`. It identifies
@@ -75,13 +83,15 @@ Terms used in this file:
   ordered optional fallback URLs. It cannot replace the primary URL or chain
   identity.
 - `collector/` validates RPC data, determines finalized coverage, decodes
-  `Swap` events, calculates one-minute candles, advances each pair's collection
-  boundaries, encodes the stored files, and verifies period reads.
+  `Swap` events, calculates canonical and derived candles, advances each pair's
+  collection boundaries, encodes the stored files, and verifies exact
+  pair/month/resolution reads.
 - `registry/collection-plan.json` is the sole source of truth for the maximum
   number of groups, maximum pairs and runtime per group, the 25 percent runtime
-  safety margin, ordered group membership, measured pair runtimes, and the cron
-  expressions assigned to each group. `scheduler/` validates that file, resolves
-  a group ID or cron expression, and runs the group's pairs sequentially.
+  safety margin, GitHub request capacity and per-pair estimates, ordered group
+  membership, measured pair runtimes, and the cron expressions assigned to each
+  group. `scheduler/` validates that file, resolves a group ID or cron expression,
+  and runs the group's pairs sequentially.
 - `storage/` reads, writes, lists, and deletes bytes at physical locations. A
   storage adapter cannot decode candles, calculate market data, combine pair
   data, or decide which stored generation is valid; it implements the selection
@@ -165,6 +175,13 @@ Terms used in this file:
   ties follow group order. Registration never creates a group, changes a cron
   expression, or changes a capacity limit. A fourth group requires a separately
   reviewed change to scheduling and expected data freshness.
+- The collection plan also admits the maximum GitHub requests and
+  content-generating requests per pair collection and validates the maximum
+  rolling-hour schedule load against its GitHub hourly and per-minute limits.
+  One command's shared GitHub adapter spaces all content-generating requests by
+  the interval derived from the per-minute limit. Group runtime estimates include
+  the maximum pacing time. Publication request-trace tests must use the admitted
+  per-pair values rather than independent numeric expectations.
 - Scheduled jobs run `collect` only. `repair` requires a manually selected pair
   or group. All jobs that can write data use one non-cancelling GitHub Actions
   concurrency queue, so an in-progress job is not cancelled and one pending job
@@ -177,23 +194,23 @@ Terms used in this file:
 - Before a pair mutation makes any RPC request, resolve its pending publication
   manifest. After every RPC read and replacement build completes, recheck the
   exact selected-state bytes, create the manifest as the first storage mutation,
-  write immutable pair-day and pair-month files, and write the new pair-state
-  generation last. Validate each write from the exact bytes returned by storage,
-  then re-read and validate the exact selected state. References to unchanged
-  months must come from the previously validated state.
+  write immutable pair-day, resolution, and pair-month files, and write the new
+  pair-state generation last. Validate each write from the exact bytes returned
+  by storage, then re-read and validate the exact selected state. References to
+  unchanged months must come from the previously validated state.
 - Do not publish an empty pair-state file. The absence of a selected state means
   that no data has been published for that pair. Every new pair-state generation
   must directly reference at least one pair-month generation written by the same
   operation, and every new pair-month generation must directly reference at
-  least one pair-day generation written by that operation.
+  least one day or resolution generation written by that operation.
 - A pair-state file directly contains its ordered month references. A year is
   derived from the `YYYY-MM` month identifier; do not create a year file, path,
   GitHub Release, reader, or compatibility name.
 - Routine publication reads and rebuilds the selected pair state. Its metadata
-  grows by one bounded month reference for each month that contains data. Read or
-  list day and month files only for months changed by the operation. Full
-  verification must stream month and day files in order instead of holding the
-  complete candle history in memory.
+  grows by one bounded month reference for each month that contains data. Read
+  or list day, resolution, and month files only for months changed by the
+  operation. Full verification must stream month, day, and resolution files in
+  order instead of holding the complete candle history in memory.
 - Publication recovery has one closed decision based on the admitted manifest
   and exact selected-state identity. If the previous state is selected, verify
   its changed closure and remove only the exact unpublished next files. If the
@@ -229,15 +246,11 @@ Terms used in this file:
   pool balance delta is zero, advance coverage without adding price, volume,
   trade count, or source positions to a candle. Do not substitute the event's
   post-swap `sqrtPriceX96` for an executed exchange ratio.
-- Change a state, month, or day `contractVersion` only when that file's stored
-  schema or meaning changes. The internal publication manifest has its own
-  schema version, which changes only when that manifest's schema or meaning
-  changes. When stored schema and meaning remain the same, runtime, RPC, retry,
-  fallback, registry, CLI, workflow, and storage changes do not change a data
-  version or add an implementation-version field.
-- Publish and read only the current stored-data contract. Replace internal
-  implementations directly; do not keep old readers, old names, aliases,
-  migrations, compatibility branches, or implementation markers.
+- Publish and read only the one strict stored-data contract. Stored state,
+  month, day, resolution, reference, and publication-manifest objects contain no
+  schema revision or implementation marker. Replace internal implementations
+  directly; do not add aliases, migrations, compatibility branches, or alternate
+  readers.
 - A missing candle is not a zero-price candle. USDG is an onchain token, not
   fiat USD. Native ETH and WETH are different assets.
 - Keep candle calculation and stored files independent of GitHub repository
@@ -265,9 +278,10 @@ Terms used in this file:
   and never contact a live endpoint.
 - Before completion, run `npm test`. Then create a non-empty offline data set
   containing a pair-state file, its referenced pair-month file, and its
-  referenced pair-day file. Run the pair-scoped directory `verify` command and a
-  bounded `read` against that same directory. Verifying an empty directory is
-  not completion evidence.
+  referenced pair-day file, and every derived resolution possible from its
+  coverage. Run the pair-scoped directory `verify` command and exact `read
+  --month --resolution` commands against that same directory. Verifying an empty
+  directory is not completion evidence.
 - A claim that GitHub publication works additionally requires a manual workflow
   run followed by verification that downloads the published files without using
   GitHub authentication.

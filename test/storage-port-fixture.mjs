@@ -2,7 +2,6 @@ export function storagePort(store, overrides = {}) {
   return {
     readSelectedState: (...args) => store.readSelectedState(...args),
     readReferenced: (...args) => store.readReferenced(...args),
-    resolvePairMonth: (...args) => store.resolvePairMonth(...args),
     writeReferenced: (...args) => store.writeReferenced(...args),
     writeState: (...args) => store.writeState(...args),
     readPublication: (...args) => store.readPublication(...args),

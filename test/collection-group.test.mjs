@@ -8,6 +8,8 @@ import {
   collectionGroupEstimatedRuntime,
   collectionGroupById,
   collectionGroupPairIds,
+  collectionPlanGithubLoad,
+  githubMutationIntervalMilliseconds,
   loadCollectionPlan,
 } from "../scheduler/collection-plan.mjs";
 import { runCollectionGroup } from "../scheduler/run-collection-group.mjs";
@@ -24,16 +26,30 @@ test("the collection plan defines all group limits, estimated runtimes, members,
   const plan = await loadCollectionPlan(pairRegistry);
   assert.deepEqual(plan.capacity, {
     durationPaddingPercent: 25,
+    github: {
+      estimatedContentRequestsPerPairCollect: 38,
+      estimatedRequestsPerPairCollect: 74,
+      maximumContentRequestsPerHour: 500,
+      maximumContentRequestsPerMinute: 80,
+      maximumRequestsPerHour: 1_000,
+    },
     maximumGroupCount: 3,
     maximumGroupSeconds: 720,
     maximumPairsPerGroup: 3,
   });
-  assert.deepEqual(plan.groups.map((group) => collectionGroupEstimatedRuntime(plan, group)), [582, 599, 589]);
+  assert.deepEqual(plan.groups.map((group) => collectionGroupEstimatedRuntime(plan, group)), [667, 684, 674]);
   assert.deepEqual(
     new Set(plan.groups.flatMap(collectionGroupPairIds)),
     new Set(pairRegistry.pairs.map((entry) => entry.pair.pairId)),
   );
   assert.equal(new Set(plan.groups.flatMap((group) => group.schedules)).size, 9);
+  assert.deepEqual(collectionPlanGithubLoad(plan), {
+    maximumPairCommandsPerHour: 12,
+    estimatedRequestsPerHour: 888,
+    estimatedContentRequestsPerHour: 456,
+    maximumPacedContentRequestsPerMinute: 80,
+  });
+  assert.equal(githubMutationIntervalMilliseconds(plan), 751);
   assert.equal(collectionGroupById(plan, "group-2"), plan.groups[1]);
   assert.throws(() => collectionGroupById(plan, "group-4"), /Unknown collection group/);
 });
@@ -87,6 +103,18 @@ test("collection-plan validation rejects group limits, estimated runtime, schedu
   const duplicateSchedule = structuredClone(plan);
   duplicateSchedule.groups[1].schedules[0] = duplicateSchedule.groups[0].schedules[0];
   invalidCandidates.push(duplicateSchedule);
+
+  const excessiveGithubRequests = structuredClone(plan);
+  excessiveGithubRequests.capacity.github.maximumRequestsPerHour = 887;
+  invalidCandidates.push(excessiveGithubRequests);
+
+  const excessiveGithubContent = structuredClone(plan);
+  excessiveGithubContent.capacity.github.maximumContentRequestsPerHour = 455;
+  invalidCandidates.push(excessiveGithubContent);
+
+  const excessiveGithubMinuteContent = structuredClone(plan);
+  excessiveGithubMinuteContent.capacity.github.maximumContentRequestsPerMinute = 37;
+  invalidCandidates.push(excessiveGithubMinuteContent);
 
   for (const candidate of invalidCandidates) {
     assert.throws(() => validateCollectionPlan(candidate, pairRegistry));
@@ -176,8 +204,8 @@ test("the unified CLI passes unchanged group operation, storage, environment, an
     store: "github",
     root: undefined,
     repository: "owner/index",
-    from: undefined,
-    until: undefined,
+    month: undefined,
+    resolution: undefined,
   })));
   assert.ok(calls.every((call) => call.registry === calls[0].registry));
   assert.ok(calls.every((call) => call.context === calls[0].context));
@@ -347,8 +375,8 @@ test("the unified CLI accepts one group or schedule target and only its allowed 
     store: "directory",
     root: "/tmp/index",
     repository: undefined,
-    from: undefined,
-    until: undefined,
+    month: undefined,
+    resolution: undefined,
   });
   assert.equal(parseArguments([
     "collect", "--schedule", "7,52 0-23/3 * * *", "--store", "github", "--repository", "owner/index",

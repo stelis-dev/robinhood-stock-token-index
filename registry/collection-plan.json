@@ -1,6 +1,13 @@
 {
   "capacity": {
     "durationPaddingPercent": 25,
+    "github": {
+      "estimatedContentRequestsPerPairCollect": 38,
+      "estimatedRequestsPerPairCollect": 74,
+      "maximumContentRequestsPerHour": 500,
+      "maximumContentRequestsPerMinute": 80,
+      "maximumRequestsPerHour": 1000
+    },
     "maximumGroupCount": 3,
     "maximumGroupSeconds": 720,
     "maximumPairsPerGroup": 3

@@ -1,4 +1,25 @@
 const utcInstantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/;
+const utcDayPattern = /^\d{4}-\d{2}-\d{2}$/;
+const utcMonthPattern = /^\d{4}-\d{2}$/;
+
+function validateUtcPeriod(value, pattern, suffix, width, label) {
+  const instant = typeof value === "string" && pattern.test(value) ? Date.parse(`${value}${suffix}`) : Number.NaN;
+  if (
+    Number.isNaN(instant)
+    || new Date(instant).toISOString().slice(0, width) !== value
+  ) {
+    throw new Error(`${label} is not canonical.`);
+  }
+  return value;
+}
+
+export function validateUtcDay(value, label = "UTC day") {
+  return validateUtcPeriod(value, utcDayPattern, "T00:00:00.000Z", 10, label);
+}
+
+export function validateUtcMonth(value, label = "UTC month") {
+  return validateUtcPeriod(value, utcMonthPattern, "-01T00:00:00.000Z", 7, label);
+}
 
 export function parseUtcInstant(value, label, minuteAligned = false) {
   if (typeof value !== "string" || !utcInstantPattern.test(value)) {
