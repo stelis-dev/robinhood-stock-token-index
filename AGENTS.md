@@ -118,10 +118,20 @@ Terms used in this file:
 - Use one code path for every registered pair. Do not add behavior selected by
   ticker symbol, alternate pools, aliases, inferred addresses, multi-pool route
   prices, sampled data, or interpolated data.
-- Only `RpcClient` chain verification, block, block-header batch, and log-read
-  operations construct JSON-RPC requests. Validate their exact method inputs
-  before any network request. Do not expose a generic method-and-parameters RPC
-  entry point to collector callers.
+- Repository-visible product and runtime JSON-RPC requests are constructed only
+  by `RpcClient` chain verification, block, block-header batch, and log-read
+  operations. Validate their exact method inputs before any network request. Do
+  not expose a generic method-and-parameters RPC entry point to collector
+  callers.
+- Query-strategy measurement code under `.WORK` may construct only the exact
+  `eth_chainId`, `eth_getBlockByNumber`, complete PoolManager `eth_getLogs`, and
+  admitted-PoolId `eth_getLogs` reads required to compare the two strategies.
+  It must validate every exact input before network access, bound and admit the
+  complete response, validate every returned `Swap` before PoolId exclusion,
+  expose no generic RPC method, and never be imported by repository-visible
+  code. It cannot mutate a registry, collector state, storage, publication,
+  workflow, or schedule. Its network execution is manual and its output is
+  measurement evidence, not product behavior or a runtime default.
 - Admit each block response once into a canonical internal block number, hash,
   and UTC-representable timestamp. For a block-header batch, validate every
   successful result against its requested number, expected log block hash, and
