@@ -263,6 +263,12 @@ Terms used in this file:
 ## Work policy
 
 - Inspect repository state before editing and preserve unrelated changes.
+- Never create a requirement, decision, design, work item, code, test, or
+  verification step from memory, prediction, customary practice, assumed
+  repository state, or an expected future need. At the point of use, inspect
+  the current owning source of truth and the exact affected producer and
+  consumer. If current direct evidence does not establish that the work is
+  required, exclude it; do not fill the gap with a default or assumption.
 - Work records contain only current status, exact verification evidence,
   unresolved debt, and the outputs and limits required by the next task. Do not
   keep diaries, timelines, abandoned alternatives, or token/context accounting.
