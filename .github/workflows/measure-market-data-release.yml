@@ -1,0 +1,63 @@
+name: Measure market-data Release storage
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: Exact measurement scale
+        required: true
+        default: launch-9
+        type: choice
+        options:
+          - launch-9
+          - stress-200
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: write
+    concurrency:
+      group: robinhood-stock-token-index-release-measurement
+      cancel-in-progress: false
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Measure isolated Release storage
+        timeout-minutes: 40
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MEASUREMENT_COMMIT: ${{ github.sha }}
+          MEASUREMENT_OUTPUT: ${{ runner.temp }}/market-data-release-measurement.json
+          MEASUREMENT_REPOSITORY: ${{ github.repository }}
+          MEASUREMENT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          MEASUREMENT_SCALE: ${{ inputs.scale }}
+        run: >-
+          node measurement/market-data-release.mjs measure
+          --repository "${MEASUREMENT_REPOSITORY}"
+          --commit "${MEASUREMENT_COMMIT}"
+          --run-id "${MEASUREMENT_RUN_ID}"
+          --scale "${MEASUREMENT_SCALE}"
+          --output "${MEASUREMENT_OUTPUT}"
+
+      - name: Prove measurement cleanup
+        if: always()
+        timeout-minutes: 5
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MEASUREMENT_REPOSITORY: ${{ github.repository }}
+          MEASUREMENT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          node measurement/market-data-release.mjs cleanup
+          --repository "${MEASUREMENT_REPOSITORY}"
+          --run-id "${MEASUREMENT_RUN_ID}"

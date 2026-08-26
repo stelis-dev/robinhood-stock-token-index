@@ -11,6 +11,17 @@ candles. It uses a local directory or GitHub Releases as storage. GitHub is a
 development and test storage service, not the source of market data and not a
 production-availability claim.
 
+Robinhood Chain and USDG at
+`0x5fc5360d0400a0fd4f2af552add042d716f1d168` are the fixed network and quote asset.
+Every configured market must quote that exact USDG contract. A token record,
+PoolKey, PoolId, symbol, or display label cannot select, replace, or reinterpret
+the quote asset.
+
+The detailed pair, file, publication, schedule, command, and verification terms
+below describe the current operating implementation. They are not replacement
+schema or design defaults. Replacement work may reuse them only after the
+accepted plan independently requires and verifies the same meaning.
+
 Terms used in this file:
 
 - A **pair** is one specific Uniswap V4 pool plus a chosen base/quote display
@@ -125,9 +136,10 @@ Terms used in this file:
   callers.
 - Query-strategy measurement code under `.WORK` may construct only the exact
   `eth_chainId`, `eth_getBlockByNumber`, complete PoolManager `eth_getLogs`, and
-  admitted-PoolId `eth_getLogs` reads required to compare the two strategies.
-  It must validate every exact input before network access, bound and admit the
-  complete response, validate every returned `Swap` before PoolId exclusion,
+  `eth_getLogs` reads filtered by all configured PoolIds required to compare the
+  two strategies.
+  It must validate every exact input before network access, read the complete
+  response within its byte limit, validate every returned `Swap` before PoolId exclusion,
   expose no generic RPC method, and never be imported by repository-visible
   code. It cannot mutate a registry, collector state, storage, publication,
   workflow, or schedule. Its network execution is manual and its output is
@@ -273,15 +285,60 @@ Terms used in this file:
 ## Work policy
 
 - Inspect repository state before editing and preserve unrelated changes.
+- For work governed by an accepted development plan, that plan's stated
+  purpose, product goal, and responsibility boundary are the highest
+  repository-level authority for scope, design evaluation, and completion.
+  Requirements, decisions, work records, current code, tests, measurements,
+  external reviews, prior plans, and the operating implementation may refine
+  their assigned facts but cannot silently narrow, replace, or contradict that
+  purpose and goal.
+- Treat every authority below the plan's purpose and goal as a claim that must
+  still be checked at its point of use. A file is a source of truth only for its
+  explicitly assigned fact and only while that fact remains consistent with the
+  product goal and its actual producer and consumer. Existing behavior, a
+  passing test, a prior approval, a measurement result, or an external review
+  is not evidence that conflicting work is correct.
+- When a lower-level authority conflicts with the plan's purpose or goal, do not
+  reinterpret the goal to preserve the lower-level artifact. Identify the exact
+  conflict and responsible component, re-check the direct evidence, and redo or
+  replace the conflicting requirement, decision, work record, code, test, or
+  measurement. If a detailed plan rule itself is shown to undermine the plan's
+  purpose, stop implementation, record the evidence, and openly amend and
+  accept the plan before continuing; never change direction silently.
+- Re-evaluate authority and consistency throughout the complete dependency
+  chain, including by tracing final outputs backward to their inputs. Do not
+  accept a statement because of its filename, age, detail, reviewer, approval,
+  or apparent source-of-truth status. Skepticism must resolve concrete product
+  or structural risk; it must not become speculative work or repeated review
+  without new evidence.
 - Never create a requirement, decision, design, work item, code, test, or
   verification step from memory, prediction, customary practice, assumed
   repository state, or an expected future need. At the point of use, inspect
   the current owning source of truth and the exact affected producer and
   consumer. If current direct evidence does not establish that the work is
   required, exclude it; do not fill the gap with a default or assumption.
+- Before changing a file, re-read the accepted user decisions and owning plan,
+  inspect the current producer, every direct consumer, and the next dependent
+  work, and check the repository for an applicable existing pattern. Do not
+  start implementation until this inspection establishes the exact need and
+  responsibility boundary. This is analysis of the work itself, not a new gate,
+  checklist artifact, or procedural deliverable.
+- Do not silently strengthen an agreed contract. A new digest, allowlist,
+  identity binding, limit, approval requirement, rejection rule, or security
+  condition is a new constraint unless the accepted requirements or a concrete
+  structural invariant already require it. Explain the exact need and obtain
+  the user's decision before implementing a new constraint. Do not infer consent
+  from a nearby requirement or from the fact that the stricter rule appears
+  safer.
 - Work records contain only current status, exact verification evidence,
   unresolved debt, and the outputs and limits required by the next task. Do not
   keep diaries, timelines, abandoned alternatives, or token/context accounting.
+- Before a work unit is ready for review, record it only as in progress and do
+  not assign a success, failure, pass, or fail result to the work unit. After
+  implementation and self-review close every known issue, mark it ready for
+  review. Only the subsequent complete review may accept or reject the work
+  unit. A test or measurement result applies only to its exact checked boundary
+  and never changes the enclosing work-unit status by itself.
 - Fix a defect in the component responsible for the violated rule. Do not add a
   special case or compatibility alias for one observed example.
 - Use the same plain term for the same concept in documentation, configuration,
@@ -290,6 +347,14 @@ Terms used in this file:
   is used without explanation.
 - Each test must prove a distinct rule or counterexample. Test count is not
   evidence; inspect what each test actually proves.
+- The absence of a test is not a defect by itself. First identify the exact
+  invariant that could be represented or accepted incorrectly, why existing
+  logic or evidence does not already prove it, and why a test is the smallest
+  appropriate proof. Do not add a test for a path that is logically excluded,
+  already proved at its owning boundary, duplicated by another test, or relevant
+  only to a later work unit. When a defect escaped, determine whether its cause
+  was a missing contract, wrong ownership, dishonest implementation, or missing
+  executable proof before deciding that another test is needed.
 - Network smoke tests are manual. Automated tests use fixed independent fixtures
   and never contact a live endpoint.
 - Before completion, run `npm test`. Then create a non-empty offline data set
