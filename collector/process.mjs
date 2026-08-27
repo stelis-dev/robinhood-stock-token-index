@@ -202,8 +202,8 @@ async function coveragePartitions({ rpc, fromBlock, untilBlock, fromTimestamp, u
   return output;
 }
 
-function admitSwapLogPage({ logs, registry, pair, minimumBlock, maximumBlock, previousPosition, identities }) {
-  const decoded = logs.map((log) => decodeSwapLog(log, { registry, pair }))
+function admitSwapLogPage({ logs, source, minimumBlock, maximumBlock, previousPosition, identities }) {
+  const decoded = logs.map((log) => decodeSwapLog(log, source))
     .sort((left, right) => compareSwapPosition(left.swapPosition, right.swapPosition));
   const expectedBlocks = new Map();
   let lastPosition = previousPosition;
@@ -229,7 +229,7 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
   const maximumBuckets = Math.ceil(durationSeconds / registry.collection.candleSeconds);
   if (!Number.isSafeInteger(maximumBuckets) || maximumBuckets <= 0) throw new Error("Collection time range is invalid.");
   const accumulator = new CandleAccumulator({
-    pairId: pair.pairId,
+    poolId: pair.pairId,
     candleSeconds: registry.collection.candleSeconds,
     maximumBuckets,
   });
@@ -237,6 +237,14 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
   const exclusive = BigInt(range.untilBlock);
   let previousSwapPosition = null;
   const swapPositionIdentities = createSwapPositionIdentities();
+  const source = Object.freeze({
+    baseDecimals: pair.baseAsset.decimals,
+    baseIsCurrency0: pair.baseIsCurrency0,
+    poolId: pair.pairId,
+    poolManager: pair.poolManager,
+    quoteDecimals: pair.quoteAsset.decimals,
+    swapTopic: pair.swapTopic,
+  });
   if (cursor > exclusive) throw new Error("Collection block range is inverted.");
   while (cursor < exclusive) {
     throwIfAborted(signal);
@@ -250,8 +258,7 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
     });
     const page = admitRpcResponse(rpcMethods.getLogs, () => admitSwapLogPage({
       logs,
-      registry,
-      pair,
+      source,
       minimumBlock: cursor,
       maximumBlock: rangeUntil,
       previousPosition: previousSwapPosition,
@@ -278,7 +285,7 @@ async function collectFixedRange({ registry, pair, rpc, range, signal }) {
         throw rejectRpcResponse("response_result_invalid", rpcMethods.getBlockByNumber);
       }
       swaps.push({
-        pairId: decoded.pairId,
+        poolId: decoded.poolId,
         blockTimestamp: header.timestampSeconds,
         swapPosition: decoded.swapPosition,
         trade: decoded.trade,

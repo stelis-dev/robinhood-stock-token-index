@@ -11,12 +11,12 @@ export class CandleAccumulator {
   #buckets = new Map();
   #lastSwapPosition = null;
 
-  constructor({ pairId, candleSeconds = 60, maximumBuckets = Number.MAX_SAFE_INTEGER }) {
-    if (!isCanonicalBytes32(pairId)) throw new Error("Candle pair identity is invalid.");
+  constructor({ poolId, candleSeconds = 60, maximumBuckets = Number.MAX_SAFE_INTEGER }) {
+    if (!isCanonicalBytes32(poolId)) throw new Error("Candle PoolId is invalid.");
     if (!Number.isSafeInteger(candleSeconds) || candleSeconds <= 0 || !Number.isSafeInteger(maximumBuckets) || maximumBuckets <= 0) {
       throw new Error("Candle accumulator limits are invalid.");
     }
-    this.pairId = pairId;
+    this.poolId = poolId;
     this.candleSeconds = candleSeconds;
     this.maximumBuckets = maximumBuckets;
   }
@@ -25,7 +25,7 @@ export class CandleAccumulator {
     if (!Array.isArray(swaps)) throw new Error("Decoded Swaps must be an array.");
     const ordered = [...swaps].sort((left, right) => compareSwapPosition(left.swapPosition, right.swapPosition));
     for (const swap of ordered) {
-      if (swap.pairId !== this.pairId) throw new Error("A Swap belongs to another pair.");
+      if (swap.poolId !== this.poolId) throw new Error("A Swap belongs to another PoolId.");
       if (this.#lastSwapPosition && compareSwapPosition(this.#lastSwapPosition, swap.swapPosition) >= 0) {
         throw new Error("Swap source positions are duplicated or unordered across ranges.");
       }

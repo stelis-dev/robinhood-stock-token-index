@@ -125,6 +125,24 @@ test("RPC block timestamps must fit the canonical UTC representation", async () 
   assert.equal(attempts, 1);
 });
 
+test("RPC block identity remains bijective across separate reads", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async () => {
+      attempts += 1;
+      const request = attempts === 1 ? rpcBlock(1) : { ...rpcBlock(1), hash: rpcBlock(2).hash };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: attempts, result: request }));
+    },
+  }));
+  await client.getBlock(1n);
+  await assert.rejects(client.getBlock(1n), (error) => (
+    error instanceof RpcResponseRejectedError
+      && error.reason === "response_result_invalid"
+      && error.rpcMethod === "eth_getBlockByNumber"
+  ));
+  assert.equal(attempts, 2);
+});
+
 test("the RPC client correlates batch IDs rather than response order", async () => {
   const fetchImplementation = async (_url, init) => {
     const requests = JSON.parse(init.body);
@@ -650,6 +668,20 @@ test("malformed success responses remain fatal and are not retried", async () =>
   }));
   await assert.rejects(client.verifyChain(0x1237), (error) => (
     error instanceof RpcResponseRejectedError && error.reason === "response_envelope_invalid"
+  ));
+  assert.equal(attempts, 1);
+});
+
+test("invalid UTF-8 RPC bytes remain fatal and are not replaced during JSON decoding", async () => {
+  let attempts = 0;
+  const client = new RpcClient(clientOptions({
+    fetchImplementation: async () => {
+      attempts += 1;
+      return new Response(Uint8Array.from([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]));
+    },
+  }));
+  await assert.rejects(client.verifyChain(0x1237), (error) => (
+    error instanceof RpcResponseRejectedError && error.reason === "response_not_json"
   ));
   assert.equal(attempts, 1);
 });

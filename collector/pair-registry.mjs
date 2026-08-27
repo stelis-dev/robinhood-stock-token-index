@@ -4,7 +4,9 @@ import { canonicalBytes } from "./canonical.mjs";
 import { isCanonicalAddress, isCanonicalBytes32 } from "./hex-data.mjs";
 import { derivePoolId } from "./pool-key.mjs";
 import { validateRpcUrl, maximumRpcBatchSize } from "./rpc-endpoint.mjs";
-import { parseUtcInstant } from "./utc-time.mjs";
+import { parseUtcInstant, subtractUtcCalendarMonths } from "./utc-time.mjs";
+
+export { subtractUtcCalendarMonths } from "./utc-time.mjs";
 
 const symbolPattern = /^[A-Z][A-Z0-9.]{0,15}$/;
 const nativeCurrency = "0x0000000000000000000000000000000000000000";
@@ -86,24 +88,6 @@ function validateMinuteBoundary(value, label, withHash = false) {
   decimalString(value.blockNumber, `${label}.blockNumber`);
   parseUtcInstant(value.timestamp, `${label}.timestamp`, true);
   if (withHash && !isCanonicalBytes32(value.hash)) throw new Error(`${label}.hash is invalid.`);
-}
-
-export function subtractUtcCalendarMonths(value, months) {
-  parseUtcInstant(value, "calendar source", true);
-  positiveInteger(months, "calendar month count");
-  const source = new Date(value);
-  const absoluteMonth = source.getUTCFullYear() * 12 + source.getUTCMonth() - months;
-  const year = Math.floor(absoluteMonth / 12);
-  const month = absoluteMonth - year * 12;
-  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  return new Date(Date.UTC(
-    year,
-    month,
-    Math.min(source.getUTCDate(), lastDay),
-    source.getUTCHours(),
-    source.getUTCMinutes(),
-    source.getUTCSeconds(),
-  )).toISOString();
 }
 
 function minuteFloor(value) {

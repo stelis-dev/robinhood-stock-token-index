@@ -60,3 +60,23 @@ export function validateUnixTimestampSeconds(value, label = "Unix timestamp") {
   formatUtcInstant(value, label);
   return value;
 }
+
+export function subtractUtcCalendarMonths(value, months) {
+  parseUtcInstant(value, "Calendar source", true);
+  if (!Number.isSafeInteger(months) || months <= 0) {
+    throw new Error("Calendar month count must be a positive safe integer.");
+  }
+  const source = new Date(value);
+  const absoluteMonth = source.getUTCFullYear() * 12 + source.getUTCMonth() - months;
+  const year = Math.floor(absoluteMonth / 12);
+  const month = absoluteMonth - year * 12;
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(
+    year,
+    month,
+    Math.min(source.getUTCDate(), lastDay),
+    source.getUTCHours(),
+    source.getUTCMinutes(),
+    source.getUTCSeconds(),
+  )).toISOString();
+}

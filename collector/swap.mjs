@@ -1,4 +1,4 @@
-import { isCanonicalBytes32, isCanonicalHexData } from "./hex-data.mjs";
+import { isCanonicalAddress, isCanonicalBytes32, isCanonicalHexData } from "./hex-data.mjs";
 import { parseHexQuantity } from "./hex-quantity.mjs";
 
 const uint256Limit = 1n << 256n;
@@ -64,24 +64,61 @@ function swapPosition(log, blockNumber) {
   if (transactionIndex > BigInt(Number.MAX_SAFE_INTEGER) || logIndex > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Swap source index exceeds the safe integer boundary.");
   }
-  return {
+  return Object.freeze({
     blockNumber: blockNumber.toString(),
     blockHash: log.blockHash,
     transactionIndex: Number(transactionIndex),
     transactionHash: log.transactionHash,
     logIndex: Number(logIndex),
-  };
+  });
 }
 
-export function decodeSwapLog(log, { registry, pair }) {
+function validateSwapSource(source) {
+  if (
+    source === null
+    || typeof source !== "object"
+    || Array.isArray(source)
+    || JSON.stringify(Object.keys(source).sort()) !== JSON.stringify([
+      "baseDecimals",
+      "baseIsCurrency0",
+      "poolId",
+      "poolManager",
+      "quoteDecimals",
+      "swapTopic",
+    ])
+    || !Number.isSafeInteger(source.baseDecimals)
+    || source.baseDecimals < 0
+    || source.baseDecimals > 255
+    || typeof source.baseIsCurrency0 !== "boolean"
+    || !isCanonicalBytes32(source.poolId)
+    || !isCanonicalAddress(source.poolManager)
+    || !Number.isSafeInteger(source.quoteDecimals)
+    || source.quoteDecimals < 0
+    || source.quoteDecimals > 255
+    || !isCanonicalBytes32(source.swapTopic)
+  ) {
+    throw new Error("Swap source is invalid.");
+  }
+  return source;
+}
+
+export function admitSwapLog(log, { poolManager, swapTopic }) {
+  if (!isCanonicalAddress(poolManager) || !isCanonicalBytes32(swapTopic)) {
+    throw new Error("Swap admission source is invalid.");
+  }
   if (log === null || typeof log !== "object" || Array.isArray(log)) throw new Error("Swap log must be an object.");
   const keys = ["address", "blockHash", "blockNumber", "data", "logIndex", "removed", "topics", "transactionHash", "transactionIndex"];
   for (const key of keys) if (!Object.hasOwn(log, key)) throw new Error(`Swap log omitted ${key}.`);
-  if (log.address !== pair.poolManager || pair.poolManager !== registry.deployment.poolManager || log.removed !== false) {
+  if (log.address !== poolManager || log.removed !== false) {
     throw new Error("Swap log has an invalid source or removal state.");
   }
-  if (!Array.isArray(log.topics) || log.topics.length !== 3 || log.topics[0] !== pair.swapTopic || pair.swapTopic !== registry.deployment.swapTopic || log.topics[1] !== pair.pairId) {
-    throw new Error("Swap log topics do not match the requested pair.");
+  if (
+    !Array.isArray(log.topics)
+    || log.topics.length !== 3
+    || log.topics[0] !== swapTopic
+    || !isCanonicalBytes32(log.topics[1])
+  ) {
+    throw new Error("Swap log topics are invalid.");
   }
   if (!isCanonicalBytes32(log.topics[2]) || !log.topics[2].startsWith(`0x${"0".repeat(24)}`)) throw new Error("Swap sender topic is invalid.");
   if (!isCanonicalBytes32(log.blockHash) || !isCanonicalBytes32(log.transactionHash)) throw new Error("Swap source hash is invalid.");
@@ -100,24 +137,51 @@ export function decodeSwapLog(log, { registry, pair }) {
     throw new Error("Non-zero Swap amounts must have opposite signs.");
   }
 
-  const decoded = {
+  return Object.freeze({
+    amount0,
+    amount1,
     blockHash: log.blockHash,
     blockNumber: logBlockNumber,
-    pairId: pair.pairId,
+    poolId: log.topics[1],
     swapPosition: swapPositionValue,
+  });
+}
+
+export function decodeAdmittedSwap(admitted, sourceValue) {
+  const source = validateSwapSource(sourceValue);
+  if (
+    admitted === null
+    || typeof admitted !== "object"
+    || Array.isArray(admitted)
+    || admitted.poolId !== source.poolId
+    || typeof admitted.amount0 !== "bigint"
+    || typeof admitted.amount1 !== "bigint"
+  ) {
+    throw new Error("Admitted Swap does not match its configured source.");
+  }
+  const decoded = {
+    blockHash: admitted.blockHash,
+    blockNumber: admitted.blockNumber,
+    poolId: source.poolId,
+    swapPosition: admitted.swapPosition,
     trade: null,
   };
-  if (amount0 === 0n || amount1 === 0n) return decoded;
+  if (admitted.amount0 === 0n || admitted.amount1 === 0n) return decoded;
 
-  const baseAmount = absolute(pair.baseIsCurrency0 ? amount0 : amount1);
-  const quoteAmount = absolute(pair.baseIsCurrency0 ? amount1 : amount0);
+  const baseAmount = absolute(source.baseIsCurrency0 ? admitted.amount0 : admitted.amount1);
+  const quoteAmount = absolute(source.baseIsCurrency0 ? admitted.amount1 : admitted.amount0);
   decoded.trade = {
     price: rational(
-      quoteAmount * 10n ** BigInt(pair.baseAsset.decimals),
-      baseAmount * 10n ** BigInt(pair.quoteAsset.decimals),
+      quoteAmount * 10n ** BigInt(source.baseDecimals),
+      baseAmount * 10n ** BigInt(source.quoteDecimals),
     ),
     baseAmountRaw: baseAmount.toString(),
     quoteAmountRaw: quoteAmount.toString(),
   };
   return decoded;
+}
+
+export function decodeSwapLog(log, sourceValue) {
+  const source = validateSwapSource(sourceValue);
+  return decodeAdmittedSwap(admitSwapLog(log, source), source);
 }

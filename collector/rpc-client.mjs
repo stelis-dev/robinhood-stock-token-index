@@ -16,6 +16,7 @@ const historicalDataRpcMethods = new Set([
   rpcMethods.getBlockByNumber,
   rpcMethods.getLogs,
 ]);
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 const retryableValidatedReadRpcErrorCodes = new Set([-32603, -32000, -32001, -32002, -32005]);
 
 function responseRejected(reason, rpcMethod, facts = {}) {
@@ -225,6 +226,8 @@ function requestEnvelope({ jsonrpc, id, method, params }) {
 }
 
 export class RpcClient {
+  #blockByNumber = new Map();
+  #blockNumberByHash = new Map();
   #id = 0;
   #lastRequestAt = 0;
   #url;
@@ -333,7 +336,7 @@ export class RpcClient {
       }
       let value;
       try {
-        value = JSON.parse(bytes.toString("utf8"));
+        value = JSON.parse(fatalUtf8Decoder.decode(bytes));
       } catch {
         throw responseRejected("response_not_json", rpcMethod);
       }
@@ -368,12 +371,31 @@ export class RpcClient {
     }
   }
 
+  #admitBlock(block) {
+    const number = block.number.toString();
+    const knownBlock = this.#blockByNumber.get(number);
+    const knownNumber = this.#blockNumberByHash.get(block.hash);
+    if (
+      knownBlock !== undefined
+        && (
+          knownBlock.hash !== block.hash
+          || knownBlock.timestampSeconds !== block.timestampSeconds
+        )
+      || knownNumber !== undefined && knownNumber !== number
+    ) {
+      throw responseRejected("response_result_invalid", rpcMethods.getBlockByNumber);
+    }
+    this.#blockByNumber.set(number, block);
+    this.#blockNumberByHash.set(block.hash, number);
+    return block;
+  }
+
   async getBlock(selector) {
     if (selector !== "finalized" && (typeof selector !== "bigint" || selector < 0n)) {
       throw new Error("RPC block selector is invalid.");
     }
     const encoded = typeof selector === "bigint" ? `0x${selector.toString(16)}` : selector;
-    return this.#call(rpcMethods.getBlockByNumber, [encoded, false]);
+    return this.#admitBlock(await this.#call(rpcMethods.getBlockByNumber, [encoded, false]));
   }
 
   async getBlockHeaders(expectations, batchSize, { minimumTimestampSeconds, maximumTimestampSeconds } = {}) {
@@ -414,7 +436,7 @@ export class RpcClient {
         maximumTimestampSeconds,
       })));
       for (let index = 0; index < part.length; index += 1) {
-        output.set(part[index].number.toString(), results[index]);
+        output.set(part[index].number.toString(), this.#admitBlock(results[index]));
       }
     }
     return output;

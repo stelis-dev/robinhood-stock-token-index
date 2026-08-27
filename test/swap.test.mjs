@@ -12,16 +12,24 @@ test("Swap decoding separates event validity from the ability to calculate a tra
     Math.floor(Date.parse(pair.activation.timestamp) / 1000),
   );
   const log = (amount0, amount1) => pairSwapLog({ registry, pair, block, amount0, amount1 });
+  const source = {
+    baseDecimals: pair.baseAsset.decimals,
+    baseIsCurrency0: pair.baseIsCurrency0,
+    poolId: pair.pairId,
+    poolManager: pair.poolManager,
+    quoteDecimals: pair.quoteAsset.decimals,
+    swapTopic: pair.swapTopic,
+  };
 
-  const oneZero = decodeSwapLog(log(0n, -1n), { registry, pair });
+  const oneZero = decodeSwapLog(log(0n, -1n), source);
   assert.equal(oneZero.blockNumber, BigInt(pair.activation.blockNumber));
   assert.equal(oneZero.blockHash, pair.activation.hash);
-  assert.equal(oneZero.pairId, pair.pairId);
+  assert.equal(oneZero.poolId, pair.pairId);
   assert.equal(oneZero.swapPosition.blockNumber, pair.activation.blockNumber);
   assert.equal(oneZero.trade, null);
-  assert.equal(decodeSwapLog(log(0n, 0n), { registry, pair }).trade, null);
+  assert.equal(decodeSwapLog(log(0n, 0n), source).trade, null);
   assert.throws(
-    () => decodeSwapLog(log(1n, 1n), { registry, pair }),
+    () => decodeSwapLog(log(1n, 1n), source),
     /Non-zero Swap amounts must have opposite signs/,
   );
 
@@ -30,7 +38,7 @@ test("Swap decoding separates event validity from the ability to calculate a tra
   words[2] = "0".repeat(64);
   invalidPrice.data = `0x${words.join("")}`;
   assert.throws(
-    () => decodeSwapLog(invalidPrice, { registry, pair }),
+    () => decodeSwapLog(invalidPrice, source),
     /Swap price or fee is invalid/,
   );
 
@@ -41,6 +49,6 @@ test("Swap decoding separates event validity from the ability to calculate a tra
   ]) {
     const invalidData = log(-1n, 1n);
     mutate(invalidData);
-    assert.throws(() => decodeSwapLog(invalidData, { registry, pair }), expected);
+    assert.throws(() => decodeSwapLog(invalidData, source), expected);
   }
 });
