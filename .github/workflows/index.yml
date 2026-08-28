@@ -89,7 +89,6 @@ jobs:
       - name: Run market-data operation
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          INDEX_RPC_URL: ${{ secrets.INDEX_RPC_URL }}
           INDEX_RPC_FALLBACK_URL_0: ${{ secrets.INDEX_RPC_FALLBACK_URL_0 }}
           INDEX_RPC_FALLBACK_URL_1: ${{ secrets.INDEX_RPC_FALLBACK_URL_1 }}
           MANUAL_OPERATION: ${{ inputs.operation }}

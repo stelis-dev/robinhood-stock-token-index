@@ -48,7 +48,6 @@ npm ci --ignore-scripts
 Collect all configured base currencies into a directory:
 
 ```bash
-INDEX_RPC_URL='https://...' \
 node cli.mjs collect \
   --store directory \
   --root /absolute/path/to/market-data
@@ -57,7 +56,6 @@ node cli.mjs collect \
 Collect to GitHub Releases:
 
 ```bash
-INDEX_RPC_URL='https://...' \
 GITHUB_TOKEN='...' \
 node cli.mjs collect \
   --store github \
@@ -69,7 +67,8 @@ GitHub repository or Directory root. The repository Actions workflow enforces
 this for automated GitHub writes through its non-cancelling concurrency queue;
 direct CLI callers must preserve the same storage-surface serialization.
 
-Optional fallbacks are complete secret URLs in this order:
+The fixed primary RPC is `https://rpc.mainnet.chain.robinhood.com`. Optional
+fallbacks are complete secret URLs in this order:
 
 ```text
 INDEX_RPC_FALLBACK_URL_0
@@ -105,7 +104,6 @@ Repair requires one exact recorded PoolId range and changes neither current nor
 history progress:
 
 ```bash
-INDEX_RPC_URL='https://...' \
 node cli.mjs repair \
   --base 0x... \
   --pool-id 0x... \

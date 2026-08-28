@@ -13,6 +13,7 @@ import { createMarketDataReader } from "./collector/market-data-reader.mjs";
 import { verifyMarketDataRecording } from "./collector/market-data-verifier.mjs";
 import { RpcClient } from "./collector/rpc-client.mjs";
 import {
+  marketDataPrimaryRpcUrl,
   marketDataRpcLimits,
   maximumRpcEndpointCount,
   validateRpcUrl,
@@ -24,34 +25,33 @@ const flags = new Set([
   "--base", "--from-block", "--from-timestamp", "--month", "--pool-id",
   "--repository", "--resolution", "--root", "--store", "--until-block", "--until-timestamp",
 ]);
-const rpcEnvironmentNames = Object.freeze([
-  "INDEX_RPC_URL",
+const rpcFallbackEnvironmentNames = Object.freeze([
   "INDEX_RPC_FALLBACK_URL_0",
   "INDEX_RPC_FALLBACK_URL_1",
 ]);
-if (rpcEnvironmentNames.length !== maximumRpcEndpointCount) throw new Error("RPC endpoint inputs are inconsistent.");
+const rpcEndpointSourceNames = Object.freeze(["primary", ...rpcFallbackEnvironmentNames]);
+if (rpcEndpointSourceNames.length !== maximumRpcEndpointCount) throw new Error("RPC endpoint inputs are inconsistent.");
 
 export function rpcEndpointSourceName(index) {
-  if (!Number.isSafeInteger(index) || index < 0 || index >= rpcEnvironmentNames.length) {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= rpcEndpointSourceNames.length) {
     throw new Error("RPC endpoint selection is invalid.");
   }
-  return rpcEnvironmentNames[index];
+  return rpcEndpointSourceNames[index];
 }
 
 export function selectRpcUrls(environment) {
   if (environment === null || typeof environment !== "object" || Array.isArray(environment)) throw new Error("RPC environment is invalid.");
-  const allowed = new Set(rpcEnvironmentNames);
+  const allowed = new Set(rpcFallbackEnvironmentNames);
   for (const [name, value] of Object.entries(environment)) {
     if (name.startsWith("INDEX_RPC_") && value !== undefined && value !== "" && !allowed.has(name)) {
       throw new Error("RPC environment contains an unsupported setting.");
     }
   }
-  const values = [];
+  const values = [validateRpcUrl(marketDataPrimaryRpcUrl, "Fixed primary RPC URL")];
   let missing = false;
-  for (const name of rpcEnvironmentNames) {
+  for (const name of rpcFallbackEnvironmentNames) {
     const value = environment[name];
     if (value === undefined || value === "") {
-      if (name === "INDEX_RPC_URL") throw new Error("INDEX_RPC_URL is required.");
       missing = true;
       continue;
     }

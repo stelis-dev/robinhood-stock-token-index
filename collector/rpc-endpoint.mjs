@@ -1,5 +1,6 @@
 export const maximumRpcEndpointCount = 3;
 export const maximumRpcBatchSize = 100;
+export const marketDataPrimaryRpcUrl = "https://rpc.mainnet.chain.robinhood.com";
 export const marketDataRpcLimits = Object.freeze({
   maximumResponseBytes: 16_777_216,
   maximumRpcAttempts: 7,

@@ -55,17 +55,15 @@ test("the CLI owns one shared collection target and exact read and repair inputs
   assert.throws(() => parseArguments(["collect", "--store", "github", "--repository", "owner/index", "--root", "/tmp/index"]), /cannot cross/);
 });
 
-test("RPC endpoints come only from the required primary and two ordered fallback secrets", () => {
-  assert.deepEqual(selectRpcUrls({ INDEX_RPC_URL: "https://primary.example" }), ["https://primary.example/"]);
+test("RPC endpoints use the fixed primary and two ordered optional fallback secrets", () => {
+  assert.deepEqual(selectRpcUrls({}), ["https://rpc.mainnet.chain.robinhood.com/"]);
   assert.deepEqual(selectRpcUrls({
-    INDEX_RPC_URL: "https://primary.example",
     INDEX_RPC_FALLBACK_URL_0: "https://second.example/key",
     INDEX_RPC_FALLBACK_URL_1: "https://third.example/key",
-  }), ["https://primary.example/", "https://second.example/key", "https://third.example/key"]);
-  assert.equal(rpcEndpointSourceName(0), "INDEX_RPC_URL");
-  assert.throws(() => selectRpcUrls({}), /required/);
+  }), ["https://rpc.mainnet.chain.robinhood.com/", "https://second.example/key", "https://third.example/key"]);
+  assert.equal(rpcEndpointSourceName(0), "primary");
+  assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
   assert.throws(() => selectRpcUrls({
-    INDEX_RPC_URL: "https://primary.example",
     INDEX_RPC_FALLBACK_URL_1: "https://third.example",
   }), /contiguous/);
   assert.throws(() => selectRpcUrls({
@@ -95,7 +93,8 @@ test("read and verify report no selected root without claiming physical storage 
 test("the Work 3 workflow exposes manual shared operations without early schedule activation", async () => {
   const source = await readFile(new URL("../.github/workflows/index.yml", import.meta.url), "utf8");
   assert.deepEqual([...source.matchAll(/- cron: "([^"]+)"/g)], []);
-  assert.match(source, /INDEX_RPC_URL: \$\{\{ secrets\.INDEX_RPC_URL \}\}/);
+  assert.doesNotMatch(source, /INDEX_RPC_URL/);
+  assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
   assert.match(source, /node cli\.mjs collect --store github/);
   assert.match(source, /node cli\.mjs repair/);
   assert.doesNotMatch(source, /--pair|--group|--schedule|targetKind|targetId/);

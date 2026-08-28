@@ -59,9 +59,10 @@ than detailed code, tests, measurements, external reviews, or former behavior.
 - Robinhood Chain, fixed USDG, fixed PoolManager, and USDG decimals are admitted
   global facts. Every configured PoolKey must contain its parent base currency
   and fixed USDG, and its derived PoolId must equal the configured PoolId.
-- Required RPC input is `INDEX_RPC_URL`. Optional ordered fallbacks are
-  `INDEX_RPC_FALLBACK_URL_0` and `INDEX_RPC_FALLBACK_URL_1`. They are complete
-  secret URLs and are not stored market data.
+- The fixed primary RPC is `https://rpc.mainnet.chain.robinhood.com`.
+  Optional ordered fallbacks are `INDEX_RPC_FALLBACK_URL_0` and
+  `INDEX_RPC_FALLBACK_URL_1`. They are complete secret URLs and are not stored
+  market data.
 - `collector/` owns configuration admission, shared planning and RPC reads,
   Swap validation, PoolId classification, candles, resolutions, logical files,
   packing, publication, recovery, retention, reads, and full verification.
