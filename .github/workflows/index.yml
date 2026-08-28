@@ -34,6 +34,8 @@ on:
         description: Repair range end
         required: false
         type: string
+  schedule:
+    - cron: "7,22,37,52 * * * *"
   pull_request:
   push:
 
@@ -62,7 +64,7 @@ jobs:
         run: npm test
 
   operate:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -88,6 +90,7 @@ jobs:
 
       - name: Run market-data operation
         env:
+          EVENT_NAME: ${{ github.event_name }}
           GITHUB_TOKEN: ${{ github.token }}
           INDEX_RPC_FALLBACK_URL_0: ${{ secrets.INDEX_RPC_FALLBACK_URL_0 }}
           INDEX_RPC_FALLBACK_URL_1: ${{ secrets.INDEX_RPC_FALLBACK_URL_1 }}
@@ -100,7 +103,7 @@ jobs:
           REPAIR_UNTIL_TIMESTAMP: ${{ inputs.untilTimestamp }}
         run: |
           set -euo pipefail
-          if [[ "${MANUAL_OPERATION}" == "collect" ]]; then
+          if [[ "${EVENT_NAME}" == "schedule" || "${MANUAL_OPERATION}" == "collect" ]]; then
             node cli.mjs collect --store github --repository "${INDEX_REPOSITORY}"
           else
             node cli.mjs repair \

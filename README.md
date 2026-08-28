@@ -67,6 +67,9 @@ GitHub repository or Directory root. The repository Actions workflow enforces
 this for automated GitHub writes through its non-cancelling concurrency queue;
 direct CLI callers must preserve the same storage-surface serialization.
 
+The GitHub Actions workflow runs shared `collect` at minutes `7`, `22`, `37`,
+and `52` of every UTC hour. Scheduled runs never invoke `repair`.
+
 The fixed primary RPC is `https://rpc.mainnet.chain.robinhood.com`. Optional
 fallbacks are complete secret URLs in this order:
 

@@ -90,15 +90,17 @@ test("read and verify report no selected root without claiming physical storage 
   assert.deepEqual(read, { status: "unpublished" });
 });
 
-test("the Work 3 workflow exposes manual shared operations without early schedule activation", async () => {
+test("the qualified workflow schedules only shared collect every fifteen minutes", async () => {
   const source = await readFile(new URL("../.github/workflows/index.yml", import.meta.url), "utf8");
-  assert.deepEqual([...source.matchAll(/- cron: "([^"]+)"/g)], []);
+  assert.deepEqual([...source.matchAll(/- cron: "([^"]+)"/g)].map((match) => match[1]), ["7,22,37,52 * * * *"]);
   assert.doesNotMatch(source, /INDEX_RPC_URL/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
   assert.match(source, /node cli\.mjs collect --store github/);
   assert.match(source, /node cli\.mjs repair/);
   assert.doesNotMatch(source, /--pair|--group|--schedule|targetKind|targetId/);
-  assert.doesNotMatch(source, /github\.event_name == 'schedule'/);
+  assert.match(source, /github\.event_name == 'workflow_dispatch' \|\| github\.event_name == 'schedule'/);
+  assert.match(source, /EVENT_NAME: \$\{\{ github\.event_name \}\}/);
+  assert.match(source, /"\$\{EVENT_NAME\}" == "schedule" \|\| "\$\{MANUAL_OPERATION\}" == "collect"/);
   assert.match(source, /cancel-in-progress: false/);
   assert.match(source, /queue: max/);
 });
