@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { encodeArtifact } from "../collector/canonical.mjs";
 import { loadMarketDataConfiguration } from "../collector/market-data-configuration.mjs";
+import { derivePoolId } from "../collector/pool-key.mjs";
 import {
   applyBaseStateResult,
   buildInitialMarketDataRecording,
@@ -180,6 +181,72 @@ test("one base result updates coverage, candles, and PoolId progress through one
   const repairedDay = createBaseDayCandidate({ configuration, previousDay: currentDay, result: repair });
   assert.equal(repairedDay.candles.length, 2);
   assert.equal(repairedDay.candles[1].firstSource.blockNumber, "50001101");
+});
+
+test("a configured PoolId change preserves previous facts and starts at the selected current boundary", async () => {
+  const { configuration } = await loadMarketDataConfiguration();
+  const base = configuration.bases[0];
+  const previousPoolKey = { ...base.poolKey, fee: base.poolKey.fee + 1 };
+  const previousPoolId = derivePoolId(previousPoolKey);
+  const previousFrom = { blockNumber: "50000000", timestamp: "2026-08-27T00:00:00.000Z" };
+  const currentBoundary = { blockNumber: "50001000", timestamp: "2026-08-27T00:15:00.000Z" };
+  const previousState = {
+    baseCurrencyAddress: base.baseCurrencyAddress,
+    decimals: base.decimals,
+    months: [],
+    poolPeriods: [{
+      fromBlock: previousFrom.blockNumber,
+      fromTimestamp: previousFrom.timestamp,
+      poolId: previousPoolId,
+      untilBlock: currentBoundary.blockNumber,
+      untilTimestamp: currentBoundary.timestamp,
+    }],
+    pools: {
+      [previousPoolId]: {
+        historyFrom: previousFrom,
+        initialize: base.initialize,
+        poolKey: previousPoolKey,
+        sourceFrom: previousFrom,
+      },
+    },
+  };
+  assert.deepEqual(validateBaseStateProgress(previousState, configuration), previousState);
+
+  const current = result(
+    base,
+    "current",
+    currentBoundary.timestamp,
+    "2026-08-27T00:30:00.000Z",
+    currentBoundary.blockNumber,
+    "50002000",
+  );
+  const updated = applyBaseStateResult({
+    configuration,
+    previousState,
+    result: current,
+    sourceFrom: currentBoundary,
+  });
+
+  assert.deepEqual(updated.poolPeriods.map((period) => ({
+    fromTimestamp: period.fromTimestamp,
+    poolId: period.poolId,
+    untilTimestamp: period.untilTimestamp,
+  })), [
+    {
+      fromTimestamp: previousFrom.timestamp,
+      poolId: previousPoolId,
+      untilTimestamp: currentBoundary.timestamp,
+    },
+    {
+      fromTimestamp: currentBoundary.timestamp,
+      poolId: base.poolId,
+      untilTimestamp: current.coverage.untilTimestamp,
+    },
+  ]);
+  assert.deepEqual(updated.pools[previousPoolId], previousState.pools[previousPoolId]);
+  assert.deepEqual(updated.pools[base.poolId].sourceFrom, currentBoundary);
+  assert.deepEqual(updated.pools[base.poolId].historyFrom, currentBoundary);
+  assert.deepEqual(validateBaseStateProgress(updated, configuration), updated);
 });
 
 test("clean launch builds data, month index, state index, root, and publication in dependency order", async () => {

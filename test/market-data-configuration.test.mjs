@@ -21,8 +21,9 @@ function encoded(value) {
 
 test("the human-authored market-data configuration admits the exact base/USDG pools", async () => {
   const admitted = await loadMarketDataConfiguration();
-  assert.equal(admitted.configuration.bases.length, 9);
-  assert.equal(admitted.configuration.poolIds.length, 9);
+  const configuredBaseCount = Object.keys(admitted.value.baseCurrencies).length;
+  assert.equal(admitted.configuration.bases.length, configuredBaseCount);
+  assert.equal(admitted.configuration.poolIds.length, configuredBaseCount);
   assert.equal(admitted.configuration.bases[0].baseCurrencyAddress, nativeEthAddress);
   assert.equal(admitted.configuration.bases[0].decimals, 18);
   assert.equal(admitted.configuration.poolManager, marketDataPoolManagerAddress);

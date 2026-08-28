@@ -185,7 +185,7 @@ test("one undivided request covers all PoolIds before capacity-only PoolId split
     rpcClients: [rpc],
   });
   assert.equal(completed.result.phase, "current");
-  assert.equal(completed.result.bases.length, 9);
+  assert.equal(completed.result.bases.length, configuration.bases.length);
   assert.deepEqual(rpc.logRequests[0].poolIds, configuration.poolIds);
   assert.ok(rpc.logRequests.length > 1);
   assert.ok(completed.result.bases.every((base) => base.candles.length === 1));
@@ -419,13 +419,19 @@ test("a new PoolId exposes the first block of its Initialize minute as sourceFro
   const oldest = configuration.bases.reduce((left, right) => (
     BigInt(left.initialize.blockNumber) < BigInt(right.initialize.blockNumber) ? left : right
   ));
-  const firstMinuteBlock = 1_576_359n;
+  const initializeMinute = minuteFloor(oldest.initialize.timestamp);
+  const firstMinuteBlock = BigInt(oldest.initialize.blockNumber) - 100n;
+  const secondsIntoMinute = Math.max(
+    1,
+    Math.floor((Date.parse(oldest.initialize.timestamp) - Date.parse(initializeMinute)) / 1_000),
+  );
+  const secondsPerBlock = secondsIntoMinute / 100;
   const rpc = new FakeSharedRpc({
     configuration,
     originBlock: firstMinuteBlock,
-    originTimestamp: "2026-07-02T23:28:00.000Z",
-    finalizedNumber: firstMinuteBlock + 600n,
-    secondsPerBlock: 11 / 101,
+    originTimestamp: initializeMinute,
+    finalizedNumber: firstMinuteBlock + BigInt(Math.ceil(70 / secondsPerBlock)),
+    secondsPerBlock,
   });
   const prepared = await prepareSharedCollectionPhase({
     admittedConfiguration,
@@ -434,10 +440,10 @@ test("a new PoolId exposes the first block of its Initialize minute as sourceFro
   });
   const work = prepared.preparedPhase.work.find((entry) => entry.poolId === oldest.poolId);
   const source = prepared.preparedPhase.newSources.find((entry) => entry.poolId === oldest.poolId);
-  assert.equal(work.fromTimestamp, "2026-07-02T23:28:00.000Z");
+  assert.equal(work.fromTimestamp, initializeMinute);
   assert.deepEqual(source.sourceFrom, {
     blockNumber: firstMinuteBlock.toString(),
-    timestamp: "2026-07-02T23:28:00.000Z",
+    timestamp: initializeMinute,
   });
   assert.notEqual(source.sourceFrom.blockNumber, oldest.initialize.blockNumber);
 });

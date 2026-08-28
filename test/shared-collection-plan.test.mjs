@@ -70,7 +70,10 @@ test("current collection joins every new-base suffix to the overlapping shared q
   });
   assert.equal(plan.phase, "current");
   assert.equal(plan.work.filter((entry) => entry.kind === "current").length, 2);
-  assert.equal(plan.work.filter((entry) => entry.kind === "initial").length, 7);
+  assert.equal(
+    plan.work.filter((entry) => entry.kind === "initial").length,
+    configuration.bases.length - selectedBases.length,
+  );
   assert.deepEqual(plan.ranges, [{
     fromTimestamp: currentUntil.timestamp,
     untilTimestamp: target.timestamp,
