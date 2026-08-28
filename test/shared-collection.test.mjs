@@ -7,54 +7,9 @@ import {
   executeSharedCollectionPhase,
   prepareSharedCollectionPhase,
 } from "../collector/shared-collection.mjs";
+import { marketDataBlockHash, marketDataSwapLog } from "./market-data-fixtures.mjs";
 
 const minuteFloor = (value) => new Date(Math.floor(Date.parse(value) / 60_000) * 60_000).toISOString();
-
-function hex(value, bytes = 32) {
-  return BigInt(value).toString(16).padStart(bytes * 2, "0");
-}
-
-function signedWord(value, bits) {
-  const candidate = BigInt(value);
-  return hex(candidate < 0n ? (1n << 256n) + candidate : candidate);
-}
-
-function unsignedWord(value) {
-  return hex(value);
-}
-
-function blockHash(number) {
-  return `0x${hex(BigInt(number) + 1n)}`;
-}
-
-function swapLog({ configuration, base, blockNumber, baseAmountRaw, quoteAmountRaw, transactionIndex = 0, logIndex = 0, poolId = base.poolId }) {
-  const baseAmount = BigInt(baseAmountRaw);
-  const quoteAmount = BigInt(quoteAmountRaw);
-  const amount0 = base.baseIsCurrency0 ? -baseAmount : quoteAmount;
-  const amount1 = base.baseIsCurrency0 ? quoteAmount : -baseAmount;
-  return {
-    address: configuration.poolManager,
-    blockHash: blockHash(blockNumber),
-    blockNumber: `0x${BigInt(blockNumber).toString(16)}`,
-    data: `0x${[
-      signedWord(amount0, 128),
-      signedWord(amount1, 128),
-      unsignedWord(1n << 96n),
-      unsignedWord(1_000_000n),
-      signedWord(0n, 24),
-      unsignedWord(3_000n),
-    ].join("")}`,
-    logIndex: `0x${BigInt(logIndex).toString(16)}`,
-    removed: false,
-    topics: [
-      configuration.swapTopic,
-      poolId,
-      `0x${"0".repeat(24)}${"1".repeat(40)}`,
-    ],
-    transactionHash: `0x${hex(BigInt(blockNumber) * 1_000n + BigInt(transactionIndex) + 1n)}`,
-    transactionIndex: `0x${BigInt(transactionIndex).toString(16)}`,
-  };
-}
 
 class FakeSharedRpc {
   constructor({
@@ -84,7 +39,7 @@ class FakeSharedRpc {
     const candidate = BigInt(number);
     return Object.freeze({
       number: candidate,
-      hash: blockHash(candidate),
+      hash: marketDataBlockHash(candidate),
       timestampSeconds: this.originSeconds
         + Math.floor(Number(candidate - this.originBlock) * this.secondsPerBlock),
     });
@@ -216,7 +171,7 @@ test("one undivided request covers all PoolIds before capacity-only PoolId split
     secondsPerBlock: 60,
     maximumPoolIds: 4,
   });
-  rpc.logs = configuration.bases.map((base, index) => swapLog({
+  rpc.logs = configuration.bases.map((base, index) => marketDataSwapLog({
     configuration,
     base,
     blockNumber: originBlock,
@@ -269,7 +224,7 @@ test("endpoint fallback discards a partial history attempt and repeats the exact
     secondsPerBlock: 10,
     unavailableLogRequest: 2,
   });
-  primary.logs = [swapLog({
+  primary.logs = [marketDataSwapLog({
     configuration,
     base: second,
     blockNumber: primary.blockAt("2026-08-26T11:42:00.000Z"),
@@ -284,7 +239,7 @@ test("endpoint fallback discards a partial history attempt and repeats the exact
     secondsPerBlock: 10,
   });
   fallback.logs = [
-    swapLog({
+    marketDataSwapLog({
       configuration,
       base: first,
       blockNumber: fallback.blockAt("2026-08-26T11:50:00.000Z"),
@@ -292,7 +247,7 @@ test("endpoint fallback discards a partial history attempt and repeats the exact
       quoteAmountRaw: 2_000_000n,
       transactionIndex: 0,
     }),
-    swapLog({
+    marketDataSwapLog({
       configuration,
       base: second,
       blockNumber: fallback.blockAt("2026-08-26T11:50:00.000Z"),
@@ -341,7 +296,7 @@ test("a malformed earlier page is fatal before a later page can become unavailab
       timestamp: "2026-08-26T11:55:00.000Z",
     },
   };
-  const malformed = swapLog({
+  const malformed = marketDataSwapLog({
     configuration,
     base: second,
     blockNumber: primary.blockAt("2026-08-26T11:42:00.000Z"),
@@ -385,7 +340,7 @@ test("a malformed log outside the requested PoolId set is fatal before fallback"
     secondsPerBlock: 60,
     returnLogsOutsideFilter: true,
   });
-  const malformed = swapLog({
+  const malformed = marketDataSwapLog({
     configuration,
     base: configuration.bases[0],
     blockNumber: originBlock,
@@ -659,7 +614,7 @@ test("malformed duplicate Swap identity remains fatal", async () => {
     timestamp: "2026-08-27T00:00:00.000Z",
   };
   const base = configuration.bases[0];
-  const log = swapLog({
+  const log = marketDataSwapLog({
     configuration,
     base,
     blockNumber: originBlock,

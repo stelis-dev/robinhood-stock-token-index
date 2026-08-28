@@ -1,4 +1,4 @@
-name: Stock Token index
+name: USDG market data
 
 on:
   workflow_dispatch:
@@ -10,27 +10,30 @@ on:
         options:
           - collect
           - repair
-      targetKind:
-        description: Exact target kind
-        required: true
-        type: choice
-        options:
-          - pair
-          - group
-      targetId:
-        description: Exact pair or collection-group ID
-        required: true
+      baseCurrencyAddress:
+        description: Repair base currency address
+        required: false
         type: string
-  schedule:
-    - cron: "7,52 0-23/3 * * *"
-    - cron: "37 1-23/3 * * *"
-    - cron: "22 2-23/3 * * *"
-    - cron: "22 0-23/3 * * *"
-    - cron: "7,52 1-23/3 * * *"
-    - cron: "37 2-23/3 * * *"
-    - cron: "37 0-23/3 * * *"
-    - cron: "22 1-23/3 * * *"
-    - cron: "7,52 2-23/3 * * *"
+      poolId:
+        description: Repair PoolId
+        required: false
+        type: string
+      fromBlock:
+        description: Repair range first block
+        required: false
+        type: string
+      fromTimestamp:
+        description: Repair range start
+        required: false
+        type: string
+      untilBlock:
+        description: Repair range end block
+        required: false
+        type: string
+      untilTimestamp:
+        description: Repair range end
+        required: false
+        type: string
   pull_request:
   push:
 
@@ -59,7 +62,7 @@ jobs:
         run: npm test
 
   operate:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -83,30 +86,31 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Run index operation
+      - name: Run market-data operation
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          MANUAL_OPERATION: ${{ inputs.operation }}
-          MANUAL_TARGET_KIND: ${{ inputs.targetKind }}
-          MANUAL_TARGET_ID: ${{ inputs.targetId }}
-          SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
           GITHUB_TOKEN: ${{ github.token }}
+          INDEX_RPC_URL: ${{ secrets.INDEX_RPC_URL }}
           INDEX_RPC_FALLBACK_URL_0: ${{ secrets.INDEX_RPC_FALLBACK_URL_0 }}
           INDEX_RPC_FALLBACK_URL_1: ${{ secrets.INDEX_RPC_FALLBACK_URL_1 }}
+          MANUAL_OPERATION: ${{ inputs.operation }}
+          REPAIR_BASE: ${{ inputs.baseCurrencyAddress }}
+          REPAIR_POOL_ID: ${{ inputs.poolId }}
+          REPAIR_FROM_BLOCK: ${{ inputs.fromBlock }}
+          REPAIR_FROM_TIMESTAMP: ${{ inputs.fromTimestamp }}
+          REPAIR_UNTIL_BLOCK: ${{ inputs.untilBlock }}
+          REPAIR_UNTIL_TIMESTAMP: ${{ inputs.untilTimestamp }}
         run: |
           set -euo pipefail
-          if [[ "${EVENT_NAME}" == "schedule" ]]; then
-            OPERATION=collect
-            TARGET_FLAG=--schedule
-            TARGET_ID="${SCHEDULE_EXPRESSION}"
+          if [[ "${MANUAL_OPERATION}" == "collect" ]]; then
+            node cli.mjs collect --store github --repository "${INDEX_REPOSITORY}"
           else
-            OPERATION="${MANUAL_OPERATION}"
-            TARGET_ID="${MANUAL_TARGET_ID}"
-            case "${MANUAL_TARGET_KIND}" in
-              pair) TARGET_FLAG=--pair ;;
-              group) TARGET_FLAG=--group ;;
-              *) echo "Operation target kind is invalid." >&2; exit 1 ;;
-            esac
+            node cli.mjs repair \
+              --base "${REPAIR_BASE}" \
+              --pool-id "${REPAIR_POOL_ID}" \
+              --from-block "${REPAIR_FROM_BLOCK}" \
+              --from-timestamp "${REPAIR_FROM_TIMESTAMP}" \
+              --until-block "${REPAIR_UNTIL_BLOCK}" \
+              --until-timestamp "${REPAIR_UNTIL_TIMESTAMP}" \
+              --store github \
+              --repository "${INDEX_REPOSITORY}"
           fi
-
-          node cli.mjs "${OPERATION}" "${TARGET_FLAG}" "${TARGET_ID}" --store github --repository "${INDEX_REPOSITORY}"

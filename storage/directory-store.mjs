@@ -1,19 +1,16 @@
 import { link, mkdir, open, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+import { sha256Hex } from "../collector/canonical.mjs";
 import {
-  publicationObjectName,
-  validateStoredReference,
-  validateGeneration,
-  validatePairId,
-  validateStateIdentity,
-  validateStateBytes,
-  parseStateObjectName,
-  referenceObjectName,
-  stateObjectName,
-  StoredDataIntegrityError,
-  verifyStateIdentityBytes,
-  verifyStoredReferenceBytes,
-} from "./stored-files.mjs";
+  marketDataPublicationAssetName,
+  validateMarketDataReleaseTag,
+  validatePhysicalAssetIdentity,
+} from "../collector/market-data-assets.mjs";
+import { StoredDataIntegrityError } from "./storage-error.mjs";
+
+const marketDataNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+const temporaryNamePattern = /^[0-9a-f]{64}-[1-9][0-9]*-[0-9]+\.tmp$/u;
 
 async function entries(path) {
   try {
@@ -54,10 +51,21 @@ async function readOptionalBoundedFile(path, maximumBytes) {
   }
 }
 
-async function immutableWrite(path, bytes, maximumBytes) {
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(temporary, bytes, { flag: "wx" });
+async function cleanupTemporaryDirectory(path, signal) {
+  signal?.throwIfAborted();
+  for (const entry of await entries(path)) {
+    signal?.throwIfAborted();
+    if (entry.isFile() && temporaryNamePattern.test(entry.name)) await unlink(join(path, entry.name));
+  }
+}
+
+async function immutableWrite(path, bytes, maximumBytes, temporaryDirectory, signal) {
+  signal?.throwIfAborted();
+  await mkdir(temporaryDirectory, { recursive: true });
+  const temporary = join(temporaryDirectory, `${sha256Hex(bytes)}-${process.pid}-${Date.now()}.tmp`);
+  await writeFile(temporary, bytes, { flag: "wx", signal });
   try {
+    signal?.throwIfAborted();
     await link(temporary, path);
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
@@ -71,148 +79,114 @@ async function immutableWrite(path, bytes, maximumBytes) {
   return readBoundedFile(path, maximumBytes);
 }
 
-function referenceDirectory(root, reference) {
-  const identity = validateStoredReference(reference);
-  const pairRoot = join(root, "pairs", identity.pairId);
-  const pairMonth = identity.kind === "day" ? identity.period.slice(0, 7) : identity.period;
-  return join(pairRoot, "months", pairMonth);
-}
-
-function referencePath(root, reference) {
-  return join(referenceDirectory(root, reference), referenceObjectName(reference));
-}
-
-function stateDirectory(root, pairId) {
-  return join(root, "pairs", validatePairId(pairId), "state");
-}
-
-function statePath(root, pairId, sequence) {
-  return join(stateDirectory(root, pairId), stateObjectName(sequence));
-}
-
-function publicationPath(root, pairId) {
-  return join(stateDirectory(root, pairId), publicationObjectName);
-}
-
-async function removeExactFile(path, expectedBytes, maximumBytes) {
-  const stored = await readOptionalBoundedFile(path, maximumBytes);
-  if (stored === null) return;
-  if (!stored.equals(expectedBytes)) throw new StoredDataIntegrityError();
-  try {
-    await unlink(path);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+function marketDataPath(root, releaseTag, assetName) {
+  if (!marketDataNamePattern.test(releaseTag) || !marketDataNamePattern.test(assetName)) {
+    throw new Error("Market-data physical identity is invalid.");
   }
+  return join(root, "releases", releaseTag, assetName);
 }
 
 export class DirectoryStore {
-  constructor({ root, maximumArtifactBytes }) {
+  constructor({ root, maximumArtifactBytes, signal }) {
     if (typeof root !== "string" || root.length === 0) throw new Error("Directory root is required.");
     if (!Number.isSafeInteger(maximumArtifactBytes) || maximumArtifactBytes <= 0) throw new Error("Maximum artifact bytes is invalid.");
+    if (signal !== undefined && !(signal instanceof AbortSignal)) throw new Error("Directory storage cancellation signal is invalid.");
     this.root = root;
     this.maximumArtifactBytes = maximumArtifactBytes;
+    this.signal = signal;
+    this.temporaryDirectory = join(root, ".market-data-temporary");
+    this.mutationReady = null;
   }
 
-  async readSelectedState(pairId) {
-    validatePairId(pairId);
-    const directory = stateDirectory(this.root, pairId);
-    const candidates = (await entries(directory))
-      .filter((entry) => entry.isFile())
-      .map((entry) => ({ name: entry.name, sequence: parseStateObjectName(entry.name) }))
-      .filter((entry) => entry.sequence !== null)
-      .sort((left, right) => left.sequence - right.sequence);
-    if (candidates.length === 0) return null;
-    const selected = candidates.at(-1);
-    const gzipBytes = validateStateBytes(await readBoundedFile(join(directory, selected.name), this.maximumArtifactBytes), this.maximumArtifactBytes);
-    return { sequence: selected.sequence, gzipBytes };
+  async #prepareMutation() {
+    this.signal?.throwIfAborted();
+    if (this.mutationReady === null) {
+      this.mutationReady = cleanupTemporaryDirectory(this.temporaryDirectory, this.signal);
+    }
+    await this.mutationReady;
   }
 
-  async readReferenced(reference) {
-    return verifyStoredReferenceBytes(
-      reference,
-      await readBoundedFile(referencePath(this.root, reference), this.maximumArtifactBytes),
+  async listMarketDataAssets(releaseTag) {
+    this.signal?.throwIfAborted();
+    validateMarketDataReleaseTag(releaseTag);
+    const directory = join(this.root, "releases", releaseTag);
+    const output = [];
+    for (const entry of await entries(directory)) {
+      if (!entry.isFile() || !marketDataNamePattern.test(entry.name)) continue;
+      const bytes = await readBoundedFile(join(directory, entry.name), this.maximumArtifactBytes);
+      output.push(Object.freeze({ assetName: entry.name, bytes: bytes.byteLength, sha256: sha256Hex(bytes), state: "uploaded" }));
+    }
+    return Object.freeze(output.sort((left, right) => left.assetName.localeCompare(right.assetName)));
+  }
+
+  async readMarketDataPublication() {
+    this.signal?.throwIfAborted();
+    const bytes = await readOptionalBoundedFile(
+      marketDataPath(this.root, "market-data-catalog", marketDataPublicationAssetName),
       this.maximumArtifactBytes,
     );
+    if (bytes === null) return Object.freeze({ status: "absent" });
+    return Object.freeze({
+      bytes,
+      identity: Object.freeze({
+        assetName: marketDataPublicationAssetName,
+        bytes: bytes.byteLength,
+        releaseTag: "market-data-catalog",
+        sha256: sha256Hex(bytes),
+      }),
+      status: "uploaded",
+    });
   }
 
-  async writeReferenced(reference, gzipBytes) {
-    verifyStoredReferenceBytes(reference, gzipBytes, this.maximumArtifactBytes);
-    const directory = referenceDirectory(this.root, reference);
+  async removeMarketDataPublicationStarter() {
+    await this.#prepareMutation();
+    if (await readOptionalBoundedFile(
+      marketDataPath(this.root, "market-data-catalog", marketDataPublicationAssetName),
+      this.maximumArtifactBytes,
+    ) !== null) throw new StoredDataIntegrityError();
+  }
+
+  async readMarketDataAsset(identity, range = null) {
+    this.signal?.throwIfAborted();
+    validatePhysicalAssetIdentity(identity);
+    const stored = await readBoundedFile(marketDataPath(this.root, identity.releaseTag, identity.assetName), this.maximumArtifactBytes);
+    if (stored.byteLength !== identity.bytes || sha256Hex(stored) !== identity.sha256) throw new StoredDataIntegrityError();
+    if (range === null) return stored;
+    if (!Number.isSafeInteger(range?.from) || !Number.isSafeInteger(range?.until) || range.from < 0 || range.from >= range.until || range.until > stored.byteLength) {
+      throw new Error("Market-data byte range is invalid.");
+    }
+    return stored.subarray(range.from, range.until);
+  }
+
+  async writeMarketDataAsset(identity, bytes) {
+    await this.#prepareMutation();
+    validatePhysicalAssetIdentity(identity);
+    if (!Buffer.isBuffer(bytes) || bytes.byteLength !== identity.bytes || sha256Hex(bytes) !== identity.sha256) {
+      throw new Error("Market-data asset bytes are invalid.");
+    }
+    const directory = join(this.root, "releases", identity.releaseTag);
     await mkdir(directory, { recursive: true });
-    return verifyStoredReferenceBytes(
-      reference,
-      await immutableWrite(join(directory, referenceObjectName(reference)), gzipBytes, this.maximumArtifactBytes),
+    return immutableWrite(
+      marketDataPath(this.root, identity.releaseTag, identity.assetName),
+      bytes,
       this.maximumArtifactBytes,
+      this.temporaryDirectory,
+      this.signal,
     );
   }
 
-  async writeState(pairId, sequence, gzipBytes) {
-    validatePairId(pairId);
-    validateGeneration(sequence);
-    validateStateBytes(gzipBytes, this.maximumArtifactBytes);
-    const directory = stateDirectory(this.root, pairId);
-    await mkdir(directory, { recursive: true });
-    return validateStateBytes(
-      await immutableWrite(join(directory, stateObjectName(sequence)), gzipBytes, this.maximumArtifactBytes),
-      this.maximumArtifactBytes,
-    );
-  }
-
-  async readPublication(pairId) {
-    validatePairId(pairId);
-    const gzipBytes = await readOptionalBoundedFile(publicationPath(this.root, pairId), this.maximumArtifactBytes);
-    return gzipBytes === null ? { status: "absent" } : { status: "uploaded", gzipBytes };
-  }
-
-  async createPublication(pairId, gzipBytes) {
-    validatePairId(pairId);
-    validateStateBytes(gzipBytes, this.maximumArtifactBytes);
-    const directory = stateDirectory(this.root, pairId);
-    await mkdir(directory, { recursive: true });
-    return validateStateBytes(
-      await immutableWrite(publicationPath(this.root, pairId), gzipBytes, this.maximumArtifactBytes),
-      this.maximumArtifactBytes,
-    );
-  }
-
-  async removePublication(pairId, gzipBytes) {
-    validatePairId(pairId);
-    validateStateBytes(gzipBytes, this.maximumArtifactBytes);
-    await removeExactFile(publicationPath(this.root, pairId), gzipBytes, this.maximumArtifactBytes);
-  }
-
-  async removePublicationStarter(pairId) {
-    validatePairId(pairId);
-    if (await readOptionalBoundedFile(publicationPath(this.root, pairId), this.maximumArtifactBytes) !== null) {
-      throw new StoredDataIntegrityError();
+  async removeMarketDataAsset(identity) {
+    await this.#prepareMutation();
+    validatePhysicalAssetIdentity(identity);
+    const path = marketDataPath(this.root, identity.releaseTag, identity.assetName);
+    const stored = await readOptionalBoundedFile(path, this.maximumArtifactBytes);
+    if (stored === null) return;
+    if (stored.byteLength !== identity.bytes || sha256Hex(stored) !== identity.sha256) throw new StoredDataIntegrityError();
+    try {
+      this.signal?.throwIfAborted();
+      await unlink(path);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
     }
   }
-
-  async readState(pairId, identity) {
-    validatePairId(pairId);
-    validateStateIdentity(identity);
-    const bytes = await readOptionalBoundedFile(statePath(this.root, pairId, identity.sequence), this.maximumArtifactBytes);
-    return bytes === null ? null : verifyStateIdentityBytes(identity, bytes, this.maximumArtifactBytes);
-  }
-
-  async proveReferenced(reference) {
-    await this.readReferenced(reference);
-  }
-
-  async removeReferenced(reference) {
-    validateStoredReference(reference);
-    const bytes = await readOptionalBoundedFile(referencePath(this.root, reference), this.maximumArtifactBytes);
-    if (bytes === null) return;
-    verifyStoredReferenceBytes(reference, bytes, this.maximumArtifactBytes);
-    await removeExactFile(referencePath(this.root, reference), bytes, this.maximumArtifactBytes);
-  }
-
-  async removeState(pairId, identity) {
-    validatePairId(pairId);
-    validateStateIdentity(identity);
-    const bytes = await this.readState(pairId, identity);
-    if (bytes === null) return;
-    await removeExactFile(statePath(this.root, pairId, identity.sequence), bytes, this.maximumArtifactBytes);
-  }
-
 }

@@ -1,209 +1,105 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+
 import {
-  pairOperationFailureLog,
-  pairOperationSuccessLog,
   parseArguments,
-  publicationRecoveryLog,
   rpcEndpointSourceName,
+  runCommand,
   selectRpcUrls,
 } from "../cli.mjs";
-import { loadPairRegistry } from "../collector/pair-registry.mjs";
-import { RpcEndpointUnavailableError, RpcResponseRejectedError } from "../collector/rpc-endpoint.mjs";
-import {
-  rpcEndpointFailureFacts,
-  RpcPairOperationUnavailableError,
-} from "../collector/rpc-operation.mjs";
-import { loadCollectionPlan } from "../scheduler/collection-plan.mjs";
-import { GitHubStorageError } from "../storage/github-release-store.mjs";
-import { StoredDataIntegrityError } from "../storage/stored-files.mjs";
-import { pairEntryBySymbol } from "./pair-fixtures.mjs";
+import { loadMarketDataConfiguration } from "../collector/market-data-configuration.mjs";
+import { maximumMarketDataAssetBytes } from "../collector/market-data-assets.mjs";
+import { DirectoryStore } from "../storage/directory-store.mjs";
 
-test("the CLI validates one PoolId and sends read and storage options to their responsible components", async () => {
-  const registry = await loadPairRegistry();
-  const pairId = pairEntryBySymbol(registry, "NVDA").pair.pairId;
-  assert.deepEqual(parseArguments(["verify", "--pair", pairId, "--store", "directory", "--root", "/tmp/index"]), {
-    operation: "verify",
-    target: { kind: "pair", id: pairId },
-    store: "directory",
-    root: "/tmp/index",
-    repository: undefined,
-    month: undefined,
-    resolution: undefined,
-  });
+test("the CLI owns one shared collection target and exact read and repair inputs", () => {
   assert.deepEqual(parseArguments([
+    "collect", "--store", "github", "--repository", "owner/index",
+  ]), {
+    baseCurrencyAddress: undefined,
+    fromBlock: undefined,
+    fromTimestamp: undefined,
+    month: undefined,
+    operation: "collect",
+    poolId: undefined,
+    repository: "owner/index",
+    resolution: undefined,
+    root: undefined,
+    store: "github",
+    untilBlock: undefined,
+    untilTimestamp: undefined,
+  });
+  assert.equal(parseArguments([
     "read",
-    "--pair", pairId,
+    "--base", `0x${"1".repeat(40)}`,
     "--month", "2026-08",
     "--resolution", "4h",
-    "--store", "github",
-    "--repository", "owner/repo",
-  ]), {
-    operation: "read",
-    target: { kind: "pair", id: pairId },
-    store: "github",
-    root: undefined,
-    repository: "owner/repo",
-    month: "2026-08",
-    resolution: "4h",
-  });
-  assert.throws(() => parseArguments(["verify", "--store", "directory", "--root", "/tmp/index"]), /exactly one/);
-  assert.throws(() => parseArguments(["read", "--pair", pairId, "--store", "directory", "--root", "/tmp/index"]), /--month and --resolution/);
-  assert.throws(() => parseArguments(["collect", "--pair", pairId, "--month", "2026-08", "--store", "directory", "--root", "/tmp/index"]), /Only read/);
-  assert.throws(() => parseArguments(["collect", "--pair", pairId, "--store", "github", "--repository", "owner/repo", "--root", "/tmp/index"]), /cannot cross/);
+    "--store", "directory",
+    "--root", "/tmp/index",
+  ]).operation, "read");
+  assert.equal(parseArguments([
+    "repair",
+    "--base", `0x${"1".repeat(40)}`,
+    "--pool-id", `0x${"2".repeat(64)}`,
+    "--from-block", "1",
+    "--from-timestamp", "2026-08-27T00:00:00.000Z",
+    "--until-block", "2",
+    "--until-timestamp", "2026-08-27T00:01:00.000Z",
+    "--store", "directory",
+    "--root", "/tmp/index",
+  ]).operation, "repair");
+  assert.throws(() => parseArguments(["collect", "--base", `0x${"1".repeat(40)}`, "--store", "directory", "--root", "/tmp/index"]), /unrelated/);
+  assert.throws(() => parseArguments(["read", "--store", "directory", "--root", "/tmp/index"]), /requires/);
+  assert.throws(() => parseArguments(["collect", "--store", "github", "--repository", "owner/index", "--root", "/tmp/index"]), /cannot cross/);
 });
 
-test("the CLI fixes the registry primary and validates only two contiguous secret URLs", async () => {
-  const registry = await loadPairRegistry();
-  assert.deepEqual(selectRpcUrls(registry, {}), ["https://rpc.mainnet.chain.robinhood.com/"]);
-  assert.deepEqual(selectRpcUrls(registry, {
+test("RPC endpoints come only from the required primary and two ordered fallback secrets", () => {
+  assert.deepEqual(selectRpcUrls({ INDEX_RPC_URL: "https://primary.example" }), ["https://primary.example/"]);
+  assert.deepEqual(selectRpcUrls({
+    INDEX_RPC_URL: "https://primary.example",
     INDEX_RPC_FALLBACK_URL_0: "https://second.example/key",
     INDEX_RPC_FALLBACK_URL_1: "https://third.example/key",
-  }), [
-    "https://rpc.mainnet.chain.robinhood.com/",
-    "https://second.example/key",
-    "https://third.example/key",
-  ]);
-  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_1: "https://third.example" }), /contiguous/);
-  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://rpc.mainnet.chain.robinhood.com" }), /unique/);
-  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_FOO: "https://four.example" }), /unsupported/);
-  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: " https://two.example" }), /whitespace/);
-  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "http://two.example" }), /HTTPS/);
-  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://user:token@two.example" }), /user information/);
-  assert.throws(() => selectRpcUrls(registry, { INDEX_RPC_FALLBACK_URL_0: "https://two.example/#token" }), /fragment/);
+  }), ["https://primary.example/", "https://second.example/key", "https://third.example/key"]);
+  assert.equal(rpcEndpointSourceName(0), "INDEX_RPC_URL");
+  assert.throws(() => selectRpcUrls({}), /required/);
+  assert.throws(() => selectRpcUrls({
+    INDEX_RPC_URL: "https://primary.example",
+    INDEX_RPC_FALLBACK_URL_1: "https://third.example",
+  }), /contiguous/);
+  assert.throws(() => selectRpcUrls({
+    INDEX_RPC_URL: "https://primary.example",
+    INDEX_RPC_EXTRA: "https://extra.example",
+  }), /unsupported/);
 });
 
-test("Actions logging reveals fixed operation, endpoint, and failure classifications only", () => {
-  const pairId = `0x${"1".repeat(64)}`;
-  const primaryError = new RpcEndpointUnavailableError("rpc_error", {
-    rpcCode: -32000,
-    rpcMethod: "eth_getLogs",
+test("read and verify report no selected root without claiming physical storage is empty", async () => {
+  const admittedConfiguration = await loadMarketDataConfiguration();
+  const store = new DirectoryStore({
+    maximumArtifactBytes: maximumMarketDataAssetBytes,
+    root: await mkdtemp(join(tmpdir(), "market-data-cli-")),
   });
-  const primaryFailure = Object.freeze({
-    endpointIndex: 0,
-    error: primaryError,
-  });
-  assert.throws(() => new RpcResponseRejectedError("provider_specific_reason"), /reason is invalid/);
-  assert.throws(() => new RpcResponseRejectedError("http_rejected"), /HTTP status is invalid/);
-  assert.throws(() => new RpcResponseRejectedError("rpc_error"), /error code is invalid/);
-  assert.throws(() => new RpcResponseRejectedError("response_result_invalid"), /method is invalid/);
-  assert.throws(() => new RpcResponseRejectedError("rpc_error", { rpcCode: -32602, rpcMethod: "provider_method" }), /method is invalid/);
-  assert.equal(rpcEndpointSourceName(0), "registry.chain.primaryRpcUrl");
-  assert.equal(rpcEndpointSourceName(1), "INDEX_RPC_FALLBACK_URL_0");
-  assert.equal(rpcEndpointSourceName(2), "INDEX_RPC_FALLBACK_URL_1");
-  assert.throws(() => rpcEndpointSourceName(3), /selection/);
-  assert.equal(pairOperationSuccessLog("history", pairId, 1, {}), null);
-  assert.equal(
-    pairOperationSuccessLog("history", pairId, 1, { GITHUB_ACTIONS: "true" }, [primaryFailure]),
-    `pair_operation=history status=success rpc_endpoint_source=INDEX_RPC_FALLBACK_URL_0 failed_rpc_0_endpoint_source=registry.chain.primaryRpcUrl failed_rpc_0_reason=rpc_error failed_rpc_0_method=eth_getLogs failed_rpc_0_code=-32000 pair_id=${pairId}\n`,
-  );
-  assert.equal(pairOperationFailureLog("current", pairId, {}), null);
-  assert.equal(
-    pairOperationFailureLog("current", pairId, { GITHUB_ACTIONS: "true" }),
-    `pair_operation=current status=failed component=collector reason=operation_rejected pair_id=${pairId}\n`,
-  );
-  assert.equal(
-    pairOperationFailureLog(
-      "history",
-      pairId,
-      { GITHUB_ACTIONS: "true" },
-      new GitHubStorageError("delete_asset", "rate_limited", { retryable: true }),
-    ),
-    `pair_operation=history status=failed component=github operation=delete_asset reason=rate_limited pair_id=${pairId}\n`,
-  );
-  assert.equal(
-    pairOperationFailureLog(
-      "current",
-      pairId,
-      { GITHUB_ACTIONS: "true" },
-      new RpcPairOperationUnavailableError(),
-    ),
-    `pair_operation=current status=failed component=rpc reason=all_endpoints_unavailable pair_id=${pairId}\n`,
-  );
-  assert.equal(
-    pairOperationFailureLog(
-      "history",
-      pairId,
-      { GITHUB_ACTIONS: "true" },
-      new RpcPairOperationUnavailableError(),
-      [primaryFailure],
-    ),
-    `pair_operation=history status=failed component=rpc reason=all_endpoints_unavailable failed_rpc_0_endpoint_source=registry.chain.primaryRpcUrl failed_rpc_0_reason=rpc_error failed_rpc_0_method=eth_getLogs failed_rpc_0_code=-32000 pair_id=${pairId}\n`,
-  );
-  const invalidParameters = new RpcResponseRejectedError("rpc_error", {
-    rpcCode: -32602,
-    rpcMethod: "eth_getLogs",
-  });
-  assert.equal(
-    pairOperationFailureLog("history", pairId, { GITHUB_ACTIONS: "true" }, invalidParameters),
-    `pair_operation=history status=failed component=rpc reason=rpc_error rpc_method=eth_getLogs rpc_code=-32602 pair_id=${pairId}\n`,
-  );
-  assert.throws(() => pairOperationSuccessLog(
-    "history",
-    pairId,
-    1,
-    { GITHUB_ACTIONS: "true" },
-    [{ endpointIndex: 0, error: new Error("provider message") }],
-  ), /failure/);
-  assert.equal(
-    pairOperationFailureLog(
-      "history",
-      pairId,
-      { GITHUB_ACTIONS: "true" },
-      new StoredDataIntegrityError(),
-    ),
-    `pair_operation=history status=failed component=stored_data reason=integrity_rejected pair_id=${pairId}\n`,
-  );
-  assert.equal(publicationRecoveryLog({ status: "idle", pairId }, { GITHUB_ACTIONS: "true" }), null);
-  assert.equal(
-    publicationRecoveryLog({
-      status: "aborted", pairId, phase: "current", selectedSequence: 4,
-    }, { GITHUB_ACTIONS: "true" }),
-    `publication_recovery outcome=previous_state_retained phase=current selected_sequence=4 pair_id=${pairId}\n`,
-  );
-  assert.equal(
-    publicationRecoveryLog({
-      status: "committed", pairId, phase: "history", selectedSequence: 5,
-    }, { GITHUB_ACTIONS: "true" }),
-    `publication_recovery outcome=next_state_selected phase=history selected_sequence=5 pair_id=${pairId}\n`,
-  );
+  const verify = await runCommand(parseArguments([
+    "verify", "--store", "directory", "--root", store.root,
+  ]), admittedConfiguration, { environment: {}, store });
+  assert.deepEqual(verify, { status: "unpublished" });
+  const base = admittedConfiguration.configuration.bases[0].baseCurrencyAddress;
+  const read = await runCommand(parseArguments([
+    "read", "--base", base, "--month", "2026-08", "--resolution", "1m",
+    "--store", "directory", "--root", store.root,
+  ]), admittedConfiguration, { environment: {}, store });
+  assert.deepEqual(read, { status: "unpublished" });
 });
 
-test("the workflow copies every configured cron and preserves queued and manual execution", async () => {
+test("the Work 3 workflow exposes manual shared operations without early schedule activation", async () => {
   const source = await readFile(new URL("../.github/workflows/index.yml", import.meta.url), "utf8");
-  const pairRegistry = await loadPairRegistry();
-  const collectionPlan = await loadCollectionPlan(pairRegistry);
-  const expectedSchedules = collectionPlan.groups.flatMap((group) => group.schedules);
-  assert.match(source, /workflow_dispatch:/);
-  assert.match(source, /targetKind:\n        description: Exact target kind/);
-  assert.match(source, /targetId:\n        description: Exact pair or collection-group ID/);
-  assert.match(source, /if: github\.event_name == 'workflow_dispatch' \|\| github\.event_name == 'schedule'/);
-  assert.match(source, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
-  assert.match(source, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
-  assert.match(
-    source,
-    /concurrency:\n      group: robinhood-stock-token-index-operation\n      queue: max\n      cancel-in-progress: false/,
-  );
-  assert.match(source, /permissions:\n      contents: write/);
-  assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
-  assert.match(source, /INDEX_RPC_FALLBACK_URL_1: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_1 \}\}/);
-  assert.match(source, /OPERATION=collect\n            TARGET_FLAG=--schedule\n            TARGET_ID="\$\{SCHEDULE_EXPRESSION\}"/);
-  assert.match(source, /node cli\.mjs "\$\{OPERATION\}" "\$\{TARGET_FLAG\}" "\$\{TARGET_ID\}"/);
-  assert.deepEqual(
-    [...source.slice(source.indexOf("  operate:")).matchAll(/node ([^\s]+\.mjs)/g)].map((match) => match[1]),
-    ["cli.mjs"],
-  );
-  assert.deepEqual(
-    [...source.matchAll(/- cron: "([^"]+)"/g)].map((match) => match[1]),
-    expectedSchedules,
-  );
-  for (const entry of pairRegistry.pairs) assert.doesNotMatch(source, new RegExp(entry.pair.pairId));
-  const verifyJob = source.slice(source.indexOf("  verify:"), source.indexOf("  operate:"));
-  const operateJob = source.slice(source.indexOf("  operate:"));
-  assert.match(verifyJob, /run: npm test/);
-  assert.doesNotMatch(operateJob, /run: npm test/);
-  assert.doesNotMatch(operateJob, /node cli\.mjs verify/);
-  assert.doesNotMatch(source, /vars\.INDEX_RPC_FALLBACK_URL/);
-  assert.doesNotMatch(source, /pull_request_target/);
+  assert.deepEqual([...source.matchAll(/- cron: "([^"]+)"/g)], []);
+  assert.match(source, /INDEX_RPC_URL: \$\{\{ secrets\.INDEX_RPC_URL \}\}/);
+  assert.match(source, /node cli\.mjs collect --store github/);
+  assert.match(source, /node cli\.mjs repair/);
+  assert.doesNotMatch(source, /--pair|--group|--schedule|targetKind|targetId/);
+  assert.doesNotMatch(source, /github\.event_name == 'schedule'/);
+  assert.match(source, /cancel-in-progress: false/);
+  assert.match(source, /queue: max/);
 });

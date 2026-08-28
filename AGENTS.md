@@ -2,367 +2,250 @@
 
 Read this file before every task in this repository.
 
-## Project and terms
+## Project purpose and boundary
 
-This repository reads finalized Uniswap V4 `Swap` events on Robinhood Chain,
-stores canonical one-minute candles for registered trading pairs, and stores
-the fixed derived candle resolutions calculated directly from those one-minute
-candles. It uses a local directory or GitHub Releases as storage. GitHub is a
-development and test storage service, not the source of market data and not a
-production-availability claim.
+This repository collects finalized Uniswap V4 `Swap` events on Robinhood Chain
+and records candle data for configured base currencies quoted by fixed USDG
+`0x5fc5360d0400a0fd4f2af552add042d716f1d168`.
 
-Robinhood Chain and USDG at
-`0x5fc5360d0400a0fd4f2af552add042d716f1d168` are the fixed network and quote asset.
-Every configured market must quote that exact USDG contract. A token record,
-PoolKey, PoolId, symbol, or display label cannot select, replace, or reinterpret
-the quote asset.
+For each equivalent finalized time range, it queries every applicable PoolId
+together, validates the complete response, classifies events by PoolId, and
+records the result by base-currency address. It must not restore normal
+per-base-currency RPC collection.
 
-The detailed pair, file, publication, schedule, command, and verification terms
-below describe the current operating implementation. They are not replacement
-schema or design defaults. Replacement work may reuse them only after the
-accepted plan independently requires and verifies the same meaning.
+The repository owns collection and recording only. It does not choose a chart
+resolution, assemble chart output, route swaps, compare pools, interpolate
+prices, implement a consumer cache, migrate old published data, or provide a
+production-availability guarantee. GitHub Releases are development and test
+storage, not the market-data source.
 
-Terms used in this file:
+The accepted plan under `.WORK/market-data-archive/` governs replacement work.
+Its purpose, product goal, and responsibility boundary have higher authority
+than detailed code, tests, measurements, external reviews, or former behavior.
 
-- A **pair** is one specific Uniswap V4 pool plus a chosen base/quote display
-  direction. It is identified by its Robinhood Chain ID, PoolManager address,
-  PoolKey, and PoolId. The registry field `pairId` contains the PoolId. A token
-  symbol is only a display label. `baseIsCurrency0` explicitly records whether
-  the base asset is the PoolKey's `currency0`.
-- `sourceInitialization` identifies the block where the registered pool was
-  initialized; `source` in this field means the registered onchain pool, not an
-  RPC provider or candle event position. `historyStart` is the later of that
-  initialization minute and the configured number of calendar months before
-  activation; it is the earliest
-  boundary historical collection may reach. `activation` is the initial
-  boundary from which current collection moves forward and historical
-  collection moves backward.
-- A **candle** is the open, high, low, close, volume, and trade count calculated
-  from `Swap` events whose two pool balance deltas are non-zero and have
-  opposite signs. A structurally valid `Swap` with a zero delta for either
-  asset remains part of queried coverage but supplies no exchange ratio and
-  does not contribute to a candle. A minute with no contributing `Swap` has no
-  candle. Its `firstSource` and `lastSource` fields identify the first and last
-  contributing `Swap`; `source` here means an event position, not an RPC
-  provider.
-- **Coverage** is the continuous half-open time and block range that was fully
-  queried, written as `[from, until)`. Coverage can contain minutes with no
-  candle.
-- An **RPC endpoint** is a JSON-RPC server used to read chain data. A **finalized
-  block** is the block returned for Ethereum's `finalized` tag. Do not publish
-  data from a newer unfinalized block.
-- A **pair-day file** stores one pair's canonical one-minute candles and
-  coverage for part or all of one UTC day. A **resolution artifact** stores one
-  derived resolution for one owner month. A **pair-month file** selects that
-  pair's day and resolution files for one UTC month. A **pair-state file** lists
-  the months currently available for one pair, the complete resolution catalog,
-  and its current and historical collection boundaries.
-- The fixed resolution catalog is `1m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`,
-  `12h`, `1d`, and `2d`. `1m` remains day-partitioned. Every other resolution is
-  independently month-partitioned and calculated directly from `1m`; a stored
-  derived resolution is never the source of another one.
-- A **publication manifest** is one internal stored file that gives an
-  unfinished pair publication exact ownership of its previous and next state,
-  changed month, day, and resolution files. It is not part of the public
-  pair-state, month, day, resolution, or read contract.
-- A stored reference's `logicalId` is its stable pair-and-period identity. It
-  contains no generation number or physical storage location. Source files use
-  **artifact** to mean one encoded state, month, day, or resolution data file.
-- A **generation** is the integer sequence number used to publish a replacement
-  state, month, day, or resolution file without overwriting the preceding file. The
-  **selected pair state** is the latest valid pair-state generation returned by
-  the storage adapter.
-- Stored files have one strict current schema and contain no schema revision or
-  implementation marker. **Canonical JSON** means that one valid value has one
-  deterministic JSON byte representation for hashing.
-- **Validation** checks one input or one stored file. Full **verification** loads
-  the selected pair state, validates every referenced month, day, and resolution
-  file, and re-derives every resolution directly from the selected one-minute
-  files.
-- A **collection group** is only an ordered list of pair IDs run sequentially by
-  one scheduled job. It owns no candle data or collection progress.
-- An operation's `phase` is `current`, `history`, or `repair`. It identifies
-  which part of collection produced a command result; it is not stored in a
-  candle, month, or pair-state file.
+## Terms
+
+- A **base currency** is identified by its canonical Robinhood Chain contract
+  address. Native ETH uses
+  `0x0000000000000000000000000000000000000000`. A symbol is display metadata.
+- USDG is the fixed quote currency. Configuration, PoolId, symbol, or routing
+  cannot replace or reinterpret it.
+- A **PoolId** is source provenance selected by the human-authored
+  configuration. One base currency may retain several historical PoolIds, but
+  only the configured current PoolId owns unpublished current data.
+- **Coverage** is one fully queried continuous half-open block and UTC time
+  range `[from, until)` owned by one PoolId. Coverage with no candle means no
+  contributing trade.
+- Canonical `1m` candles contain exact rational OHLC, raw base and USDG volume,
+  trade count, and first and last contributing finalized Swap positions.
+- Fixed stored resolutions are `1m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`,
+  `12h`, `1d`, and `2d`. Every derived candle is calculated directly from
+  canonical `1m` and never crosses a PoolId boundary.
+- A **logical file** is one base state, base month, base day, or base resolution
+  identified by its `logicalId`.
+- A **physical asset** is an immutable packed GitHub Release asset containing
+  one or more independently compressed logical files.
+- The **selected root** is the greatest valid uploaded root publication
+  sequence. It fixes global facts, current boundary, base-state references, and
+  the complete selected physical-asset membership.
+- A **publication record** is internal mutation authority for exactly one
+  previous root, next root, new assets, and superseded assets. It does not
+  select market data.
 
 ## Sources of truth and responsibilities
 
-- `registry/pairs.json` is the sole source of truth for chain identity, the
-  committed primary RPC URL, Uniswap deployment addresses, collection limits,
-  pair descriptions, PoolKeys, base/quote direction, pool initialization,
-  `historyStart`, and activation boundaries. `cli.mjs` may append only the two
-  ordered optional fallback URLs. It cannot replace the primary URL or chain
-  identity.
-- `collector/` validates RPC data, determines finalized coverage, decodes
-  `Swap` events, calculates canonical and derived candles, advances each pair's
-  collection boundaries, encodes the stored files, and verifies exact
-  pair/month/resolution reads.
-- `registry/collection-plan.json` is the sole source of truth for the maximum
-  number of groups, maximum pairs and runtime per group, the 25 percent runtime
-  safety margin, GitHub request capacity and per-pair estimates, ordered group
-  membership, measured pair runtimes, and the cron expressions assigned to each
-  group. `scheduler/` validates that file, resolves a group ID or cron expression,
-  and runs the group's pairs sequentially.
-- `storage/` reads, writes, lists, and deletes bytes at physical locations. A
-  storage adapter cannot decode candles, calculate market data, combine pair
-  data, or decide which stored generation is valid; it implements the selection
-  rules supplied by the collector.
-- `cli.mjs` is the only command for pair, group, and scheduled operations. One
-  command reuses one admitted registry, storage adapter, RPC client set,
-  cancellation signal, and log writer for every pair it runs. Group execution
-  calls the direct pair-operation owner and never invokes the top-level CLI
-  recursively.
-  `.github/workflows/index.yml` must contain the same cron expressions as
-  `registry/collection-plan.json` because GitHub reads schedules before
-  repository code starts. The workflow passes the selected expression to
-  `cli.mjs`; it does not duplicate the cron-to-group mapping or group membership.
-- `register-pair.mjs` is the only command that adds a pair. It consumes one
-  complete candidate entry for `registry/pairs.json` and the measured duration
-  of one complete pair collection run. It may add the pair only to an existing
-  group
-  that remains within both capacity limits. It writes `registry/pairs.json` and
-  `registry/collection-plan.json` only after both complete candidate files
-  validate together.
+- `registry/market-data.json` is the sole human-authored configuration. Programs
+  read and validate it but never create, edit, normalize, or reorder it.
+- Robinhood Chain, fixed USDG, fixed PoolManager, and USDG decimals are admitted
+  global facts. Every configured PoolKey must contain its parent base currency
+  and fixed USDG, and its derived PoolId must equal the configured PoolId.
+- Required RPC input is `INDEX_RPC_URL`. Optional ordered fallbacks are
+  `INDEX_RPC_FALLBACK_URL_0` and `INDEX_RPC_FALLBACK_URL_1`. They are complete
+  secret URLs and are not stored market data.
+- `collector/` owns configuration admission, shared planning and RPC reads,
+  Swap validation, PoolId classification, candles, resolutions, logical files,
+  packing, publication, recovery, retention, reads, and full verification.
+- `storage/` owns only exact physical list, read, immutable write, and deletion
+  operations. It cannot calculate or reinterpret market data.
+- `cli.mjs` is the only collect, repair, read, and verify command.
+- `.github/workflows/index.yml` exposes manual shared collect and repair while
+  Work 3 is under review. Work 4 adds the fifteen-minute schedule only after
+  live qualification. The workflow contains no pair or group routing.
 
 ## Required behavior
 
-- Use one code path for every registered pair. Do not add behavior selected by
-  ticker symbol, alternate pools, aliases, inferred addresses, multi-pool route
-  prices, sampled data, or interpolated data.
-- Repository-visible product and runtime JSON-RPC requests are constructed only
-  by `RpcClient` chain verification, block, block-header batch, and log-read
-  operations. Validate their exact method inputs before any network request. Do
-  not expose a generic method-and-parameters RPC entry point to collector
-  callers.
-- Query-strategy measurement code under `.WORK` may construct only the exact
-  `eth_chainId`, `eth_getBlockByNumber`, complete PoolManager `eth_getLogs`, and
-  `eth_getLogs` reads filtered by all configured PoolIds required to compare the
-  two strategies.
-  It must validate every exact input before network access, read the complete
-  response within its byte limit, validate every returned `Swap` before PoolId exclusion,
-  expose no generic RPC method, and never be imported by repository-visible
-  code. It cannot mutate a registry, collector state, storage, publication,
-  workflow, or schedule. Its network execution is manual and its output is
-  measurement evidence, not product behavior or a runtime default.
-- Admit each block response once into a canonical internal block number, hash,
-  and UTC-representable timestamp. For a block-header batch, validate every
-  successful result against its requested number, expected log block hash, and
-  fixed operation time range before acting on any sibling availability result.
-  Validate and decode every self-contained field of a returned `Swap` page
-  before requesting its block headers. Across the complete fixed range, one
-  block number maps to one block hash and one transaction coordinate maps to one
-  transaction hash, in both directions. A later availability failure must never
-  hide malformed data already returned by the same endpoint.
-- One current, historical, or repair attempt uses one RPC endpoint and one fixed
-  block range. After bounded retries exhaust a temporary transport, server, or
-  required-resource failure, or the endpoint denies access or lacks a required
-  RPC method, or the endpoint reports pruned history for a required historical
-  block or log read, discard all unpublished results from that attempt and
-  restart the whole operation from the stored pair state using the next
-  endpoint. Never combine data from two RPC providers in one attempt. Stop
-  without fallback when chain identity, pool activation data, response
-  structure, request validity, numeric bounds, cancellation, or stored-data
-  integrity is invalid. Standard invalid-request (`-32600`), invalid-parameter
-  (`-32602`), and transaction-rejected (`-32003`) JSON-RPC responses remain
-  fatal. A `-32000` response to
-  a read request already admitted by `RpcClient` is an endpoint availability
-  failure: retry the identical request within the configured bound and then
-  restart the complete operation on the next endpoint. Unassigned
-  implementation-defined server errors are also endpoint availability failures.
-- Each optional fallback RPC is one complete URL read from its corresponding
-  GitHub Actions repository secret. Do not read it from a repository variable or
-  construct it from a provider URL and token.
-- Current collection moves only `coverage.until` forward. Historical collection
-  moves only `coverage.from` backward toward the fixed `historyStart`. Repair
-  changes candles inside existing coverage and moves neither boundary. A
-  current or historical phase stops at the adjacent UTC-day boundary as well as
-  its admitted block and history limits. After pending publication recovery
-  completes, finish every RPC read for the new attempt before creating its
-  publication manifest or writing market data.
-- A pair `collect` runs at most two durable phases against one fixed finalized
-  block. The first phase is current. If it does not reach that block's complete
-  minute boundary because of the block or UTC-day limit, the second phase is
-  current again; otherwise the second phase is history. Every endpoint used by
-  either phase must reproduce the fixed finalized block before use. A published
-  first phase remains selected if the second phase fails.
-- A collection group runs its pairs in order. A pair failure other than
-  cancellation does not prevent later pairs from running. After every member has
-  been attempted, the group fails if any pair failed. Cancellation stops before
-  the next pair. The group shares only its command context; it adds no shared
-  cursor, retry state, stored file, or recovery state.
-- The current collection plan allows at most three groups, three pairs per
-  group, and 720 seconds of estimated runtime per group. For capacity checks,
-  add the plan's 25 percent safety margin to each measured pair runtime. Pair
-  registration chooses the eligible group with the lowest estimated runtime;
-  ties follow group order. Registration never creates a group, changes a cron
-  expression, or changes a capacity limit. A fourth group requires a separately
-  reviewed change to scheduling and expected data freshness.
-- The collection plan also admits the maximum GitHub requests and
-  content-generating requests per pair collection and validates the maximum
-  rolling-hour schedule load against its GitHub hourly and per-minute limits.
-  One command's shared GitHub adapter spaces all content-generating requests by
-  the interval derived from the per-minute limit. Group runtime estimates include
-  the maximum pacing time. Publication request-trace tests must use the admitted
-  per-pair values rather than independent numeric expectations.
-- Scheduled jobs run `collect` only. `repair` requires a manually selected pair
-  or group. All jobs that can write data use one non-cancelling GitHub Actions
-  concurrency queue, so an in-progress job is not cancelled and one pending job
-  is retained. Cron timing is best effort and does not define data validity or
-  guarantee availability.
-- Pair registration never derives a PoolKey, address, initialization block, or
-  pair identity; contacts the chain; publishes or deletes data; or treats a
-  symbol as an identifier. A dry run is the default. `--write` is allowed only
-  after the complete candidate pair registry and collection plan both validate.
-- Before a pair mutation makes any RPC request, resolve its pending publication
-  manifest. After every RPC read and replacement build completes, recheck the
-  exact selected-state bytes, create the manifest as the first storage mutation,
-  write immutable pair-day, resolution, and pair-month files, and write the new
-  pair-state generation last. Validate each write from the exact bytes returned
-  by storage, then re-read and validate the exact selected state. References to
-  unchanged months must come from the previously validated state.
-- Do not publish an empty pair-state file. The absence of a selected state means
-  that no data has been published for that pair. Every new pair-state generation
-  must directly reference at least one pair-month generation written by the same
-  operation, and every new pair-month generation must directly reference at
-  least one day or resolution generation written by that operation.
-- A pair-state file directly contains its ordered month references. A year is
-  derived from the `YYYY-MM` month identifier; do not create a year file, path,
-  GitHub Release, reader, or compatibility name.
-- Routine publication reads and rebuilds the selected pair state. Its metadata
-  grows by one bounded month reference for each month that contains data. Read
-  or list day, resolution, and month files only for months changed by the
-  operation. Full verification must stream month, day, and resolution files in
-  order instead of holding the complete candle history in memory.
-- Publication recovery has one closed decision based on the admitted manifest
-  and exact selected-state identity. If the previous state is selected, verify
-  its changed closure and remove only the exact unpublished next files. If the
-  next state is selected, verify its changed closure and remove only the exact
-  superseded previous files. Any other combination is stored-data corruption.
-  Remove the manifest last. A cleanup failure remains fatal and leaves the
-  manifest for the next pair mutation. A missing reference, generation number,
-  filename pattern, Release listing, or repository scan is never deletion
-  authority.
-- The GitHub storage adapter retries only bounded transport, rate-limit, request
-  timeout, and server failures. Deleting an exact asset that is already absent is
-  successful. After an uncertain Release creation or asset upload, read the
-  exact remote identity and verify uploaded bytes before repeating the mutation.
-  If that reconciliation read remains unavailable, stop without issuing another
-  POST. Treat only an asset admitted as an empty GitHub `starter` as incomplete;
-  contradictory asset metadata is corruption. Do not make cleanup non-blocking
-  or hide an exhausted storage failure.
-- Operational failure logs classify fatal RPC responses, stored-data integrity,
-  and collector invariants at their responsible boundary. Log only fixed reason
-  names, supported RPC method names, and admitted numeric HTTP or JSON-RPC
-  codes; never log endpoint URLs, provider messages, response bodies, tokens, or
-  stack traces. Classification does not change retry, fallback, publication, or
-  group-failure behavior. The CLI emits one success or failure line per phase
-  and names endpoints only by their registry field or secret variable name. If
-  a later endpoint succeeds, that success line retains the fixed reason,
-  supported method, and numeric code for each earlier failed endpoint. The CLI
-  emits a recovery line only when recovery retained the previous state or
-  selected the next state.
-- Store processed candles and continuous coverage. Do not store raw RPC
-  responses, invented candles, a general transaction index, the RPC provider
-  used, or a storage URL.
-- Validate every returned `Swap` event before using or excluding it. When either
-  pool balance delta is zero, advance coverage without adding price, volume,
-  trade count, or source positions to a candle. Do not substitute the event's
-  post-swap `sqrtPriceX96` for an executed exchange ratio.
-- Publish and read only the one strict stored-data contract. Stored state,
-  month, day, resolution, reference, and publication-manifest objects contain no
-  schema revision or implementation marker. Replace internal implementations
-  directly; do not add aliases, migrations, compatibility branches, or alternate
-  readers.
-- A missing candle is not a zero-price candle. USDG is an onchain token, not
-  fiat USD. Native ETH and WETH are different assets.
-- Keep candle calculation and stored files independent of GitHub repository
-  names, Release tags, URLs, tokens, workflow data, and Release layout.
-- Before adding a dependency, review its exact version, transitive dependencies,
+- Use one path for every configured base currency, including native ETH. Do not
+  select behavior by symbol, alternate pool, alias, liquidity, volume, fee,
+  route, or display order.
+- One operation fixes configuration bytes, selected state, finalized block,
+  complete-minute target, and ordered shared ranges before its first log read.
+- Attempt one PoolId-filtered request for the complete applicable PoolId set.
+  Divide only an actually oversized response, in deterministic time, block,
+  then PoolId-set order. Division cannot omit or duplicate an event.
+- Validate every returned Swap before classification or exclusion. A valid zero
+  delta contributes coverage but no candle value.
+- One attempt uses one endpoint. After bounded endpoint availability failure,
+  discard all unpublished results and restart the whole attempt on the next
+  endpoint. Never combine provider results.
+- Malformed data, invalid configuration, chain mismatch, invalid request,
+  numeric failure, cancellation, and stored-data corruption are fatal.
+- Current advances only the global selected current boundary. History moves
+  PoolId history boundaries backward. Repair replaces one exact recorded range
+  and moves neither boundary. Current work precedes history.
+- A collect command runs at most two independently durable phases against one
+  fixed finalized block. Failure of the second phase cannot remove the first
+  selected phase.
+- Store at most twelve UTC calendar months. A crossing UTC day or month file may
+  retain a bounded earlier prefix outside the selected range.
+- When a retention lower bound falls inside a durable coverage segment, retain
+  that segment from its recorded start. The same-day portion before the lower
+  bound is an unselected prefix; do not invent a boundary or collect it again.
+- Base-day coverage preserves exact durable-phase boundaries used by retention
+  and history. Only resolution derivation coalesces adjacent same-PoolId
+  segments in memory to prove a continuous natural interval.
+- Pack only logical bytes changed by the current phase. Data, base-month index,
+  and base-state index packing are separate deterministic steps. Unchanged
+  logical files are never repacked.
+- The recording builder produces one exact in-memory logical transition from
+  the Work 2 result, selected state, and retention. Its replacement members and
+  removals are the complete change authority; packing and physical membership
+  consume them without widening or narrowing the change.
+- Logical-file regeneration months and provenance-verification months are
+  separate. A retention boundary can require verification without authorizing
+  unchanged day, month, or resolution regeneration.
+- Before root selection, affected base-day coverage must agree with the
+  candidate base-state PoolId periods in PoolId, block range, and time range.
+- Do not infer physical asset or GitHub request counts from logical-file counts.
+  Validate exact member sizes, packed assets, Release shards, slots, and
+  mutation identities after encoding and before the first storage mutation.
+- Write the publication record before new assets and the next root last. The
+  selected state is always the previous complete root or the complete next
+  root.
+- Recheck cancellation after shared collection and encoding and before every
+  storage mutation. Cancellation before root selection leaves the previous root
+  selected; cancellation after an uncertain or completed root upload leaves the
+  publication record for normal recovery.
+- If a pending publication still has its previous root selected, repeat its
+  fixed RPC collection and encoding independently. Existing remote bytes may be
+  reused only after regenerated bytes and the complete publication record match
+  exactly. Pending bytes are never calculation input.
+- A publisher mismatch never deletes the existing pending publication. The
+  operation owner may abort exact pending identities only after recovery proves
+  the previous-selected state and the supported mutation path is serialized.
+- Automated GitHub mutations use the existing non-cancelling Actions concurrency
+  queue. Directory storage supports one collect or repair mutation at a time for
+  one root. Do not add a lock, lease, new credential, or active-writer inference
+  for unsupported concurrent mutation.
+- A pending history publication cannot delay a newer current gap. A scheduled
+  collect never replays a pending manual repair.
+- Deletion authority comes only from exact selected-root membership or the
+  exact publication record. Filenames, listings, ages, missing references, and
+  repository scans are not deletion authority.
+- Public packed-member reads require the same byte Range across redirects,
+  exact `206`, `Content-Range`, identity encoding, length, gzip and JSON digests,
+  and logical identity. Do not fall back to downloading a complete packed asset
+  when Range is ignored.
+- Every GitHub retry loop applies the fixed maximum to its cumulative retry
+  delay, not separately to each wait.
+- Every Release admitted for a GitHub mutation must be published, non-draft,
+  and mutable. Use only the existing Actions `GITHUB_TOKEN`; do not add a
+  GitHub App, administration token, repository-settings preflight, alternate
+  tag, or settings mutation. An immutable Release response is a non-retryable
+  storage failure and cannot select the next root or complete automatic
+  recovery on that storage surface.
+- The absence of a selected root means `unpublished`, not that physical storage
+  is empty. A clean launch is a separate manual Work 4 precondition: no earlier
+  Release writer is running or queued, Release immutability is disabled, and no
+  market-data catalog, index, or data Release or tag exists.
+- Directory storage keeps staging files outside every Release asset directory.
+  Read and list operations never clean or mutate staging. The first mutation in
+  one Directory store instance removes only exact internal crash-staging names.
+- Store processed candles and coverage only. Do not store raw RPC responses,
+  provider identity, endpoint URLs, storage URLs, synthetic candles, or a
+  general transaction index.
+- Use one strict current schema. Do not add migration readers, compatibility
+  aliases, deprecated wrappers, schema-version branches, or old-name commands.
+- Before adding a dependency, inspect its exact version, transitive packages,
   lifecycle scripts, security, license, distribution form, and replacement
-  cost. Use the Node.js standard library when it fully implements the required
-  behavior.
+  cost. Prefer the Node.js standard library when sufficient.
 
 ## Work policy
 
-- Inspect repository state before editing and preserve unrelated changes.
-- For work governed by an accepted development plan, that plan's stated
-  purpose, product goal, and responsibility boundary are the highest
-  repository-level authority for scope, design evaluation, and completion.
-  Requirements, decisions, work records, current code, tests, measurements,
-  external reviews, prior plans, and the operating implementation may refine
-  their assigned facts but cannot silently narrow, replace, or contradict that
-  purpose and goal.
-- Treat every authority below the plan's purpose and goal as a claim that must
-  still be checked at its point of use. A file is a source of truth only for its
-  explicitly assigned fact and only while that fact remains consistent with the
-  product goal and its actual producer and consumer. Existing behavior, a
-  passing test, a prior approval, a measurement result, or an external review
-  is not evidence that conflicting work is correct.
-- When a lower-level authority conflicts with the plan's purpose or goal, do not
-  reinterpret the goal to preserve the lower-level artifact. Identify the exact
-  conflict and responsible component, re-check the direct evidence, and redo or
-  replace the conflicting requirement, decision, work record, code, test, or
-  measurement. If a detailed plan rule itself is shown to undermine the plan's
-  purpose, stop implementation, record the evidence, and openly amend and
-  accept the plan before continuing; never change direction silently.
-- Re-evaluate authority and consistency throughout the complete dependency
-  chain, including by tracing final outputs backward to their inputs. Do not
-  accept a statement because of its filename, age, detail, reviewer, approval,
-  or apparent source-of-truth status. Skepticism must resolve concrete product
-  or structural risk; it must not become speculative work or repeated review
-  without new evidence.
-- Never create a requirement, decision, design, work item, code, test, or
-  verification step from memory, prediction, customary practice, assumed
-  repository state, or an expected future need. At the point of use, inspect
-  the current owning source of truth and the exact affected producer and
-  consumer. If current direct evidence does not establish that the work is
-  required, exclude it; do not fill the gap with a default or assumption.
-- Before changing a file, re-read the accepted user decisions and owning plan,
-  inspect the current producer, every direct consumer, and the next dependent
-  work, and check the repository for an applicable existing pattern. Do not
-  start implementation until this inspection establishes the exact need and
-  responsibility boundary. This is analysis of the work itself, not a new gate,
-  checklist artifact, or procedural deliverable.
-- Do not silently strengthen an agreed contract. A new digest, allowlist,
-  identity binding, limit, approval requirement, rejection rule, or security
-  condition is a new constraint unless the accepted requirements or a concrete
-  structural invariant already require it. Explain the exact need and obtain
-  the user's decision before implementing a new constraint. Do not infer consent
-  from a nearby requirement or from the fact that the stricter rule appears
-  safer.
-- Work records contain only current status, exact verification evidence,
-  unresolved debt, and the outputs and limits required by the next task. Do not
-  keep diaries, timelines, abandoned alternatives, or token/context accounting.
-- Before a work unit is ready for review, record it only as in progress and do
-  not assign a success, failure, pass, or fail result to the work unit. After
-  implementation and self-review close every known issue, mark it ready for
-  review. Only the subsequent complete review may accept or reject the work
-  unit. A test or measurement result applies only to its exact checked boundary
-  and never changes the enclosing work-unit status by itself.
-- Fix a defect in the component responsible for the violated rule. Do not add a
-  special case or compatibility alias for one observed example.
-- Use the same plain term for the same concept in documentation, configuration,
-  code, logs, and command output. Do not introduce a synonym that suggests a
-  different meaning. Define a necessary protocol or stored-data term before it
-  is used without explanation.
-- Each test must prove a distinct rule or counterexample. Test count is not
-  evidence; inspect what each test actually proves.
-- The absence of a test is not a defect by itself. First identify the exact
-  invariant that could be represented or accepted incorrectly, why existing
-  logic or evidence does not already prove it, and why a test is the smallest
-  appropriate proof. Do not add a test for a path that is logically excluded,
-  already proved at its owning boundary, duplicated by another test, or relevant
-  only to a later work unit. When a defect escaped, determine whether its cause
-  was a missing contract, wrong ownership, dishonest implementation, or missing
-  executable proof before deciding that another test is needed.
-- Network smoke tests are manual. Automated tests use fixed independent fixtures
-  and never contact a live endpoint.
-- Before completion, run `npm test`. Then create a non-empty offline data set
-  containing a pair-state file, its referenced pair-month file, and its
-  referenced pair-day file, and every derived resolution possible from its
-  coverage. Run the pair-scoped directory `verify` command and exact `read
-  --month --resolution` commands against that same directory. Verifying an empty
-  directory is not completion evidence.
+- Inspect repository state before editing and preserve unrelated changes. Do
+  not commit unless the user explicitly asks.
+- Always locate the current work inside the complete dependency chain and trace
+  final outputs backward to their producers. Do not optimize one part in a way
+  that creates debt for the next work.
+- A previously fixed purpose or goal is never damaged, distorted, reduced,
+  reframed, substituted, or omitted while writing a plan, performing work,
+  reviewing, reporting progress, handling a failure, or judging completion.
+  The accepted plan's complete purpose, product goal, responsibility boundary,
+  fixed rules, work order, and completion conditions are one indivisible
+  authority. Never abridge, summarize, narrow, reframe, substitute, omit, or
+  otherwise manipulate that authority in a plan, work record, implementation,
+  review, or completion judgment. A summary may help navigation but has no
+  authority and can never replace the exact source text; re-read the complete
+  accepted plan whenever the context is incomplete.
+- Never mistake an implementation means for the work's purpose or product goal.
+  Storage layouts, schemas, GitHub mechanisms, packing, publication, recovery,
+  measurements, validators, tests, reviews, and procedures are means only. Add,
+  change, or retain a means only when the complete accepted plan directly
+  requires its result. Completing or perfecting a means cannot narrow, replace,
+  redefine, or satisfy the product goal by itself.
+- Before starting or expanding any local task, identify the exact accepted-plan
+  result it advances, the final output that consumes it, and which parts are
+  merely implementation means. Do not improve, generalize, harden, document,
+  measure, test, or otherwise raise the completeness of a means for its own
+  sake. Once a means already satisfies the exact goal and its downstream
+  contract, further work on that means is out of scope even if it appears
+  cleaner, safer, more complete, or potentially useful later. If ongoing work
+  cannot be traced directly to an unfinished goal condition, stop that local
+  work and return to the complete dependency chain instead of inventing a new
+  reason to continue it.
+- Treat every authority below the plan purpose and goal as a claim that must be
+  checked at its point of use. Filename, age, detail, approval, existing
+  behavior, a passing test, measurement, or external reviewer is not authority
+  for a conflicting result.
+- If a detailed rule undermines the product goal, identify the exact conflict,
+  inspect direct evidence, openly amend the accepted baseline, and only then
+  continue. Never silently reinterpret the goal to preserve a lower-level
+  artifact.
+- Never create work from memory, prediction, convention, assumed repository
+  state, or an expected future need. Inspect the current source of truth,
+  producer, direct consumers, next dependent work, and existing patterns before
+  editing.
+- Do not silently strengthen a contract with a new digest, allowlist, identity,
+  limit, approval, rejection rule, or security condition. A new constraint
+  requires direct structural evidence and user agreement.
+- Collect related issues before modifying them. Determine their common owner
+  and root cause, then fix that owner rather than adding observed-example
+  branches or test-only behavior.
+- An unexpected file is a reason to investigate, not stop. Direct consumer
+  inspection is part of the work. Exclude unrelated refactors and later
+  features.
+- If planned work cannot honestly solve a discovered problem, requires a new
+  product/security/interface decision, damages a prior output, requires an
+  alias or special branch, or creates structural debt, record the exact evidence,
+  revert the affected unfinished implementation, and stop for the decision.
+- Keep the accepted plan stable during implementation. Objective omissions are
+  corrected openly; they are not hidden by renaming, splitting, or declaring a
+  different task complete.
+- Work records contain only current status, exact evidence, unresolved debt,
+  and outputs needed by the next work. Do not keep diaries, abandoned options,
+  procedural checklists, or context accounting.
+- Before review, a work unit is only `in progress` or `ready for review`.
+  Success or failure belongs to the subsequent complete review.
+- Use the same plain technical term for the same concept everywhere. Remove
+  coined, ambiguous, and legacy names.
+- A test count proves nothing. Inspect what each test proves. Missing tests are
+  not defects by themselves; first identify an invariant that incorrect code
+  can represent or accept and whether a test is the smallest proof.
+- Automated tests use fixed offline fixtures and never contact a live endpoint.
+  Network smoke tests are manual.
+- Before review readiness, run `npm test`, create a non-empty offline selected
+  root with every fixed resolution possible from its coverage, run the directory
+  `verify` command, and run exact `read --base --month --resolution` commands
+  against the same root. Empty verification is not completion evidence.
 - A claim that GitHub publication works additionally requires a manual workflow
-  run followed by verification that downloads the published files without using
-  GitHub authentication.
+  run followed by unauthenticated verification of the published root and
+  referenced members.

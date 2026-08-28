@@ -1,96 +1,378 @@
-# Robinhood Stock Token Index
+# Robinhood Chain USDG market data
 
-This repository reads finalized Uniswap V4 `Swap` events on Robinhood Chain and
-publishes price candles for a fixed registry of trading pairs. One-minute
-candles are the canonical source. Larger candle intervals are calculated
-directly from those one-minute candles and stored as independently loadable
-monthly files.
+This repository collects finalized Uniswap V4 `Swap` events for configured
+Robinhood Chain base currencies quoted by USDG and records verifiable candle
+data in a local directory or GitHub Releases.
 
-GitHub Releases are the development and test store. They are not the market-data
-source and this repository makes no production-availability guarantee.
+It owns collection and recording only. It does not choose a chart resolution,
+assemble chart output, route swaps, compare pools, or provide a production
+availability guarantee.
 
-## What is stored
+## Recorded data
 
-Every candle contains exact rational OHLC prices, base and quote raw volumes,
-trade count, and the first and last contributing `Swap` positions. A minute
-with no contributing `Swap` has no candle. Continuous coverage records the
-fully queried time and block range, including covered minutes with no trade.
+`registry/market-data.json` is the human-authored configuration. It fixes:
+
+- Robinhood Chain and the PoolManager;
+- USDG `0x5fc5360d0400a0fd4f2af552add042d716f1d168`;
+- each base-currency address and decimals;
+- the exact current PoolId, PoolKey, and Initialize fact; and
+- a symbol used only for human readability.
+
+Native ETH uses `0x0000000000000000000000000000000000000000`.
+The program validates the base currency/USDG PoolKey and derives its PoolId
+before any log request. It never selects a PoolId from symbol, price, volume,
+liquidity, fee, routing, or display order.
+
+One operation queries every PoolId applicable to the same finalized range
+together, validates every returned Swap, classifies by PoolId, and records
+continuous coverage and canonical `1m` candles by base-currency address.
 
 The fixed stored resolutions are:
 
-| Label | Interval | Physical partition |
-| --- | ---: | --- |
-| `1m` | 60 seconds | UTC day |
-| `15m` | 900 seconds | owner month |
-| `30m` | 1,800 seconds | owner month |
-| `1h` | 3,600 seconds | owner month |
-| `2h` | 7,200 seconds | owner month |
-| `4h` | 14,400 seconds | owner month |
-| `6h` | 21,600 seconds | owner month |
-| `12h` | 43,200 seconds | owner month |
-| `1d` | 86,400 seconds | owner month |
-| `2d` | 172,800 seconds | owner month |
-
-Each derived candle uses every contributing one-minute candle in its natural
-Unix-epoch-aligned interval. It is never calculated from another derived
-resolution. Prices are not sampled, filled, interpolated, or carried forward.
-
-`2d` can cross a UTC month boundary. The month containing the candle start owns
-the complete candle. A consumer whose range begins inside such a candle must
-also inspect the preceding owner month.
-
-## Stored structure
-
-One selected closure has this shape:
-
 ```text
-pair state
-  -> ordered pair months
-       -> ordered one-minute day files
-       -> independently referenced derived-resolution files
+1m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 2d
 ```
 
-The pair state contains the complete resolution catalog and continuous source
-coverage. Each pair month contains exact day and resolution references. Every
-reference includes its logical identity, generation, byte counts, and SHA-256
-digests. A generation is a publication sequence, not a data format identifier.
+Every derived resolution is calculated directly from canonical `1m`. A derived
+candle is emitted only for a complete natural UTC interval owned by one PoolId.
+Different PoolIds are never combined into one candle.
 
-There is no year object. A year is assembled from `YYYY-MM` owner months.
+## Commands
 
-### Directory layout
-
-```text
-pairs/{pairId}/state/state-g{generation}.json.gz
-pairs/{pairId}/state/publication.json.gz
-pairs/{pairId}/months/{YYYY-MM}/month-{YYYY-MM}-g{generation}-{sha256}.json.gz
-pairs/{pairId}/months/{YYYY-MM}/candles-{YYYY-MM-DD}-1m-g{generation}-{sha256}.json.gz
-pairs/{pairId}/months/{YYYY-MM}/candles-{YYYY-MM}-{label}-g{generation}-{sha256}.json.gz
-```
-
-`publication.json.gz` is internal recovery state and is not market data.
-
-### GitHub Release layout
-
-```text
-pair-{pairId}-state
-pair-{pairId}-month-{YYYY-MM}
-```
-
-The state Release contains state generations and the internal publication
-manifest. Each month Release contains that month's month index, `1m` day files,
-and independently downloadable derived-resolution files. Resolution-specific
-and year-specific Releases do not exist.
-
-## Requirements
-
-- Node.js 22 or newer
-- npm
-
-Install the pinned dependencies without lifecycle scripts:
+Install pinned dependencies without lifecycle scripts:
 
 ```bash
 npm ci --ignore-scripts
 ```
+
+Collect all configured base currencies into a directory:
+
+```bash
+INDEX_RPC_URL='https://...' \
+node cli.mjs collect \
+  --store directory \
+  --root /absolute/path/to/market-data
+```
+
+Collect to GitHub Releases:
+
+```bash
+INDEX_RPC_URL='https://...' \
+GITHUB_TOKEN='...' \
+node cli.mjs collect \
+  --store github \
+  --repository stelis-dev/robinhood-stock-token-index
+```
+
+Run at most one mutating `collect` or `repair` operation at a time for the same
+GitHub repository or Directory root. The repository Actions workflow enforces
+this for automated GitHub writes through its non-cancelling concurrency queue;
+direct CLI callers must preserve the same storage-surface serialization.
+
+Optional fallbacks are complete secret URLs in this order:
+
+```text
+INDEX_RPC_FALLBACK_URL_0
+INDEX_RPC_FALLBACK_URL_1
+```
+
+One collect command runs at most two independently durable phases against one
+fixed finalized block. Current work precedes history. A failure of the second
+phase cannot discard a root selected by the first.
+
+Verify one complete selected root:
+
+```bash
+node cli.mjs verify \
+  --store directory \
+  --root /absolute/path/to/market-data
+```
+
+Read one base currency, owner month, and exact stored resolution:
+
+```bash
+node cli.mjs read \
+  --base 0x0000000000000000000000000000000000000000 \
+  --month 2026-08 \
+  --resolution 1h \
+  --store directory \
+  --root /absolute/path/to/market-data
+```
+
+`read` does not choose a resolution or assemble a requested chart period.
+
+Repair requires one exact recorded PoolId range and changes neither current nor
+history progress:
+
+```bash
+INDEX_RPC_URL='https://...' \
+node cli.mjs repair \
+  --base 0x... \
+  --pool-id 0x... \
+  --from-block 123 \
+  --from-timestamp 2026-08-27T00:00:00.000Z \
+  --until-block 456 \
+  --until-timestamp 2026-08-27T00:15:00.000Z \
+  --store directory \
+  --root /absolute/path/to/market-data
+```
+
+## Logical files
+
+One selected root reaches these logical files:
+
+```text
+selected root
+  -> base state
+       -> base month
+            -> base day containing canonical 1m
+            -> one file for every derived resolution
+```
+
+Logical identities are exactly:
+
+```text
+base/<baseCurrencyAddress>/state
+base/<baseCurrencyAddress>/month/<YYYY-MM>
+base/<baseCurrencyAddress>/day/<YYYY-MM-DD>
+base/<baseCurrencyAddress>/resolution/<resolution>/<YYYY-MM>
+```
+
+Every logical file is canonical JSON with no schema-version member. Its address,
+day, month, and resolution fields must equal the same values in its `logicalId`.
+
+A stored member reference contains exactly:
+
+```text
+assetSha256, from, gzipSha256, jsonBytes, jsonSha256, logicalId, until
+```
+
+`[from, until)` is the member's byte range inside the physical asset. A coverage
+segment contains exactly:
+
+```text
+fromBlock, fromTimestamp, poolId, untilBlock, untilTimestamp
+```
+
+Coverage segments are ordered, continuous, half-open ranges. The logical file
+schemas are:
+
+- base state: `baseCurrencyAddress`, `decimals`, ordered `months`, ordered
+  `poolPeriods`, and `pools` keyed by PoolId;
+- PoolId facts: `historyFrom`, `initialize`, `poolKey`, and `sourceFrom`;
+- base month: `baseCurrencyAddress`, `coverage`, ordered `days`, `month`, and one
+  reference for every derived resolution in `resolutions`;
+- base day: `baseCurrencyAddress`, canonical `candles`, `coverage`, and `day`;
+- base resolution: `baseCurrencyAddress`, derived `candles`, `coverage`,
+  `intervalSeconds`, and `ownerMonth`.
+
+Base-day coverage preserves the exact durable-phase boundaries recorded in the
+day, including adjacent segments with the same PoolId. Resolution derivation
+may coalesce those adjacent segments in memory to prove a continuous natural
+interval; it does not rewrite the source day boundaries used by retention and
+history.
+
+Base-state `months` are strictly ordered unique references. `poolPeriods` are
+continuous and every period names one entry in `pools`; unused PoolId facts are
+invalid. A PoolId's `historyFrom` equals its first selected period boundary,
+never precedes `sourceFrom`, and `sourceFrom` never precedes the Initialize
+minute. The final pool period ends exactly at the root's `currentUntil` boundary.
+Base-month `days` are strictly ordered unique references inside the named month,
+and `resolutions` contains every non-`1m` catalog label exactly once.
+
+A canonical `1m` candle contains exactly:
+
+```text
+baseVolumeRaw, close, firstSource, high, intervalEnd, intervalStart,
+lastSource, low, open, quoteVolumeRaw, tradeCount
+```
+
+A derived candle additionally contains `observedStart`, `observedEnd`, and
+`sourceCandleCount`. Prices are reduced positive rationals with `numerator` and
+`denominator`. A source position contains `blockHash`, `blockNumber`, `logIndex`,
+`transactionHash`, and `transactionIndex`.
+
+Canonical field rules are:
+
+- an address is lowercase `0x` plus exactly 40 hexadecimal digits; a PoolId or
+  hash is lowercase `0x` plus exactly 64 hexadecimal digits;
+- a decimal string is `0` or a non-zero decimal integer without a leading zero;
+- a UTC instant is `YYYY-MM-DDTHH:mm:ss.000Z`; collection and coverage
+  boundaries are minute-aligned;
+- a collection boundary contains exactly `blockNumber` as a decimal string and
+  `timestamp`; an Initialize fact has the same members but its timestamp need
+  not be minute-aligned;
+- a PoolKey contains exactly `currency0`, `currency1`, numeric `fee`, `hooks`,
+  and numeric `tickSpacing`; `currency0 < currency1`, `0 <= fee < 16777216`, and
+  `0 < tickSpacing < 8388608`; currencies contain the base currency and fixed
+  USDG and the complete PoolKey derives the recorded PoolId;
+- `fromBlock`, `untilBlock`, volumes, and derived `tradeCount` are decimal
+  strings; a `1m` candle's `tradeCount`, source indexes, `sourceCandleCount`,
+  decimals, byte ranges, byte counts, and publication sequence are safe JSON
+  integers;
+- source indexes and byte-range starts are non-negative; candle counts, byte
+  counts, and publication sequence are positive;
+- decimals are in `0..255`; native ETH has `18` decimals and fixed USDG has `6`;
+- `from` is non-negative, `until` and `jsonBytes` are positive, and
+  `from < until`; every SHA-256 is exactly 64 lowercase hexadecimal digits;
+- a physical asset's `bytes` is positive and no greater than `430563600`.
+
+Every coverage array is non-empty. For each segment, `fromBlock <= untilBlock`
+and `fromTimestamp < untilTimestamp`. Adjacent segments meet at the same block
+and timestamp without a gap or overlap. Day coverage remains inside its named
+UTC day, month coverage remains inside its named UTC month, and resolution
+coverage remains inside the owner-period bound described below.
+
+Every price component is a positive reduced rational. For every candle,
+`high >= open`, `high >= close`, `low <= open`, `low <= close`, and
+`high >= low`. Both volumes and trade count are positive. A `1m` candle lasts
+exactly 60 seconds; its trade count is a positive safe integer. Its first and
+last source positions lie inside exactly one coverage segment and agree with a
+single-trade or multiple-trade source span. Candles and their source positions
+are strictly ordered without duplication.
+
+A derived candle is epoch-aligned, lasts exactly its selected resolution, and
+starts in `ownerMonth`. The relation is
+`intervalStart <= observedStart < observedEnd <= intervalEnd`. Its volumes and
+trade count are positive decimal strings.
+`sourceCandleCount` is positive, no greater than the resolution's minute count
+or observed minute span, and no greater than `tradeCount`.
+
+Stored references and selected asset entries are strictly ordered and unique.
+One logical ID is selected from exactly one physical asset. Its parent reference
+must match the exact packed member range and digests, and its decoded address,
+day, month, and resolution must match the logical ID. Asset entries are strictly
+ordered and unique by SHA-256; data assets contain only day and resolution
+members from their Release owner month, while one index asset contains only
+base-month members or only base-state members.
+
+The resolution catalog entries contain exactly `label`, `intervalSeconds`, and
+`partition`. Their fixed values are:
+
+```text
+1m:60:day, 15m:900:month, 30m:1800:month, 1h:3600:month,
+2h:7200:month, 4h:14400:month, 6h:21600:month, 12h:43200:month,
+1d:86400:month, 2d:172800:month
+```
+
+Base-month coverage stays inside its named UTC month. Base-resolution coverage
+starts in its owner month and extends only to the first natural interval boundary
+at or after the month end. A candle is present only when its complete natural
+interval is contained by one continuous PoolId-owned coverage segment.
+
+The selected root contains exactly `assets`, `baseCurrencies`, `currentUntil`,
+`poolManager`, `publicationSequence`, `resolutions`, `usdgAddress`, and
+`usdgDecimals`. Each selected `assets` entry contains exactly `assetName`,
+`bytes`, ordered `logicalIds`, `releaseTag`, and `sha256`. `baseCurrencies` maps
+each recorded base-currency address to its exact base-state reference.
+
+The root uses the same canonical JSON encoding as logical files. It does not
+contain a storage URL or include itself in its asset table.
+
+## GitHub Release layout
+
+Logical files are independently encoded and gzip-compressed, then concatenated
+into immutable packed assets.
+
+```text
+market-data-<YYYY-MM>-s<N>
+  data-<assetSha256>.bin
+
+market-data-index-s<N>
+  index-<assetSha256>.bin
+
+market-data-catalog
+  root-s<publicationSequence>-<rootSha256>.json.gz
+  publication.json.gz
+```
+
+Data packing is separated by owner month. Base-month indexes and base-state
+indexes are packed in separate steps. Adding another logical member never
+changes the meaning of an existing immutable asset.
+
+`publication.json.gz` is internal mutation authority. It is not selected market
+data. The next root is uploaded last and is the only selection point. An
+interrupted action therefore leaves either the previous complete root or the
+complete next root selected.
+
+The writer admits only published, non-draft, mutable Release responses. This
+layout cannot operate with immutable Releases because later publications add
+content-addressed assets and delete exact superseded assets. It uses only the
+existing Actions `GITHUB_TOKEN` and does not inspect or change repository
+settings. An immutable Release response stops publication without selecting the
+next root. The repository does not retry it under another tag or add an
+administration credential.
+
+If no selected root exists, `read` and `verify` report `unpublished`. This does
+not prove that the physical Release namespace is empty: a failed first
+publication may have left an unselected publication record, asset, or Release.
+
+If an interrupted publication still has its previous root selected, a later
+action repeats the fixed RPC collection and encoding. An existing remote asset
+is reused only when its complete bytes equal the independently regenerated
+bytes and the regenerated publication record matches exactly.
+
+## Pin and read a public root
+
+Keep one root fixed for an entire multi-file read:
+
+1. List all assets in the `market-data-catalog` Release.
+2. Admit uploaded names matching exactly
+   `root-s<positiveSequence>-<sha256>.json.gz`.
+3. Reject duplicate sequences or contradictory metadata.
+4. Select the greatest sequence. Do not fall back to an older root if the
+   greatest root is invalid.
+5. Download the complete root without authentication and verify its filename
+   digest, listed byte count, returned bytes digest, and decoded schema.
+6. Resolve the requested base-state reference from that pinned root.
+7. Resolve its base-month reference, then the requested day or resolution
+   reference, without selecting another root.
+8. Match every reference to exactly one root asset entry having both the same
+   asset SHA-256 and the referenced logical ID.
+
+An exact asset URL is:
+
+```text
+https://github.com/<owner>/<repository>/releases/download/<releaseTag>/<assetName>
+```
+
+For a stored member reference with half-open range `[from, until)`, send:
+
+```http
+Range: bytes=<from>-<until-1>
+Accept-Encoding: identity
+```
+
+Apply the same Range header after every redirect. Accept only:
+
+- status `206`;
+- `Content-Range: bytes <from>-<until-1>/<assetBytes>`;
+- identity content encoding;
+- exactly `until - from` response bytes;
+- the referenced gzip SHA-256;
+- the referenced decoded JSON byte count and SHA-256; and
+- the referenced logical identity and strict file schema.
+
+A valid Range request answered with `200` is storage unavailable; do not
+download the complete packed asset as a fallback. Contradictory range metadata,
+bytes, digests, or logical identity is stored-data corruption.
+
+## Twelve-month selection
+
+The selected range begins no earlier than twelve UTC calendar months before the
+root's `currentUntil` boundary. A UTC day or month file crossing that lower
+boundary may contain a bounded earlier prefix. The prefix is outside the
+selected range and must not be interpreted as additional retained history. If
+the boundary lies inside a recorded durable coverage segment, that segment is
+kept from its stored start; no synthetic block boundary is created and the
+prefix is not collected again.
+
+An asset remains selected while at least one of its logical IDs is reachable.
+It becomes deletion authority only after a validated root transition removes
+its last logical ID. Release listings, filenames, ages, and missing references
+never authorize deletion.
+
+## Verification and development
 
 Run the offline suite:
 
@@ -98,322 +380,10 @@ Run the offline suite:
 npm test
 ```
 
-## Find registered pairs
-
-`registry/pairs.json` is the only pair registry. A symbol is a display label;
-the exact PoolId in `pair.pairId` is the command and storage identity.
-
-List each display pair, PoolId, base asset, and quote asset:
-
-```bash
-jq -r '.pairs[] | [
-  .display.label,
-  .pair.pairId,
-  .display.baseSymbol,
-  .display.quoteSymbol
-] | @tsv' registry/pairs.json
-```
-
-Inspect one complete entry before using it:
-
-```bash
-PAIR_ID='0x...'
-jq --arg pairId "${PAIR_ID}" '.pairs[] | select(.pair.pairId == $pairId)' registry/pairs.json
-```
-
-The entry fixes the chain, PoolManager, PoolKey, base/quote direction,
-initialization, history start, and activation boundary. Do not infer these
-values from a symbol.
-
-## Collect data
-
-Directory collection is useful for offline qualification:
-
-```bash
-PAIR_ID='0x...'
-node cli.mjs collect \
-  --pair "${PAIR_ID}" \
-  --store directory \
-  --root /absolute/path/to/index-data
-```
-
-GitHub collection requires the repository `GITHUB_TOKEN`:
-
-```bash
-node cli.mjs collect \
-  --pair "${PAIR_ID}" \
-  --store github \
-  --repository stelis-dev/robinhood-stock-token-index
-```
-
-`collect` runs at most two durable phases against one fixed finalized block.
-It runs current collection first, then current again if a limit stopped it, or
-history after it reaches the fixed finalized boundary. Each selected phase
-publishes day, resolution, month, and state files atomically.
-
-Repair rereads the configured recent range without moving coverage:
-
-```bash
-node cli.mjs repair \
-  --pair "${PAIR_ID}" \
-  --store directory \
-  --root /absolute/path/to/index-data
-```
-
-Scheduled jobs run the ordered groups from
-`registry/collection-plan.json`. The workflow contains the same cron
-expressions because GitHub must read schedules before repository code starts.
-The same plan validates group runtime and the maximum rolling-hour GitHub
-request and content-generation load. One group command shares an adapter that
-paces every GitHub content-generating request; the plan includes that maximum
-wait in each group runtime estimate.
-
-## Verify a pair
-
-Verification pins one selected state, streams its months and source days, and
-re-derives every selected resolution directly from the one-minute files.
-
-Directory:
-
-```bash
-node cli.mjs verify \
-  --pair "${PAIR_ID}" \
-  --store directory \
-  --root /absolute/path/to/index-data
-```
-
-Public GitHub Releases, without a token:
-
-```bash
-env -u GITHUB_TOKEN node cli.mjs verify \
-  --pair "${PAIR_ID}" \
-  --store github \
-  --repository stelis-dev/robinhood-stock-token-index
-```
-
-A verified result names the exact selected state identity, complete catalog,
-coverage, month and day counts, source-candle count, and derived artifact and
-candle counts. `status: "empty"` means the pair has no selected state.
-
-## Read one month and one resolution
-
-`read` never chooses a resolution and has no default. It accepts exactly one
-owner month and one catalog label.
-
-Read canonical one-minute day files:
-
-```bash
-node cli.mjs read \
-  --pair "${PAIR_ID}" \
-  --month 2026-08 \
-  --resolution 1m \
-  --store directory \
-  --root /absolute/path/to/index-data
-```
-
-Read one derived resolution anonymously from GitHub:
-
-```bash
-env -u GITHUB_TOKEN node cli.mjs read \
-  --pair "${PAIR_ID}" \
-  --month 2026-08 \
-  --resolution 4h \
-  --store github \
-  --repository stelis-dev/robinhood-stock-token-index
-```
-
-A successful result contains:
-
-- `selectedState`: the pinned state generation, gzip byte count, and digest;
-- `catalog`: every available label and interval;
-- `stateCoverage`: canonical selected coverage;
-- `ownerMonth` and the exact label and interval requested;
-- `monthReference`: the selected immutable month reference;
-- `coverage` for `1m` or `timeCoverage` for a derived resolution; and
-- `files`: exact references paired with decoded stored values.
-
-`1m` returns the month's ordered day files. A derived label returns exactly one
-resolution artifact and does not load another derived resolution or any day
-file.
-
-Normal absence is explicit:
-
-- `status: "empty"`: the pair has no selected state;
-- `reason: "month_not_selected"`: the selected state does not contain the owner
-  month; or
-- `reason: "resolution_not_published"`: canonical coverage does not yet contain
-  a complete natural interval for that label and owner month.
-
-A missing or altered referenced file is not normal absence; verification and
-read fail integrity validation.
-
-## Load several months without changing state
-
-Do not run independent state selection between months. Pin one state and resolve
-every month and resolution reference from that same value:
-
-```js
-import { loadPairRegistry } from "./collector/pair-registry.mjs";
-import {
-  readPairMonth,
-  readPairResolution,
-  readPairStateSelection,
-} from "./collector/pair-reader.mjs";
-import { pairMonthLogicalId } from "./collector/pair-file-identity.mjs";
-import { validateSelectedPairMonth } from "./collector/pair-files.mjs";
-import { createStore } from "./storage/create-store.mjs";
-
-const repository = "stelis-dev/robinhood-stock-token-index";
-const pairId = "0x...";
-const ownerMonths = ["2026-05", "2026-06", "2026-07", "2026-08"];
-const resolutionLabel = "12h";
-
-const registry = await loadPairRegistry();
-const store = createStore({
-  kind: "github",
-  repository,
-  maximumArtifactBytes: registry.collection.maximumArtifactBytes,
-});
-const selected = await readPairStateSelection({ registry, pairId, store });
-if (selected === null) throw new Error("The pair has no selected data.");
-const definition = selected.state.resolutions.find((entry) => entry.label === resolutionLabel);
-if (definition === undefined) throw new Error("The selected state does not contain the resolution.");
-const intervalSeconds = definition.intervalSeconds;
-
-const values = [];
-for (const ownerMonth of ownerMonths) {
-  const logicalId = pairMonthLogicalId(pairId, ownerMonth);
-  const monthReference = selected.state.months.find((entry) => entry.logicalId === logicalId);
-  if (monthReference === undefined) continue;
-  const month = await readPairMonth({ registry, store, reference: monthReference });
-  validateSelectedPairMonth({ state: selected.state, month }, { registry });
-  const reference = month.resolutions.find((entry) => entry.intervalSeconds === intervalSeconds);
-  if (reference === undefined) continue;
-  values.push(await readPairResolution({ registry, store, reference }));
-}
-```
-
-The consumer may concatenate `values` in owner-month order and apply its own
-period rules. This repository does not choose a display interval, trim a chart
-range, cache downloads, or construct chart output.
-
-For `2d`, add the preceding owner month when the requested range begins inside
-an epoch-aligned two-day candle. The complete candle remains in its start month.
-
-## Direct integrity checks
-
-A direct reader that does not use this repository's reader must still:
-
-1. select one uploaded state generation and keep its exact bytes pinned;
-2. verify gzip size and SHA-256 before decompression;
-3. enforce the decompressed JSON byte boundary and JSON SHA-256;
-4. validate the strict stored member set and pair identity;
-5. resolve months only through the pinned state's references;
-6. resolve day or resolution files only through the selected month;
-7. verify logical identity, generation, coverage, interval, ordering, and every
-   reference digest; and
-8. treat a missing referenced file or semantic mismatch as corruption or
-   unavailable storage, never as a no-trade interval.
-
-Filenames and Release listings locate bytes. They do not override references or
-establish deletion authority.
-
-## Add a pair
-
-Check current group capacity:
-
-```bash
-node register-pair.mjs --status
-```
-
-Prepare one complete candidate registry entry and measure one complete pair
-collection. A dry run validates both resulting registries and selects the
-eligible group with the lowest estimated runtime:
-
-```bash
-node register-pair.mjs \
-  --candidate /absolute/path/to/pair.json \
-  --measured-seconds 180
-```
-
-Apply the same validated result only after reviewing the dry run:
-
-```bash
-node register-pair.mjs \
-  --candidate /absolute/path/to/pair.json \
-  --measured-seconds 180 \
-  --write
-```
-
-The command never derives PoolKeys or addresses, contacts the chain, publishes
-data, creates a group, or changes a schedule. Pair registration is complete only
-after collection and verification succeed for the exact new PoolId.
-
-## RPC endpoints
-
-`registry/pairs.json` fixes the primary RPC URL and chain identity. Optional
-fallbacks are complete URLs from these GitHub Actions repository secrets:
-
-```text
-INDEX_RPC_FALLBACK_URL_0
-INDEX_RPC_FALLBACK_URL_1
-```
-
-One phase uses one endpoint and one fixed block range. After bounded endpoint
-availability failures, all unpublished work is discarded and the whole phase
-restarts from selected state on the next endpoint. Data from two endpoints is
-never combined in one phase. Chain identity, malformed responses, invalid
-requests, numeric errors, and stored-data integrity failures remain fatal.
-
-Endpoint URLs, provider messages, response bodies, and tokens are not written
-to operational logs.
-
-## Publication and recovery
-
-The publication manifest is the first mutation. Day files are written first,
-then derived-resolution files, month files, and state last. State selection is
-the only public visibility point.
-
-Recovery has one decision:
-
-- if the manifest's previous state is selected, verify it and remove only the
-  exact unpublished next files;
-- if the next state is selected, verify it and remove only exact superseded
-  files; or
-- otherwise fail stored-data integrity.
-
-Cleanup is blocking and resumable. The manifest is removed last. Repository
-scans, filenames, and missing references are never deletion authority.
-
-## Clean first publication
-
-This project starts with an empty public data store. Use this transition order
-so a scheduled job cannot recreate development data during the reset:
-
-1. disable the `Stock Token index` workflow in GitHub and wait until no
-   operation is running or queued;
-2. manually remove every existing index Release and its corresponding tag;
-3. push this implementation while the workflow remains disabled;
-4. enable the workflow; and
-5. dispatch the first `collect` operation from empty storage.
-
-The code contains no data-conversion path, bulk-delete command, alternate reader, or
-mixed-data path.
-
-The first pair collection sees exact absence and publishes generation 1. Until
-that state is selected, the pair has no public data. Current and historical
-collection then build coverage from the fixed activation and `historyStart`
-boundaries.
-
-## Data not stored in Releases
-
-The following remain in the Git repository or local runtime rather than GitHub
-Releases:
-
-- `registry/pairs.json` and `registry/collection-plan.json`;
-- workflow, source code, and documentation;
-- local directory-store data;
-- RPC responses and failed in-memory candidates; and
-- unfinalized or incompletely covered intervals.
-
-Only files reachable from one selected pair state are public market data.
+`verify` pins one root, traverses every base state, month, day, and resolution,
+checks complete asset membership, and independently derives every stored
+resolution from selected canonical `1m` data.
+
+GitHub publication claims additionally require a manual workflow run followed
+by unauthenticated `verify` and exact `read` operations against the published
+root.

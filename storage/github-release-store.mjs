@@ -1,26 +1,21 @@
 import { setTimeout as wait } from "node:timers/promises";
-import {
-  publicationObjectName,
-  validateStoredReference,
-  validateGeneration,
-  validatePairId,
-  validateStateIdentity,
-  validateStateBytes,
-  parseStateObjectName,
-  referenceObjectName,
-  stateObjectName,
-  StoredDataIntegrityError,
-  verifyStateIdentityBytes,
-  verifyStoredReferenceBytes,
-} from "./stored-files.mjs";
 import { isSha256Hex, sha256Hex } from "../collector/canonical.mjs";
+import {
+  marketDataPublicationAssetName,
+  maximumMarketDataAssetsPerRelease,
+  validateMarketDataReleaseTag,
+  validatePhysicalAssetIdentity,
+} from "../collector/market-data-assets.mjs";
+import { StoredDataIntegrityError } from "./storage-error.mjs";
 
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const githubApiVersion = "2026-03-10";
 const maximumRequestAttempts = 3;
 const maximumRetryDelayMilliseconds = 60_000;
 const transientRetryDelayMilliseconds = 1_000;
 const rateLimitRetryDelayMilliseconds = 60_000;
 const contentRequestMethods = new Set(["DELETE", "PATCH", "POST", "PUT"]);
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 const githubFailureReasons = new Set([
   "access_denied",
   "immutable_conflict",
@@ -60,11 +55,6 @@ export class GitHubStorageError extends Error {
   }
 }
 
-export function githubStorageFailureFields(error) {
-  if (!(error instanceof GitHubStorageError)) return null;
-  return `component=github operation=${error.operation} reason=${error.reason}`;
-}
-
 function admittedRetryDelay(milliseconds) {
   if (!Number.isFinite(milliseconds) || milliseconds > maximumRetryDelayMilliseconds) {
     return maximumRetryDelayMilliseconds + 1;
@@ -91,7 +81,7 @@ async function responseIndicatesSecondaryRateLimit(response) {
   if (response.headers?.get?.("retry-after") !== null || response.headers?.get?.("x-ratelimit-remaining") === "0") return true;
   try {
     const bytes = await readBounded(response, 65_536);
-    const value = JSON.parse(bytes.toString("utf8"));
+    const value = JSON.parse(fatalUtf8Decoder.decode(bytes));
     return typeof value?.message === "string" && /secondary rate limit|abuse detection/i.test(value.message);
   } catch {
     return false;
@@ -145,17 +135,31 @@ async function readBounded(response, maximumBytes) {
 
 function parseJson(bytes, label) {
   try {
-    return JSON.parse(bytes.toString("utf8"));
+    return JSON.parse(fatalUtf8Decoder.decode(bytes));
   } catch {
     throw new Error(`${label} is not JSON.`);
   }
 }
 
 function validateRelease(value, tag) {
-  if (value === null || typeof value !== "object" || Array.isArray(value) || !Number.isSafeInteger(value.id) || value.id <= 0 || value.tag_name !== tag) {
+  if (
+    value === null
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || !Number.isSafeInteger(value.id)
+    || value.id <= 0
+    || value.tag_name !== tag
+    || value.draft !== false
+    || typeof value.immutable !== "boolean"
+  ) {
     throw new Error("GitHub release response is invalid.");
   }
-  return { id: value.id, tag };
+  return { id: value.id, immutable: value.immutable, tag };
+}
+
+function requireMutableRelease(release, operation = "create_release") {
+  if (release.immutable) throw new GitHubStorageError(operation, "immutable_conflict");
+  return release;
 }
 
 function validateAsset(value) {
@@ -180,20 +184,6 @@ function validateAsset(value) {
     throw new Error("GitHub release asset response is invalid.");
   }
   return { id: value.id, name: value.name, size: value.size, state: value.state, digest: value.digest };
-}
-
-function stateTag(pairId) {
-  return `pair-${validatePairId(pairId)}-state`;
-}
-
-function monthTag(pairId, pairMonth) {
-  return `pair-${validatePairId(pairId)}-month-${pairMonth}`;
-}
-
-function referenceTag(reference) {
-  const identity = validateStoredReference(reference);
-  const pairMonth = identity.kind === "day" ? identity.period.slice(0, 7) : identity.period;
-  return monthTag(identity.pairId, pairMonth);
 }
 
 function publicAssetUrl(repository, tag, name) {
@@ -263,6 +253,7 @@ export class GitHubReleaseStore {
     method = "GET",
     body,
     headers,
+    redirect,
   } = {}) {
     this.signal?.throwIfAborted();
     await this.#paceMutation(operation, method);
@@ -271,6 +262,7 @@ export class GitHubReleaseStore {
         method,
         headers,
         body,
+        redirect,
         signal: this.signal
           ? AbortSignal.any([this.signal, AbortSignal.timeout(30_000)])
           : AbortSignal.timeout(30_000),
@@ -282,6 +274,7 @@ export class GitHubReleaseStore {
   }
 
   async #retry(operation, action) {
+    const budget = { delayMilliseconds: 0 };
     for (let attempt = 1; attempt <= maximumRequestAttempts; attempt += 1) {
       this.signal?.throwIfAborted();
       try {
@@ -289,16 +282,20 @@ export class GitHubReleaseStore {
       } catch (error) {
         this.signal?.throwIfAborted();
         if (!(error instanceof GitHubStorageError) || !error.retryable || attempt === maximumRequestAttempts) throw error;
-        await this.#waitForRetry(operation, error, attempt);
+        await this.#waitForRetry(operation, error, attempt, budget);
       }
     }
     throw new GitHubStorageError(operation, "transport");
   }
 
-  async #waitForRetry(operation, error, attempt) {
+  async #waitForRetry(operation, error, attempt, budget) {
+    if (budget === null || typeof budget !== "object" || !Number.isSafeInteger(budget.delayMilliseconds) || budget.delayMilliseconds < 0) {
+      throw new Error("GitHub retry delay budget is invalid.");
+    }
     const delay = error.retryDelayMilliseconds
       ?? transientRetryDelayMilliseconds * 2 ** (attempt - 1);
-    if (delay > maximumRetryDelayMilliseconds) throw error;
+    if (delay > maximumRetryDelayMilliseconds || budget.delayMilliseconds + delay > maximumRetryDelayMilliseconds) throw error;
+    budget.delayMilliseconds += delay;
     try {
       await this.#wait(delay, this.signal);
     } catch {
@@ -307,12 +304,16 @@ export class GitHubReleaseStore {
     }
   }
 
-  async #readResponse(response, maximumBytes, operation) {
+  async #readResponse(response, maximumBytes, operation, { boundsFailure = "storage_limit" } = {}) {
+    if (boundsFailure !== "storage_limit" && boundsFailure !== "integrity") {
+      throw new Error("GitHub response bounds classification is invalid.");
+    }
     try {
       return await readBounded(response, maximumBytes);
     } catch (error) {
       if (error instanceof GitHubStorageError) throw error;
       if (error instanceof Error && error.message === "GitHub response exceeds the maximum byte size.") {
+        if (boundsFailure === "integrity") throw new StoredDataIntegrityError();
         throw new GitHubStorageError(operation, "storage_limit");
       }
       this.signal?.throwIfAborted();
@@ -335,7 +336,7 @@ export class GitHubReleaseStore {
     const headers = {
       accept,
       "user-agent": "robinhood-stock-token-index",
-      "x-github-api-version": "2022-11-28",
+      "x-github-api-version": githubApiVersion,
     };
     if (this.#token !== undefined) headers.authorization = `Bearer ${this.#token}`;
     if (requestContentType !== undefined) headers["content-type"] = requestContentType;
@@ -372,7 +373,7 @@ export class GitHubReleaseStore {
           authorization: `Bearer ${this.#token}`,
           "content-type": "application/octet-stream",
           "user-agent": "robinhood-stock-token-index",
-          "x-github-api-version": "2022-11-28",
+          "x-github-api-version": githubApiVersion,
         },
       },
     );
@@ -401,6 +402,64 @@ export class GitHubReleaseStore {
     });
   }
 
+  async #downloadPublicRange(identity, range) {
+    if (!Number.isSafeInteger(range?.from) || !Number.isSafeInteger(range?.until) || range.from < 0 || range.from >= range.until || range.until > identity.bytes) {
+      throw new Error("Market-data byte range is invalid.");
+    }
+    return this.#retry("download_public", async () => {
+      let target = publicAssetUrl(this.repository, identity.releaseTag, identity.assetName);
+      for (let redirects = 0; redirects <= 5; redirects += 1) {
+        const response = await this.#fetchResponse(target, "download_public", {
+          headers: {
+            accept: "application/octet-stream",
+            "accept-encoding": "identity",
+            range: `bytes=${range.from}-${range.until - 1}`,
+            "user-agent": "robinhood-stock-token-index",
+          },
+          redirect: "manual",
+        });
+        if ([301, 302, 303, 307, 308].includes(response.status)) {
+          const location = response.headers?.get?.("location");
+          await response.body?.cancel?.().catch(() => {});
+          if (typeof location !== "string" || redirects === 5) throw new GitHubStorageError("download_public", "invalid_response");
+          const redirected = new URL(location, target);
+          if (redirected.protocol !== "https:") throw new GitHubStorageError("download_public", "invalid_response");
+          target = redirected.toString();
+          continue;
+        }
+        if (response.status !== 206) {
+          const failure = response.ok
+            ? new GitHubStorageError("download_public", "request_rejected")
+            : await classifyHttpFailure(response, "download_public");
+          await response.body?.cancel?.().catch(() => {});
+          throw failure;
+        }
+        if (
+          response.headers?.get?.("content-range") !== `bytes ${range.from}-${range.until - 1}/${identity.bytes}`
+          || ![null, "identity"].includes(response.headers?.get?.("content-encoding"))
+        ) {
+          await response.body?.cancel?.().catch(() => {});
+          throw new StoredDataIntegrityError();
+        }
+        const expectedBytes = range.until - range.from;
+        const contentLength = response.headers?.get?.("content-length");
+        if (contentLength !== null && (!/^[0-9]+$/u.test(contentLength) || BigInt(contentLength) !== BigInt(expectedBytes))) {
+          await response.body?.cancel?.().catch(() => {});
+          throw new StoredDataIntegrityError();
+        }
+        const bytes = await this.#readResponse(
+          response,
+          expectedBytes,
+          "download_public",
+          { boundsFailure: "integrity" },
+        );
+        if (bytes.byteLength !== expectedBytes) throw new StoredDataIntegrityError();
+        return bytes;
+      }
+      throw new GitHubStorageError("download_public", "invalid_response");
+    });
+  }
+
   #validateResponse(operation, action) {
     try {
       return action();
@@ -425,8 +484,9 @@ export class GitHubReleaseStore {
   async #ensureRelease(tag) {
     this.#requireWriteToken();
     const existing = await this.#getRelease(tag);
-    if (existing) return existing;
+    if (existing) return requireMutableRelease(existing);
     const requestBody = Buffer.from(JSON.stringify({ tag_name: tag, name: tag, draft: false, prerelease: false }), "utf8");
+    const budget = { delayMilliseconds: 0 };
     for (let attempt = 1; attempt <= maximumRequestAttempts; attempt += 1) {
       try {
         const bytes = await this.#apiRequest(`/repos/${this.repository}/releases`, {
@@ -440,14 +500,15 @@ export class GitHubReleaseStore {
           "create_release",
           () => validateRelease(parseJson(bytes, "GitHub release creation response"), tag),
         );
-        this.#releases.set(tag, release);
-        return release;
+        const mutable = requireMutableRelease(release);
+        this.#releases.set(tag, mutable);
+        return mutable;
       } catch (error) {
         this.#releases.delete(tag);
         const reconciled = await this.#getRelease(tag);
-        if (reconciled !== null) return reconciled;
+        if (reconciled !== null) return requireMutableRelease(reconciled);
         if (!(error instanceof GitHubStorageError) || !error.retryable || attempt === maximumRequestAttempts) throw error;
-        await this.#waitForRetry("create_release", error, attempt);
+        await this.#waitForRetry("create_release", error, attempt, budget);
       }
     }
     throw new GitHubStorageError("create_release", "transport");
@@ -466,7 +527,7 @@ export class GitHubReleaseStore {
         return values.map(validateAsset);
       });
       output.push(...part);
-      if (output.length > 1_000) throw new GitHubStorageError("list_assets", "storage_limit");
+      if (output.length > maximumMarketDataAssetsPerRelease) throw new GitHubStorageError("list_assets", "storage_limit");
       if (part.length < 100) break;
       if (page === 11) throw new GitHubStorageError("list_assets", "storage_limit");
     }
@@ -572,8 +633,9 @@ export class GitHubReleaseStore {
       await this.#deleteAsset(release.id, existing);
       assets = await this.#confirmAssetAbsent(release.id, name);
     }
-    if (assets.length >= 1_000) throw new GitHubStorageError("upload_asset", "storage_limit");
+    if (assets.length >= maximumMarketDataAssetsPerRelease) throw new GitHubStorageError("upload_asset", "storage_limit");
 
+    const budget = { delayMilliseconds: 0 };
     for (let attempt = 1; attempt <= maximumRequestAttempts; attempt += 1) {
       try {
         const uploadedBytes = await this.#uploadRequest(release.id, name, bytes);
@@ -596,9 +658,9 @@ export class GitHubReleaseStore {
           await this.#deleteAsset(release.id, reconciled.asset);
           assets = await this.#confirmAssetAbsent(release.id, name);
         }
-        if (assets.length >= 1_000) throw new GitHubStorageError("upload_asset", "storage_limit");
+        if (assets.length >= maximumMarketDataAssetsPerRelease) throw new GitHubStorageError("upload_asset", "storage_limit");
         if (!(error instanceof GitHubStorageError) || !error.retryable || attempt === maximumRequestAttempts) throw error;
-        await this.#waitForRetry("upload_asset", error, attempt);
+        await this.#waitForRetry("upload_asset", error, attempt, budget);
       }
     }
     throw new GitHubStorageError("upload_asset", "transport");
@@ -645,6 +707,7 @@ export class GitHubReleaseStore {
   async #removeExactAsset({ tag, name, expectedSize, expectedDigest, allowIncomplete = false }) {
     const { release, asset } = await this.#assetByName(tag, name);
     if (release === null || asset === null) return;
+    requireMutableRelease(release, "delete_asset");
     if (asset.state === "starter") {
       if (!allowIncomplete) throw new StoredDataIntegrityError();
       await this.#deleteAsset(release.id, asset);
@@ -655,152 +718,79 @@ export class GitHubReleaseStore {
     await this.#deleteAsset(release.id, asset);
   }
 
-  async readSelectedState(pairId) {
-    const release = await this.#getRelease(stateTag(pairId));
-    if (!release) return null;
-    const candidates = (await this.#listAssets(release.id))
-      .map((asset) => ({ asset, sequence: parseStateObjectName(asset.name) }))
-      .filter((entry) => entry.sequence !== null && entry.asset.state === "uploaded")
-      .sort((left, right) => left.sequence - right.sequence);
-    if (candidates.length === 0) return null;
-    const selected = candidates.at(-1);
-    const gzipBytes = validateStateBytes(this.#token === undefined
-      ? await this.#downloadPublic(release.tag, selected.asset.name)
-      : await this.#readAdmittedUploadedAsset(release.id, selected.asset), this.#maximumArtifactBytes);
-    if (
-      selected.asset.size !== gzipBytes.byteLength
-      || selected.asset.digest !== null && selected.asset.digest !== `sha256:${sha256Hex(gzipBytes)}`
-    ) {
+  async listMarketDataAssets(releaseTag) {
+    validateMarketDataReleaseTag(releaseTag);
+    const release = await this.#getRelease(releaseTag);
+    if (release === null) return Object.freeze([]);
+    return Object.freeze((await this.#listAssets(release.id)).map((asset) => Object.freeze({
+      assetName: asset.name,
+      bytes: asset.size,
+      sha256: asset.digest?.slice("sha256:".length) ?? null,
+      state: asset.state,
+    })).sort((left, right) => left.assetName.localeCompare(right.assetName)));
+  }
+
+  async readMarketDataPublication() {
+    const { release, asset } = await this.#assetByName("market-data-catalog", marketDataPublicationAssetName);
+    if (release === null || asset === null) return Object.freeze({ status: "absent" });
+    if (asset.state === "starter") return Object.freeze({ status: "starter" });
+    const bytes = this.#token === undefined
+      ? await this.#downloadPublic("market-data-catalog", marketDataPublicationAssetName)
+      : await this.#readAdmittedUploadedAsset(release.id, asset);
+    const sha256 = sha256Hex(bytes);
+    if (bytes.byteLength !== asset.size || asset.digest !== null && asset.digest !== `sha256:${sha256}`) {
       throw new StoredDataIntegrityError();
     }
-    this.#rememberVerifiedAsset(release.id, selected.asset, sha256Hex(gzipBytes), gzipBytes);
-    return { sequence: selected.sequence, gzipBytes };
-  }
-
-  async readReferenced(reference) {
-    const tag = referenceTag(reference);
-    const name = referenceObjectName(reference);
-    if (this.#token === undefined) {
-      return verifyStoredReferenceBytes(reference, await this.#downloadPublic(tag, name), this.#maximumArtifactBytes);
-    }
-    const { release, asset } = await this.#assetByName(tag, name);
-    if (release === null || asset === null || asset.state !== "uploaded") throw new StoredDataIntegrityError();
-    return verifyStoredReferenceBytes(
-      reference,
-      await this.#readAdmittedUploadedAsset(release.id, asset),
-      this.#maximumArtifactBytes,
-    );
-  }
-
-  async writeReferenced(reference, gzipBytes) {
-    this.#requireWriteToken();
-    verifyStoredReferenceBytes(reference, gzipBytes, this.#maximumArtifactBytes);
-    const release = await this.#ensureRelease(referenceTag(reference));
-    return verifyStoredReferenceBytes(
-      reference,
-      await this.#uploadImmutable(release, referenceObjectName(reference), gzipBytes),
-      this.#maximumArtifactBytes,
-    );
-  }
-
-  async writeState(pairId, sequence, gzipBytes) {
-    this.#requireWriteToken();
-    validatePairId(pairId);
-    validateGeneration(sequence);
-    validateStateBytes(gzipBytes, this.#maximumArtifactBytes);
-    const release = await this.#ensureRelease(stateTag(pairId));
-    return validateStateBytes(
-      await this.#uploadImmutable(release, stateObjectName(sequence), gzipBytes),
-      this.#maximumArtifactBytes,
-    );
-  }
-
-  async readPublication(pairId) {
-    validatePairId(pairId);
-    const { release, asset } = await this.#assetByName(stateTag(pairId), publicationObjectName);
-    if (release === null || asset === null) return { status: "absent" };
-    if (asset.state === "starter") return { status: "starter" };
-    const gzipBytes = validateStateBytes(
-      await this.#readAdmittedUploadedAsset(release.id, asset),
-      this.#maximumArtifactBytes,
-    );
-    return { status: "uploaded", gzipBytes };
-  }
-
-  async createPublication(pairId, gzipBytes) {
-    this.#requireWriteToken();
-    validatePairId(pairId);
-    validateStateBytes(gzipBytes, this.#maximumArtifactBytes);
-    const release = await this.#ensureRelease(stateTag(pairId));
-    return validateStateBytes(
-      await this.#uploadImmutable(release, publicationObjectName, gzipBytes),
-      this.#maximumArtifactBytes,
-    );
-  }
-
-  async removePublication(pairId, gzipBytes) {
-    this.#requireWriteToken();
-    validatePairId(pairId);
-    validateStateBytes(gzipBytes, this.#maximumArtifactBytes);
-    await this.#removeExactAsset({
-      tag: stateTag(pairId),
-      name: publicationObjectName,
-      expectedSize: gzipBytes.byteLength,
-      expectedDigest: sha256Hex(gzipBytes),
+    return Object.freeze({
+      bytes,
+      identity: Object.freeze({
+        assetName: marketDataPublicationAssetName,
+        bytes: bytes.byteLength,
+        releaseTag: "market-data-catalog",
+        sha256,
+      }),
+      status: "uploaded",
     });
   }
 
-  async removePublicationStarter(pairId) {
+  async removeMarketDataPublicationStarter() {
     this.#requireWriteToken();
-    validatePairId(pairId);
-    const { release, asset } = await this.#assetByName(stateTag(pairId), publicationObjectName);
+    const { release, asset } = await this.#assetByName("market-data-catalog", marketDataPublicationAssetName);
     if (release === null || asset === null) return;
+    requireMutableRelease(release, "delete_asset");
     if (asset.state !== "starter") throw new StoredDataIntegrityError();
     await this.#deleteAsset(release.id, asset);
-    await this.#confirmAssetAbsent(release.id, publicationObjectName);
+    await this.#confirmAssetAbsent(release.id, marketDataPublicationAssetName);
   }
 
-  async readState(pairId, identity) {
-    validatePairId(pairId);
-    validateStateIdentity(identity);
-    const { release, asset } = await this.#assetByName(stateTag(pairId), stateObjectName(identity.sequence));
-    if (release === null || asset === null) return null;
-    if (asset.state !== "uploaded") throw new StoredDataIntegrityError();
-    const gzipBytes = validateStateBytes(
-      await this.#readAdmittedUploadedAsset(release.id, asset),
-      this.#maximumArtifactBytes,
-    );
-    return verifyStateIdentityBytes(identity, gzipBytes, this.#maximumArtifactBytes);
+  async readMarketDataAsset(identity, range = null) {
+    validatePhysicalAssetIdentity(identity);
+    if (range !== null) return this.#downloadPublicRange(identity, range);
+    const { release, asset } = await this.#assetByName(identity.releaseTag, identity.assetName);
+    if (release === null || asset === null || asset.state !== "uploaded") throw new StoredDataIntegrityError();
+    const bytes = this.#token === undefined
+      ? await this.#downloadPublic(identity.releaseTag, identity.assetName)
+      : await this.#readAdmittedUploadedAsset(release.id, asset);
+    if (bytes.byteLength !== identity.bytes || sha256Hex(bytes) !== identity.sha256) throw new StoredDataIntegrityError();
+    return bytes;
   }
 
-  async proveReferenced(reference) {
-    validateStoredReference(reference);
-    const { release, asset } = await this.#assetByName(referenceTag(reference), referenceObjectName(reference));
-    if (release === null || asset === null) throw new StoredDataIntegrityError();
-    await this.#proveUploadedAsset(release.id, asset, reference.gzipBytes, reference.gzipSha256);
-  }
-
-  async removeReferenced(reference, { allowIncomplete = false } = {}) {
+  async writeMarketDataAsset(identity, bytes) {
     this.#requireWriteToken();
-    validateStoredReference(reference);
-    await this.#removeExactAsset({
-      tag: referenceTag(reference),
-      name: referenceObjectName(reference),
-      expectedSize: reference.gzipBytes,
-      expectedDigest: reference.gzipSha256,
-      allowIncomplete,
-    });
+    validatePhysicalAssetIdentity(identity);
+    if (!Buffer.isBuffer(bytes) || bytes.byteLength !== identity.bytes || sha256Hex(bytes) !== identity.sha256) throw new Error("Market-data asset bytes are invalid.");
+    const release = await this.#ensureRelease(identity.releaseTag);
+    return this.#uploadImmutable(release, identity.assetName, bytes);
   }
 
-  async removeState(pairId, identity, { allowIncomplete = false } = {}) {
+  async removeMarketDataAsset(identity, { allowIncomplete = false } = {}) {
     this.#requireWriteToken();
-    validatePairId(pairId);
-    validateStateIdentity(identity);
+    validatePhysicalAssetIdentity(identity);
     await this.#removeExactAsset({
-      tag: stateTag(pairId),
-      name: stateObjectName(identity.sequence),
-      expectedSize: identity.gzipBytes,
-      expectedDigest: identity.gzipSha256,
+      tag: identity.releaseTag,
+      name: identity.assetName,
+      expectedSize: identity.bytes,
+      expectedDigest: identity.sha256,
       allowIncomplete,
     });
   }

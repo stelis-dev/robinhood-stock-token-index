@@ -1,5 +1,12 @@
 export const maximumRpcEndpointCount = 3;
 export const maximumRpcBatchSize = 100;
+export const marketDataRpcLimits = Object.freeze({
+  maximumResponseBytes: 16_777_216,
+  maximumRpcAttempts: 7,
+  maximumRpcRetryDelayMilliseconds: 60_000,
+  requestDelayMilliseconds: 1_500,
+  requestTimeoutMilliseconds: 30_000,
+});
 export const rpcMethods = Object.freeze({
   chainId: "eth_chainId",
   getBlockByNumber: "eth_getBlockByNumber",

@@ -76,13 +76,3 @@ export class CandleAccumulator {
     })).sort(compareCandleIdentity);
   }
 }
-
-export function mergePairCandles(existing, replacement, fromTimestamp, untilTimestamp) {
-  if (!Array.isArray(existing) || !Array.isArray(replacement)) throw new Error("Candle replacement inputs must be arrays.");
-  const kept = existing.filter((candle) => candle.intervalStart < fromTimestamp || candle.intervalStart >= untilTimestamp);
-  const merged = [...kept, ...replacement].sort(compareCandleIdentity);
-  for (let index = 1; index < merged.length; index += 1) {
-    if (compareCandleIdentity(merged[index - 1], merged[index]) === 0) throw new Error("Duplicate candle identity.");
-  }
-  return merged;
-}

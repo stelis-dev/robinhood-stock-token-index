@@ -1,380 +1,219 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from "node:url";
-import { isCanonicalBytes32 } from "./collector/hex-data.mjs";
-import { readPairMonthResolution, verifyPairIndex } from "./collector/pair-reader.mjs";
-import { loadPairRegistry, pairById } from "./collector/pair-registry.mjs";
+
+import { isCanonicalAddress, isCanonicalBytes32 } from "./collector/hex-data.mjs";
+import { maximumMarketDataAssetBytes } from "./collector/market-data-assets.mjs";
+import { loadMarketDataConfiguration } from "./collector/market-data-configuration.mjs";
 import {
-  createFinalizedBoundary,
-  rpcEndpointFailureFacts,
-  rpcOperationFailureFields,
-  runRpcPairOperation,
-} from "./collector/rpc-operation.mjs";
+  runMarketDataCollectOperation,
+  runMarketDataRepairOperation,
+} from "./collector/market-data-operation.mjs";
+import { createMarketDataReader } from "./collector/market-data-reader.mjs";
+import { verifyMarketDataRecording } from "./collector/market-data-verifier.mjs";
 import { RpcClient } from "./collector/rpc-client.mjs";
 import {
-  validateRpcUrl,
+  marketDataRpcLimits,
   maximumRpcEndpointCount,
+  validateRpcUrl,
 } from "./collector/rpc-endpoint.mjs";
-import {
-  collectionGroupBySchedule,
-  githubMutationIntervalMilliseconds,
-  loadCollectionPlan,
-} from "./scheduler/collection-plan.mjs";
-import { runCollectionGroup } from "./scheduler/run-collection-group.mjs";
 import { createStore } from "./storage/create-store.mjs";
-import { githubStorageFailureFields } from "./storage/github-release-store.mjs";
-import { storedDataFailureFields } from "./storage/stored-files.mjs";
 
 const operations = new Set(["collect", "read", "repair", "verify"]);
-const flags = new Set(["--group", "--month", "--pair", "--repository", "--resolution", "--root", "--schedule", "--store"]);
-const fallbackEnvironmentNames = Object.freeze([
+const flags = new Set([
+  "--base", "--from-block", "--from-timestamp", "--month", "--pool-id",
+  "--repository", "--resolution", "--root", "--store", "--until-block", "--until-timestamp",
+]);
+const rpcEnvironmentNames = Object.freeze([
+  "INDEX_RPC_URL",
   "INDEX_RPC_FALLBACK_URL_0",
   "INDEX_RPC_FALLBACK_URL_1",
 ]);
-const rpcEndpointSourceNames = Object.freeze([
-  "registry.chain.primaryRpcUrl",
-  ...fallbackEnvironmentNames,
-]);
-if (fallbackEnvironmentNames.length + 1 !== maximumRpcEndpointCount) throw new Error("RPC endpoint configuration is inconsistent.");
+if (rpcEnvironmentNames.length !== maximumRpcEndpointCount) throw new Error("RPC endpoint inputs are inconsistent.");
 
 export function rpcEndpointSourceName(index) {
-  if (!Number.isSafeInteger(index) || index < 0 || index >= rpcEndpointSourceNames.length) {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= rpcEnvironmentNames.length) {
     throw new Error("RPC endpoint selection is invalid.");
   }
-  return rpcEndpointSourceNames[index];
+  return rpcEnvironmentNames[index];
 }
 
-function validateEndpointFailures(failures) {
-  if (!Array.isArray(failures) || failures.length > maximumRpcEndpointCount) {
-    throw new Error("RPC endpoint failure list is invalid.");
-  }
-  for (let index = 0; index < failures.length; index += 1) {
-    const entry = failures[index];
-    if (
-      entry === null
-      || typeof entry !== "object"
-      || Array.isArray(entry)
-      || entry.endpointIndex !== index
-      || rpcEndpointFailureFacts(entry.error) === null
-    ) {
-      throw new Error("RPC endpoint failure is invalid.");
-    }
-  }
-  return failures;
-}
-
-function sameRpcFailure(left, right) {
-  return left.reason === right.reason
-    && left.rpcMethod === right.rpcMethod
-    && left.httpStatus === right.httpStatus
-    && left.rpcCode === right.rpcCode;
-}
-
-function failedEndpointFields(failures) {
-  return failures.map(({ endpointIndex, error }, index) => {
-    const failure = rpcEndpointFailureFacts(error);
-    const prefix = `failed_rpc_${index}`;
-    const method = failure.rpcMethod === null ? "" : ` ${prefix}_method=${failure.rpcMethod}`;
-    const httpStatus = failure.httpStatus === null ? "" : ` ${prefix}_http_status=${failure.httpStatus}`;
-    const rpcCode = failure.rpcCode === null ? "" : ` ${prefix}_code=${failure.rpcCode}`;
-    return `${prefix}_endpoint_source=${rpcEndpointSourceName(endpointIndex)} ${prefix}_reason=${failure.reason}${method}${httpStatus}${rpcCode}`;
-  }).join(" ");
-}
-
-export function pairOperationSuccessLog(phase, pairId, index, environment, endpointFailures = []) {
-  if (environment?.GITHUB_ACTIONS !== "true") return null;
-  if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("RPC operation phase is invalid.");
-  if (!isCanonicalBytes32(pairId)) throw new Error("Pair operation identity is invalid.");
-  validateEndpointFailures(endpointFailures);
-  if (endpointFailures.length !== index) throw new Error("RPC endpoint success attempts are inconsistent.");
-  const failed = failedEndpointFields(endpointFailures);
-  return `pair_operation=${phase} status=success rpc_endpoint_source=${rpcEndpointSourceName(index)}${failed === "" ? "" : ` ${failed}`} pair_id=${pairId}\n`;
-}
-
-export function pairOperationFailureLog(phase, pairId, environment, error, endpointFailures = []) {
-  if (environment?.GITHUB_ACTIONS !== "true") return null;
-  if (phase !== "current" && phase !== "history" && phase !== "repair") throw new Error("Pair operation phase is invalid.");
-  if (!isCanonicalBytes32(pairId)) throw new Error("Pair operation identity is invalid.");
-  validateEndpointFailures(endpointFailures);
-  const failure = githubStorageFailureFields(error)
-    ?? rpcOperationFailureFields(error)
-    ?? storedDataFailureFields(error);
-  const fields = failure === null ? "component=collector reason=operation_rejected" : failure;
-  const directRpcFailure = rpcEndpointFailureFacts(error);
-  let currentEndpoint = "";
-  let previousFailures = endpointFailures;
-  if (directRpcFailure !== null && endpointFailures.length > 0) {
-    const current = endpointFailures.at(-1);
-    if (!sameRpcFailure(rpcEndpointFailureFacts(current.error), directRpcFailure)) {
-      throw new Error("RPC endpoint failure facts are inconsistent.");
-    }
-    currentEndpoint = ` rpc_endpoint_source=${rpcEndpointSourceName(current.endpointIndex)}`;
-    previousFailures = endpointFailures.slice(0, -1);
-  }
-  const failed = failedEndpointFields(previousFailures);
-  return `pair_operation=${phase} status=failed ${fields}${currentEndpoint}${failed === "" ? "" : ` ${failed}`} pair_id=${pairId}\n`;
-}
-
-export function publicationRecoveryLog(recovery, environment) {
-  if (environment?.GITHUB_ACTIONS !== "true" || recovery?.status === "idle") return null;
-  if (recovery === null || typeof recovery !== "object" || (recovery.status !== "aborted" && recovery.status !== "committed")) {
-    throw new Error("Publication recovery result is invalid.");
-  }
-  if (!isCanonicalBytes32(recovery.pairId)) {
-    throw new Error("Publication recovery pair identity is invalid.");
-  }
-  if (recovery.phase !== null && recovery.phase !== "current" && recovery.phase !== "history" && recovery.phase !== "repair") {
-    throw new Error("Publication recovery phase is invalid.");
-  }
-  if (recovery.selectedSequence !== null && (!Number.isSafeInteger(recovery.selectedSequence) || recovery.selectedSequence <= 0)) {
-    throw new Error("Publication recovery sequence is invalid.");
-  }
-  const outcome = recovery.status === "committed" ? "next_state_selected" : "previous_state_retained";
-  const phase = recovery.phase === null ? "none" : recovery.phase;
-  const sequence = recovery.selectedSequence === null ? "none" : recovery.selectedSequence;
-  return `publication_recovery outcome=${outcome} phase=${phase} selected_sequence=${sequence} pair_id=${recovery.pairId}\n`;
-}
-
-export function selectRpcUrls(registry, environment) {
+export function selectRpcUrls(environment) {
   if (environment === null || typeof environment !== "object" || Array.isArray(environment)) throw new Error("RPC environment is invalid.");
-  const allowedNames = new Set(fallbackEnvironmentNames);
+  const allowed = new Set(rpcEnvironmentNames);
   for (const [name, value] of Object.entries(environment)) {
-    if (name.startsWith("INDEX_RPC_") && value !== undefined && value !== "" && !allowedNames.has(name)) {
+    if (name.startsWith("INDEX_RPC_") && value !== undefined && value !== "" && !allowed.has(name)) {
       throw new Error("RPC environment contains an unsupported setting.");
     }
   }
-  const primary = validateRpcUrl(registry?.chain?.primaryRpcUrl, "Registry primary RPC URL");
-  const fallbackValues = [];
-  let missingFallback = false;
-  for (const name of fallbackEnvironmentNames) {
+  const values = [];
+  let missing = false;
+  for (const name of rpcEnvironmentNames) {
     const value = environment[name];
     if (value === undefined || value === "") {
-      missingFallback = true;
+      if (name === "INDEX_RPC_URL") throw new Error("INDEX_RPC_URL is required.");
+      missing = true;
       continue;
     }
-    if (missingFallback) throw new Error("RPC fallback endpoint positions must be contiguous.");
-    fallbackValues.push(validateRpcUrl(value, name));
+    if (missing) throw new Error("RPC fallback endpoint positions must be contiguous.");
+    values.push(validateRpcUrl(value, name));
   }
-  const urls = [primary, ...fallbackValues];
-  if (new Set(urls).size !== urls.length) throw new Error("RPC endpoint URLs must be unique.");
-  return urls;
+  if (new Set(values).size !== values.length) throw new Error("RPC endpoint URLs must be unique.");
+  return Object.freeze(values);
 }
 
-export function parseArguments(argv) {
-  const [operation, ...rest] = argv;
-  if (!operations.has(operation)) throw new Error("Operation must be collect, read, repair, or verify.");
+function optionValues(rest) {
   if (rest.length % 2 !== 0) throw new Error("Every command option requires one value.");
   const values = {};
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index];
     const value = rest[index + 1];
-    if (!flags.has(flag) || typeof value !== "string" || value.length === 0 || flag in values) throw new Error(`Invalid command option: ${flag}`);
+    if (!flags.has(flag) || typeof value !== "string" || value.length === 0 || Object.hasOwn(values, flag)) {
+      throw new Error(`Invalid command option: ${flag}`);
+    }
     values[flag] = value;
   }
+  return values;
+}
+
+function selectedOptions(values, names) {
+  return names.filter((name) => values[name] !== undefined);
+}
+
+export function parseArguments(argv) {
+  const [operation, ...rest] = argv;
+  if (!operations.has(operation)) throw new Error("Operation must be collect, read, repair, or verify.");
+  const values = optionValues(rest);
   const store = values["--store"];
   if (store !== "directory" && store !== "github") throw new Error("--store must be directory or github.");
-  const targets = [
-    ["pair", values["--pair"]],
-    ["group", values["--group"]],
-    ["schedule", values["--schedule"]],
-  ].filter(([, value]) => value !== undefined);
-  if (targets.length !== 1) throw new Error("Every operation requires exactly one --pair, --group, or --schedule target.");
-  const [targetKind, targetId] = targets[0];
-  if ((operation === "read" || operation === "verify") && targetKind !== "pair") {
-    throw new Error("Read and verify require a pair target.");
+  if (store === "directory" && values["--root"] === undefined) throw new Error("Directory storage requires --root.");
+  if (store === "github" && values["--repository"] === undefined) throw new Error("GitHub storage requires --repository.");
+  if (store === "directory" && values["--repository"] !== undefined || store === "github" && values["--root"] !== undefined) {
+    throw new Error("Storage options cannot cross adapter boundaries.");
   }
-  if (targetKind === "group" && operation !== "collect" && operation !== "repair") {
-    throw new Error("A group target accepts collect or repair.");
+  const readNames = ["--base", "--month", "--resolution"];
+  const repairNames = ["--base", "--from-block", "--from-timestamp", "--pool-id", "--until-block", "--until-timestamp"];
+  const dataNames = [...new Set([...readNames, ...repairNames])];
+  if (operation === "read" && selectedOptions(values, readNames).length !== readNames.length) {
+    throw new Error("Read requires --base, --month, and --resolution.");
   }
-  if (targetKind === "schedule" && operation !== "collect") {
-    throw new Error("A schedule target accepts collect only.");
+  if (operation === "repair" && selectedOptions(values, repairNames).length !== repairNames.length) {
+    throw new Error("Repair requires one exact base currency, PoolId, block range, and time range.");
   }
-  if (store === "directory" && !values["--root"]) throw new Error("Directory storage requires --root.");
-  if (store === "github" && !values["--repository"]) throw new Error("GitHub storage requires --repository.");
-  if (store === "directory" && values["--repository"] || store === "github" && values["--root"]) throw new Error("Storage options cannot cross adapter boundaries.");
-  const hasStoredSelection = values["--month"] !== undefined || values["--resolution"] !== undefined;
-  if (operation === "read" && (!values["--month"] || !values["--resolution"])) {
-    throw new Error("Read requires --month and --resolution.");
-  }
-  if (operation !== "read" && hasStoredSelection) throw new Error("Only read accepts --month and --resolution.");
-  return {
-    operation,
-    target: { kind: targetKind, id: targetId },
-    store,
-    root: values["--root"],
-    repository: values["--repository"],
-    month: values["--month"],
-    resolution: values["--resolution"],
-  };
-}
-
-function rpcClients(registry, environment, signal) {
-  return selectRpcUrls(registry, environment).map((url) => new RpcClient({
-    url,
-    requestDelayMilliseconds: registry.collection.requestDelayMilliseconds,
-    requestTimeoutMilliseconds: registry.collection.requestTimeoutMilliseconds,
-    maximumResponseBytes: registry.collection.maximumResponseBytes,
-    maximumRpcAttempts: registry.collection.maximumRpcAttempts,
-    maximumRpcRetryDelayMilliseconds: registry.collection.maximumRpcRetryDelayMilliseconds,
-    signal,
-  }));
-}
-
-function writeOperationSuccess(phase, pairId, completed, environment, writeLog) {
-  const line = pairOperationSuccessLog(
-    phase,
-    pairId,
-    completed.selectedEndpointIndex,
-    environment,
-    completed.endpointFailures,
-  );
-  if (line !== null) writeLog(line);
-}
-
-function writeOperationFailure(phase, pairId, environment, error, endpointFailures, writeLog) {
-  const line = pairOperationFailureLog(phase, pairId, environment, error, endpointFailures);
-  if (line !== null) writeLog(line);
-}
-
-function writeRecovery(recovery, environment, writeLog) {
-  const line = publicationRecoveryLog(recovery, environment);
-  if (line !== null) writeLog(line);
-}
-
-async function runPairOperation({
-  phase,
-  registry,
-  pairId,
-  store,
-  clients,
-  finalizedBoundary,
-  signal,
-  environment,
-  writeLog,
-}) {
-  const endpointFailures = [];
-  try {
-    const completed = await runRpcPairOperation({
-      operation: phase,
-      registry,
-      pairId,
-      store,
-      rpcClients: clients,
-      finalizedBoundary,
-      onEndpointFailure: (failure) => endpointFailures.push(failure),
-      onRecovery: (recovery) => writeRecovery(recovery, environment, writeLog),
-      signal,
-    });
-    const observed = Object.freeze([...endpointFailures]);
-    const result = { ...completed, endpointFailures: observed };
-    writeOperationSuccess(phase, pairId, result, environment, writeLog);
-    return result;
-  } catch (error) {
-    writeOperationFailure(phase, pairId, environment, error, endpointFailures, writeLog);
-    throw error;
-  }
-}
-
-function pairOptions(options, pairId) {
-  return { ...options, target: { kind: "pair", id: pairId } };
-}
-
-function createOperationContext(options, registry, { collectionPlan, environment, signal, writeLog }) {
-  const mutates = options.operation === "collect" || options.operation === "repair";
-  if (mutates && collectionPlan === null) throw new Error("Collection plan is required for a mutation.");
-  if (options.store === "github" && mutates && (typeof environment.GITHUB_TOKEN !== "string" || environment.GITHUB_TOKEN.length === 0)) {
-    throw new Error("GitHub token is required for storage mutation.");
+  const allowedDataNames = operation === "read" ? new Set(readNames) : operation === "repair" ? new Set(repairNames) : new Set();
+  if (dataNames.some((name) => values[name] !== undefined && !allowedDataNames.has(name))) {
+    throw new Error("Operation contains an unrelated market-data selection.");
   }
   return Object.freeze({
-    environment,
-    signal,
-    writeLog,
-    store: createStore({
-      kind: options.store,
-      root: options.root,
-      repository: options.repository,
-      token: environment.GITHUB_TOKEN,
-      maximumArtifactBytes: registry.collection.maximumArtifactBytes,
-      minimumMutationIntervalMilliseconds: mutates ? githubMutationIntervalMilliseconds(collectionPlan) : 0,
-      signal,
-    }),
-    clients: mutates ? Object.freeze(rpcClients(registry, environment, signal)) : null,
+    baseCurrencyAddress: values["--base"],
+    fromBlock: values["--from-block"],
+    fromTimestamp: values["--from-timestamp"],
+    month: values["--month"],
+    operation,
+    poolId: values["--pool-id"],
+    repository: values["--repository"],
+    resolution: values["--resolution"],
+    root: values["--root"],
+    store,
+    untilBlock: values["--until-block"],
+    untilTimestamp: values["--until-timestamp"],
   });
 }
 
-export async function runPairCommand(options, registry, context) {
-  const pairId = options.target.id;
-  pairById(registry, pairId);
-  const { clients, environment, signal, store } = context;
-  const writeLog = context.writeLog ?? ((line) => process.stderr.write(line));
-  let result;
-  if (options.operation === "verify") {
-    result = await verifyPairIndex({ registry, pairId, store });
-  } else if (options.operation === "read") {
-    result = await readPairMonthResolution({
-      registry,
-      pairId,
-      ownerMonth: options.month,
-      resolution: options.resolution,
-      store,
-    });
-  } else {
-    if (clients === null) throw new Error("RPC operation context is unavailable.");
-    const finalizedBoundary = createFinalizedBoundary();
-    if (options.operation === "repair") {
-      const completed = await runPairOperation({
-        phase: "repair", registry, pairId, store, clients, finalizedBoundary, signal, environment, writeLog,
-      });
-      result = [completed.result];
-    } else {
-      const first = await runPairOperation({
-        phase: "current", registry, pairId, store, clients, finalizedBoundary, signal, environment, writeLog,
-      });
-      const secondPhase = first.reachedFinalizedBoundary ? "history" : "current";
-      const second = await runPairOperation({
-        phase: secondPhase, registry, pairId, store, clients, finalizedBoundary, signal, environment, writeLog,
-      });
-      result = [first.result, second.result];
-    }
+function createRpcClients(environment, signal) {
+  return selectRpcUrls(environment).map((url) => new RpcClient({ ...marketDataRpcLimits, signal, url }));
+}
+
+function createCommandStore(options, environment, signal) {
+  const mutates = options.operation === "collect" || options.operation === "repair";
+  if (options.store === "github" && mutates && (typeof environment.GITHUB_TOKEN !== "string" || environment.GITHUB_TOKEN.length === 0)) {
+    throw new Error("GITHUB_TOKEN is required for GitHub storage mutation.");
   }
-  return { ok: true, operation: options.operation, pairId, result };
+  return createStore({
+    kind: options.store,
+    maximumArtifactBytes: maximumMarketDataAssetBytes,
+    minimumMutationIntervalMilliseconds: mutates ? 1_500 : 0,
+    repository: options.repository,
+    root: options.root,
+    signal,
+    token: mutates ? environment.GITHUB_TOKEN : undefined,
+  });
+}
+
+function endpointFailureLine(failure, environment) {
+  if (environment.GITHUB_ACTIONS !== "true") return null;
+  if (failure === null || typeof failure !== "object" || !Number.isSafeInteger(failure.endpointIndex) || typeof failure.reason !== "string") {
+    throw new Error("RPC endpoint failure is invalid.");
+  }
+  const method = failure.rpcMethod === null ? "" : ` rpc_method=${failure.rpcMethod}`;
+  const http = failure.httpStatus === null ? "" : ` http_status=${failure.httpStatus}`;
+  const code = failure.rpcCode === null ? "" : ` rpc_code=${failure.rpcCode}`;
+  return `market_data_rpc status=unavailable endpoint_source=${rpcEndpointSourceName(failure.endpointIndex)} reason=${failure.reason}${method}${http}${code}\n`;
+}
+
+function repairInput(options) {
+  if (!isCanonicalAddress(options.baseCurrencyAddress) || !isCanonicalBytes32(options.poolId)) {
+    throw new Error("Repair base currency or PoolId is invalid.");
+  }
+  return Object.freeze({
+    baseCurrencyAddress: options.baseCurrencyAddress,
+    fromBlock: options.fromBlock,
+    fromTimestamp: options.fromTimestamp,
+    poolId: options.poolId,
+    untilBlock: options.untilBlock,
+    untilTimestamp: options.untilTimestamp,
+  });
+}
+
+export async function runCommand(options, admittedConfiguration, {
+  environment,
+  signal,
+  store = createCommandStore(options, environment, signal),
+  writeLog = (line) => process.stderr.write(line),
+} = {}) {
+  const onEndpointFailure = (failure) => {
+    const line = endpointFailureLine(failure, environment);
+    if (line !== null) writeLog(line);
+  };
+  if (options.operation === "verify") return verifyMarketDataRecording({ admittedConfiguration, store });
+  if (options.operation === "read") {
+    if (!admittedConfiguration.configuration.bases.some((base) => base.baseCurrencyAddress === options.baseCurrencyAddress)) {
+      throw new Error("Read base currency is absent from configuration.");
+    }
+    return createMarketDataReader({
+      configuration: admittedConfiguration.configuration,
+      maximumBytes: maximumMarketDataAssetBytes,
+      store,
+    }).readResolution({
+      baseCurrencyAddress: options.baseCurrencyAddress,
+      month: options.month,
+      resolution: options.resolution,
+    });
+  }
+  const rpcClients = createRpcClients(environment, signal);
+  if (options.operation === "collect") {
+    return runMarketDataCollectOperation({ admittedConfiguration, onEndpointFailure, rpcClients, signal, store });
+  }
+  return runMarketDataRepairOperation({
+    admittedConfiguration,
+    onEndpointFailure,
+    repair: repairInput(options),
+    rpcClients,
+    signal,
+    store,
+  });
 }
 
 export async function main(argv, {
   environment = process.env,
   signal,
-  createContext = createOperationContext,
-  pairOperation = runPairCommand,
   writeLog = (line) => process.stderr.write(line),
   writeOutput = (line) => process.stdout.write(line),
 } = {}) {
   const options = parseArguments(argv);
-  const registry = await loadPairRegistry();
-  const mutates = options.operation === "collect" || options.operation === "repair";
-  const collectionPlan = mutates ? await loadCollectionPlan(registry) : null;
-  const context = createContext(options, registry, { collectionPlan, environment, signal, writeLog });
-  let envelope;
-  if (options.target.kind === "pair") {
-    envelope = await pairOperation(options, registry, context);
-  } else {
-    if (collectionPlan === null) throw new Error("Collection plan is unavailable for a group operation.");
-    const groupId = options.target.kind === "group"
-      ? options.target.id
-      : collectionGroupBySchedule(collectionPlan, options.target.id).groupId;
-    const result = await runCollectionGroup({
-      pairRegistry: registry,
-      collectionPlan,
-      groupId,
-      signal,
-      runPair: (pairId) => pairOperation(pairOptions(options, pairId), registry, context),
-    });
-    envelope = {
-      ok: result.status === "success",
-      operation: options.operation,
-      groupId,
-      result,
-    };
-  }
+  const admittedConfiguration = await loadMarketDataConfiguration();
+  const result = await runCommand(options, admittedConfiguration, { environment, signal, writeLog });
+  const envelope = Object.freeze({ ok: true, operation: options.operation, result });
   writeOutput(`${JSON.stringify(envelope)}\n`);
   return envelope;
 }
@@ -384,9 +223,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const abort = () => controller.abort(new Error("Operation cancelled."));
   process.once("SIGINT", abort);
   process.once("SIGTERM", abort);
-  main(process.argv.slice(2), { signal: controller.signal }).then((envelope) => {
-    if (!envelope.ok) process.exitCode = 1;
-  }).catch((error) => {
+  main(process.argv.slice(2), { signal: controller.signal }).then(() => {}).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });

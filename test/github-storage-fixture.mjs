@@ -10,8 +10,6 @@ export class FakeGitHub {
     this.nextReleaseId = 1;
     this.nextAssetId = 1;
     this.requests = [];
-    this.failStateUpload = false;
-    this.failDeleteAssetName = null;
   }
 
   #releaseById(id) {
@@ -34,14 +32,14 @@ export class FakeGitHub {
     if (method === "GET" && tagMatch) {
       const tag = decodeURIComponent(tagMatch[1]);
       const release = this.releases.get(tag);
-      return release ? jsonResponse({ id: release.id, tag_name: tag }) : jsonResponse({ message: "Not Found" }, 404);
+      return release ? jsonResponse({ draft: false, id: release.id, immutable: false, tag_name: tag }) : jsonResponse({ message: "Not Found" }, 404);
     }
     if (method === "POST" && url.pathname === "/repos/owner/index/releases") {
       const request = JSON.parse(Buffer.from(init.body).toString("utf8"));
       if (this.releases.has(request.tag_name)) return jsonResponse({ message: "already_exists" }, 422);
       const release = { id: this.nextReleaseId++, tag: request.tag_name, assets: new Map() };
       this.releases.set(release.tag, release);
-      return jsonResponse({ id: release.id, tag_name: release.tag }, 201);
+      return jsonResponse({ draft: false, id: release.id, immutable: false, tag_name: release.tag }, 201);
     }
     const assetListMatch = url.pathname.match(/^\/repos\/owner\/index\/releases\/([0-9]+)\/assets$/);
     if (method === "GET" && assetListMatch) {
@@ -60,7 +58,6 @@ export class FakeGitHub {
       const name = url.searchParams.get("name");
       if (!release || !name) return jsonResponse({ message: "Not Found" }, 404);
       if (release.assets.has(name)) return jsonResponse({ message: "already_exists" }, 422);
-      if (this.failStateUpload && name.startsWith("state-g")) return jsonResponse({ message: "failure" }, 500);
       const bytes = Buffer.from(init.body);
       const asset = {
         id: this.nextAssetId++,
@@ -81,7 +78,6 @@ export class FakeGitHub {
       for (const release of this.releases.values()) {
         for (const [name, asset] of release.assets) {
           if (asset.id === Number(assetMatch[1])) {
-            if (name === this.failDeleteAssetName) return jsonResponse({ message: "failure" }, 503);
             release.assets.delete(name);
             return new Response(null, { status: 204 });
           }

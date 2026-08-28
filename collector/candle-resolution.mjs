@@ -1,12 +1,10 @@
 import { canonicalBytes } from "./canonical.mjs";
 import {
   validateCandleSwapSpan,
-  validatePairCandleSequence,
-  validatePairCoverage,
+  validateMarketDataCandleSequence,
   validateRational,
   validateSwapPositionOrder,
-} from "./pair-candle.mjs";
-import { validateRegisteredPairDescriptor } from "./pair-registry.mjs";
+} from "./market-data-candle.mjs";
 import { compareRational } from "./swap.mjs";
 import {
   admitSwapPositionIdentity,
@@ -54,6 +52,17 @@ export function resolutionMonthBounds(value) {
   const until = new Date(fromTimestamp);
   until.setUTCMonth(until.getUTCMonth() + 1);
   return { fromTimestamp, untilTimestamp: until.toISOString() };
+}
+
+export function resolutionSourceBounds({ ownerMonth, intervalSeconds }) {
+  const definition = resolutionDefinition(intervalSeconds, { derivedOnly: true });
+  const month = resolutionMonthBounds(ownerMonth);
+  const intervalMilliseconds = definition.intervalSeconds * 1_000;
+  const sourceUntil = Math.ceil(Date.parse(month.untilTimestamp) / intervalMilliseconds) * intervalMilliseconds;
+  return Object.freeze({
+    fromTimestamp: month.fromTimestamp,
+    untilTimestamp: new Date(sourceUntil).toISOString(),
+  });
 }
 
 export function validateResolutionCatalog(value) {
@@ -230,158 +239,80 @@ export function validateResolutionCandleSequence(value, context) {
   return value;
 }
 
-export function validateResolutionArtifact(value, { registry }) {
-  exactKeys(value, [
-    "candles",
-    "intervalSeconds",
-    "kind",
-    "ownerMonth",
-    "pair",
-    "sequence",
-    "timeCoverage",
-  ], "resolution artifact");
-  if (value.kind !== "pair_candle_resolution") {
-    throw new Error("Resolution artifact identity is invalid.");
+function aggregateResolutionCandles(candles, definition, timeCoverage) {
+  if (timeCoverage === null) return [];
+  const firstStart = Date.parse(timeCoverage.fromTimestamp);
+  const lastEnd = Date.parse(timeCoverage.untilTimestamp);
+  const intervalMilliseconds = definition.intervalSeconds * 1_000;
+  const aggregates = new Map();
+  for (const candle of candles) {
+    const naturalStart = Math.floor(Date.parse(candle.intervalStart) / intervalMilliseconds) * intervalMilliseconds;
+    if (naturalStart < firstStart || naturalStart >= lastEnd) continue;
+    const existing = aggregates.get(naturalStart);
+    if (existing === undefined) {
+      aggregates.set(naturalStart, {
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        baseVolumeRaw: BigInt(candle.baseVolumeRaw),
+        quoteVolumeRaw: BigInt(candle.quoteVolumeRaw),
+        tradeCount: BigInt(candle.tradeCount),
+        firstSource: candle.firstSource,
+        lastSource: candle.lastSource,
+        observedStart: candle.intervalStart,
+        observedEnd: candle.intervalEnd,
+        sourceCandleCount: 1,
+      });
+      continue;
+    }
+    if (compareRational(candle.high, existing.high) > 0) existing.high = candle.high;
+    if (compareRational(candle.low, existing.low) < 0) existing.low = candle.low;
+    existing.close = candle.close;
+    existing.baseVolumeRaw += BigInt(candle.baseVolumeRaw);
+    existing.quoteVolumeRaw += BigInt(candle.quoteVolumeRaw);
+    existing.tradeCount += BigInt(candle.tradeCount);
+    existing.lastSource = candle.lastSource;
+    existing.observedEnd = candle.intervalEnd;
+    existing.sourceCandleCount += 1;
   }
-  validateRegisteredPairDescriptor(value.pair, registry);
-  positiveInteger(value.sequence, "resolution artifact sequence");
-  const definition = resolutionDefinition(value.intervalSeconds, { derivedOnly: true });
-  const ownerMonth = validateUtcMonth(value.ownerMonth, "resolution owner month");
-  validateResolutionTimeCoverage(value.timeCoverage, {
-    intervalSeconds: definition.intervalSeconds,
-    ownerMonth,
-  });
-  validateResolutionCandleSequence(value.candles, {
-    intervalSeconds: definition.intervalSeconds,
-    ownerMonth,
-    timeCoverage: value.timeCoverage,
-  });
-  const { fromTimestamp, untilTimestamp } = resolutionMonthBounds(ownerMonth);
-  const maximumStarts = Math.ceil((Date.parse(untilTimestamp) - Date.parse(fromTimestamp)) / (definition.intervalSeconds * 1_000));
-  if (value.candles.length > maximumStarts) throw new Error("Resolution artifact candle count is invalid.");
-  return value;
+  return [...aggregates.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([intervalStart, aggregate]) => ({
+      intervalStart: new Date(intervalStart).toISOString(),
+      intervalEnd: new Date(intervalStart + intervalMilliseconds).toISOString(),
+      open: aggregate.open,
+      high: aggregate.high,
+      low: aggregate.low,
+      close: aggregate.close,
+      baseVolumeRaw: aggregate.baseVolumeRaw.toString(),
+      quoteVolumeRaw: aggregate.quoteVolumeRaw.toString(),
+      tradeCount: aggregate.tradeCount.toString(),
+      firstSource: aggregate.firstSource,
+      lastSource: aggregate.lastSource,
+      observedStart: aggregate.observedStart,
+      observedEnd: aggregate.observedEnd,
+      sourceCandleCount: aggregate.sourceCandleCount,
+    }));
 }
 
-export function createResolutionArtifacts({ registry, pair, sourceCoverage, candles, requests }) {
-  const expectedPair = validateRegisteredPairDescriptor(pair, registry);
-  validatePairCoverage(sourceCoverage, "resolution source coverage");
-  const sourceFrom = Date.parse(sourceCoverage.fromTimestamp);
-  const sourceUntil = Date.parse(sourceCoverage.untilTimestamp);
-  if (!Array.isArray(candles) || candles.length > (sourceUntil - sourceFrom) / 60_000) {
-    throw new Error("Resolution source candle count exceeds its coverage.");
-  }
-  validatePairCandleSequence(candles, { coverage: sourceCoverage });
-  if (!Array.isArray(requests) || requests.length > candleResolutionCatalog.length - 1) {
-    throw new Error("Resolution request count exceeds the fixed catalog.");
-  }
-  const identities = new Set();
-  const maximumFollowingMilliseconds = resolutionDefinition("2d").intervalSeconds * 1_000;
-  const prepared = requests.map((request, index) => {
-    exactKeys(request, ["fromTimestamp", "intervalSeconds", "ownerMonth", "sequence", "untilTimestamp"], `resolution request[${index}]`);
-    const definition = resolutionDefinition(request.intervalSeconds, { derivedOnly: true });
-    const ownerMonth = validateUtcMonth(request.ownerMonth, "resolution owner month");
-    const sequence = positiveInteger(request.sequence, "resolution request sequence");
-    const from = parseUtcInstant(request.fromTimestamp, "resolution request.fromTimestamp", true);
-    const until = parseUtcInstant(request.untilTimestamp, "resolution request.untilTimestamp", true);
-    const monthBounds = resolutionMonthBounds(ownerMonth);
-    if (
-      from >= until
-      || from < sourceFrom
-      || until > sourceUntil
-      || from < Date.parse(monthBounds.fromTimestamp)
-      || until > Date.parse(monthBounds.untilTimestamp) + maximumFollowingMilliseconds
-    ) {
-      throw new Error("Resolution request escapes its admitted source or owner-month bound.");
-    }
-    const identity = `${ownerMonth}:${definition.intervalSeconds}`;
-    if (identities.has(identity)) throw new Error("Resolution requests are duplicated.");
-    identities.add(identity);
-    const timeCoverage = resolutionTimeCoverageFromSource({
-      fromTimestamp: request.fromTimestamp,
-      untilTimestamp: request.untilTimestamp,
-      ownerMonth,
-      intervalSeconds: definition.intervalSeconds,
-    });
-    return {
-      aggregates: new Map(),
-      definition,
-      firstStart: timeCoverage === null ? null : Date.parse(timeCoverage.fromTimestamp),
-      lastEnd: timeCoverage === null ? null : Date.parse(timeCoverage.untilTimestamp),
-      ownerMonth,
-      sequence,
-      timeCoverage,
-    };
+export function createResolutionCandles({ candles, fromTimestamp, untilTimestamp, ownerMonth, intervalSeconds }) {
+  const definition = resolutionDefinition(intervalSeconds, { derivedOnly: true });
+  const owner = validateUtcMonth(ownerMonth, "resolution owner month");
+  parseUtcInstant(fromTimestamp, "resolution source.fromTimestamp", true);
+  parseUtcInstant(untilTimestamp, "resolution source.untilTimestamp", true);
+  validateMarketDataCandleSequence(candles);
+  const timeCoverage = resolutionTimeCoverageFromSource({
+    fromTimestamp,
+    untilTimestamp,
+    ownerMonth: owner,
+    intervalSeconds: definition.intervalSeconds,
   });
-
-  for (const candle of candles) {
-    const candleStart = Date.parse(candle.intervalStart);
-    for (const entry of prepared) {
-      if (entry.timeCoverage === null) continue;
-      const intervalMilliseconds = entry.definition.intervalSeconds * 1_000;
-      const naturalStart = Math.floor(candleStart / intervalMilliseconds) * intervalMilliseconds;
-      if (naturalStart < entry.firstStart || naturalStart >= entry.lastEnd) continue;
-      const existing = entry.aggregates.get(naturalStart);
-      if (existing === undefined) {
-        entry.aggregates.set(naturalStart, {
-          open: candle.open,
-          high: candle.high,
-          low: candle.low,
-          close: candle.close,
-          baseVolumeRaw: BigInt(candle.baseVolumeRaw),
-          quoteVolumeRaw: BigInt(candle.quoteVolumeRaw),
-          tradeCount: BigInt(candle.tradeCount),
-          firstSource: candle.firstSource,
-          lastSource: candle.lastSource,
-          observedStart: candle.intervalStart,
-          observedEnd: candle.intervalEnd,
-          sourceCandleCount: 1,
-        });
-        continue;
-      }
-      if (compareRational(candle.high, existing.high) > 0) existing.high = candle.high;
-      if (compareRational(candle.low, existing.low) < 0) existing.low = candle.low;
-      existing.close = candle.close;
-      existing.baseVolumeRaw += BigInt(candle.baseVolumeRaw);
-      existing.quoteVolumeRaw += BigInt(candle.quoteVolumeRaw);
-      existing.tradeCount += BigInt(candle.tradeCount);
-      existing.lastSource = candle.lastSource;
-      existing.observedEnd = candle.intervalEnd;
-      existing.sourceCandleCount += 1;
-    }
-  }
-
-  return prepared.map((entry) => {
-    if (entry.timeCoverage === null) {
-      return { ownerMonth: entry.ownerMonth, intervalSeconds: entry.definition.intervalSeconds, artifact: null };
-    }
-    const intervalMilliseconds = entry.definition.intervalSeconds * 1_000;
-    const resolutionCandles = [...entry.aggregates.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([intervalStart, aggregate]) => ({
-        intervalStart: new Date(intervalStart).toISOString(),
-        intervalEnd: new Date(intervalStart + intervalMilliseconds).toISOString(),
-        open: aggregate.open,
-        high: aggregate.high,
-        low: aggregate.low,
-        close: aggregate.close,
-        baseVolumeRaw: aggregate.baseVolumeRaw.toString(),
-        quoteVolumeRaw: aggregate.quoteVolumeRaw.toString(),
-        tradeCount: aggregate.tradeCount.toString(),
-        firstSource: aggregate.firstSource,
-        lastSource: aggregate.lastSource,
-        observedStart: aggregate.observedStart,
-        observedEnd: aggregate.observedEnd,
-        sourceCandleCount: aggregate.sourceCandleCount,
-      }));
-    const artifact = validateResolutionArtifact({
-      kind: "pair_candle_resolution",
-      pair: expectedPair,
-      sequence: entry.sequence,
-      ownerMonth: entry.ownerMonth,
-      intervalSeconds: entry.definition.intervalSeconds,
-      timeCoverage: entry.timeCoverage,
-      candles: resolutionCandles,
-    }, { registry });
-    return { ownerMonth: entry.ownerMonth, intervalSeconds: entry.definition.intervalSeconds, artifact };
+  const resolutionCandles = aggregateResolutionCandles(candles, definition, timeCoverage);
+  validateResolutionCandleSequence(resolutionCandles, {
+    intervalSeconds: definition.intervalSeconds,
+    ownerMonth: owner,
+    ...(timeCoverage === null ? {} : { timeCoverage }),
   });
+  return Object.freeze({ candles: Object.freeze(resolutionCandles), timeCoverage });
 }
