@@ -172,6 +172,15 @@ than detailed code, tests, measurements, external reviews, or former behavior.
 
 ## Work policy
 
+- Before starting any repository task, re-read the current sources and output
+  the following to the user before taking task action: the complete `Project
+  purpose and boundary` section above verbatim; the exact purpose and product
+  goal text of every accepted plan applicable to the task verbatim; and the
+  user's exact current task purpose and requested work text verbatim. Do not
+  reconstruct this text from memory or replace, shorten, paraphrase, normalize,
+  reinterpret, or omit any part of it. If no accepted plan applies, state that
+  fact instead of inventing one. Identify implementation means separately only
+  after these unchanged authorities have been printed.
 - Inspect repository state before editing and preserve unrelated changes. Do
   not commit unless the user explicitly asks.
 - Always locate the current work inside the complete dependency chain and trace
@@ -192,7 +201,10 @@ than detailed code, tests, measurements, external reviews, or former behavior.
   measurements, validators, tests, reviews, and procedures are means only. Add,
   change, or retain a means only when the complete accepted plan directly
   requires its result. Completing or perfecting a means cannot narrow, replace,
-  redefine, or satisfy the product goal by itself.
+  redefine, or satisfy the product goal by itself. Improve a means when that
+  improvement is necessary to solve the exact purpose and complete the exact
+  work, but never make the improvement, completeness, generality, robustness,
+  elegance, measurement, or validation of a means into a separate goal.
 - Before starting or expanding any local task, identify the exact accepted-plan
   result it advances, the final output that consumes it, and which parts are
   merely implementation means. Do not improve, generalize, harden, document,
