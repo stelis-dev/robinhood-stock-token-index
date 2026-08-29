@@ -2,6 +2,9 @@
 
 Read this file before every task in this repository.
 
+This file is contributor and coding-agent policy, not consumer documentation.
+Consumers should use [README.md](README.md).
+
 ## Project purpose and boundary
 
 This repository collects finalized Uniswap V4 `Swap` events on Robinhood Chain

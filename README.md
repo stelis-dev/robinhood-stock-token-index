@@ -8,6 +8,90 @@ It owns collection and recording only. It does not choose a chart resolution,
 assemble chart output, route swaps, compare pools, or provide a production
 availability guarantee.
 
+## Consumer quick start
+
+This README defines the public data contract for consumers. `AGENTS.md` governs
+contributors and coding agents working in this repository; its work policy is
+not part of the public data format or consumer protocol.
+
+GitHub Releases are development and test storage, so availability is not
+guaranteed. Public `read` and `verify` commands do not require `GITHUB_TOKEN`.
+Node.js 22 or later is required.
+
+Install the pinned dependencies without lifecycle scripts:
+
+```bash
+npm ci --ignore-scripts
+```
+
+Choose a base currency by its exact lowercase address key under
+`baseCurrencies` in [`registry/market-data.json`](registry/market-data.json).
+The symbol is display metadata, not an identifier.
+
+Read one base currency, UTC owner month, and exact stored resolution from the
+public Releases. This convenience example tries AAPL `1h` data for the caller's
+current UTC calendar month:
+
+```bash
+OWNER_MONTH="$(date -u +%Y-%m)"
+node cli.mjs read \
+  --base 0xaf3d76f1834a1d425780943c99ea8a608f8a93f9 \
+  --month "$OWNER_MONTH" \
+  --resolution 1h \
+  --store github \
+  --repository stelis-dev/robinhood-stock-token-index
+```
+
+The caller's clock does not determine an owner month. The selected base-state
+`months` references are authoritative. Near a UTC month transition or after a
+publication delay, the current calendar month can correctly return `absent`;
+for a deterministic read, pin the public root and choose an exact owner month
+listed by the requested base state as described under
+[Pin and read a public root](#pin-and-read-a-public-root).
+
+Use one of the fixed stored resolutions listed under
+[Recorded data](#recorded-data). For `1m`, `read` returns the selected base-day
+files in the owner month. For every other resolution, it returns the one
+selected base-resolution file owned by that month. It does not choose a
+resolution, trim an arbitrary time range, or assemble chart output. The command
+pins one selected root and downloads only the references needed for that base
+currency, month, and resolution by byte Range. It never falls back to
+downloading a complete packed asset.
+
+An owner month containing the selected root's `currentUntil` is still in
+progress. It contains only the coverage selected by that root, not a promise of
+a complete calendar month, and a later root may extend it.
+
+To verify every selected logical file in the complete public root instead:
+
+```bash
+node cli.mjs verify \
+  --store github \
+  --repository stelis-dev/robinhood-stock-token-index
+```
+
+Both commands print one JSON result:
+
+- `unpublished` means there is no selected root;
+- `absent` means the selected root has no state or owner month for the requested
+  configured base currency;
+- `read` means the returned files and their coverage are selected by the pinned
+  root; and
+- `verified` means every logical file selected by the pinned root passed full
+  verification.
+
+Coverage means its complete half-open block and UTC range was queried for the
+recorded PoolId. In canonical `1m`, a fully covered minute with no candle has no
+contributing Swap with two non-zero token deltas; a valid zero-delta Swap
+contributes coverage but no candle value. For a derived resolution, a missing
+candle means no stored candle for that natural interval. It means no trade only
+when the complete interval is also contained by one continuous PoolId-owned
+coverage segment; an incomplete or cross-PoolId interval is deliberately not
+emitted.
+
+Invalid stored data or unavailable required storage fails the command instead
+of returning partial data.
+
 ## Recorded data
 
 `registry/market-data.json` is the human-authored configuration. It fixes:
@@ -37,13 +121,7 @@ Every derived resolution is calculated directly from canonical `1m`. A derived
 candle is emitted only for a complete natural UTC interval owned by one PoolId.
 Different PoolIds are never combined into one candle.
 
-## Commands
-
-Install pinned dependencies without lifecycle scripts:
-
-```bash
-npm ci --ignore-scripts
-```
+## Collection and local maintenance
 
 Collect all configured base currencies into a directory:
 
@@ -67,8 +145,10 @@ GitHub repository or Directory root. The repository Actions workflow enforces
 this for automated GitHub writes through its non-cancelling concurrency queue;
 direct CLI callers must preserve the same storage-surface serialization.
 
-The GitHub Actions workflow runs shared `collect` at minutes `7`, `22`, `37`,
-and `52` of every UTC hour. Scheduled runs never invoke `repair`.
+The GitHub Actions workflow schedules shared `collect` every 15 minutes. Its
+exact UTC minute offsets are defined in
+[`.github/workflows/index.yml`](.github/workflows/index.yml). Scheduled runs
+never invoke `repair`.
 
 The fixed primary RPC is `https://rpc.mainnet.chain.robinhood.com`. Optional
 fallbacks are complete secret URLs in this order:
@@ -193,6 +273,21 @@ A derived candle additionally contains `observedStart`, `observedEnd`, and
 `denominator`. A source position contains `blockHash`, `blockNumber`, `logIndex`,
 `transactionHash`, and `transactionIndex`.
 
+Every OHLC price is exact normalized USDG per one base-currency unit:
+
+```text
+price = (quoteAmountRaw / 10^usdgDecimals)
+      / (baseAmountRaw / 10^baseCurrencyDecimals)
+```
+
+Evaluate `numerator / denominator` only at the consumer's desired precision;
+the stored value itself is not floating point. `baseVolumeRaw` is the sum of
+absolute contributing base-currency Swap amounts in the base currency's
+smallest unit. `quoteVolumeRaw` is the corresponding sum in the USDG smallest
+unit. Divide them by `10^base-state.decimals` and `10^root.usdgDecimals`
+respectively for normalized units. `tradeCount` counts contributing non-zero
+Swaps; a derived candle sums the canonical `1m` volumes and trade counts.
+
 Canonical field rules are:
 
 - an address is lowercase `0x` plus exactly 40 hexadecimal digits; a PoolId or
@@ -314,6 +409,11 @@ is reused only when its complete bytes equal the independently regenerated
 bytes and the regenerated publication record matches exactly.
 
 ## Pin and read a public root
+
+The public catalog Release and its unauthenticated API endpoint are:
+
+- [market-data-catalog Release](https://github.com/stelis-dev/robinhood-stock-token-index/releases/tag/market-data-catalog)
+- [market-data-catalog API](https://api.github.com/repos/stelis-dev/robinhood-stock-token-index/releases/tags/market-data-catalog)
 
 Keep one root fixed for an entire multi-file read:
 
