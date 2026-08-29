@@ -147,7 +147,7 @@ direct CLI callers must preserve the same storage-surface serialization.
 
 The GitHub Actions workflow schedules shared `collect` every 15 minutes. Its
 exact UTC minute offsets are defined in
-[`.github/workflows/index.yml`](.github/workflows/index.yml). Scheduled runs
+[`.github/workflows/usdg-market-data.yml`](.github/workflows/usdg-market-data.yml). Scheduled runs
 never invoke `repair`.
 
 The fixed primary RPC is `https://rpc.mainnet.chain.robinhood.com`. Optional

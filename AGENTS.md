@@ -72,7 +72,7 @@ than detailed code, tests, measurements, external reviews, or former behavior.
 - `storage/` owns only exact physical list, read, immutable write, and deletion
   operations. It cannot calculate or reinterpret market data.
 - `cli.mjs` is the only collect, repair, read, and verify command.
-- `.github/workflows/index.yml` exposes manual shared collect and repair and
+- `.github/workflows/usdg-market-data.yml` exposes manual shared collect and repair and
   runs scheduled shared collect at minutes `8`, `23`, `38`, and `53` of every
   UTC hour. The workflow contains no pair or group routing.
 

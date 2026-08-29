@@ -91,7 +91,7 @@ test("read and verify report no selected root without claiming physical storage 
 });
 
 test("the qualified workflow schedules only shared collect every fifteen minutes", async () => {
-  const source = await readFile(new URL("../.github/workflows/index.yml", import.meta.url), "utf8");
+  const source = await readFile(new URL("../.github/workflows/usdg-market-data.yml", import.meta.url), "utf8");
   assert.deepEqual([...source.matchAll(/- cron: "([^"]+)"/g)].map((match) => match[1]), ["8,23,38,53 * * * *"]);
   assert.doesNotMatch(source, /INDEX_RPC_URL/);
   assert.match(source, /INDEX_RPC_FALLBACK_URL_0: \$\{\{ secrets\.INDEX_RPC_FALLBACK_URL_0 \}\}/);
