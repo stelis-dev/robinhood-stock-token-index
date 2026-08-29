@@ -70,7 +70,7 @@ than detailed code, tests, measurements, external reviews, or former behavior.
   operations. It cannot calculate or reinterpret market data.
 - `cli.mjs` is the only collect, repair, read, and verify command.
 - `.github/workflows/index.yml` exposes manual shared collect and repair and
-  runs scheduled shared collect at minutes `7`, `22`, `37`, and `52` of every
+  runs scheduled shared collect at minutes `8`, `23`, `38`, and `53` of every
   UTC hour. The workflow contains no pair or group routing.
 
 ## Required behavior
