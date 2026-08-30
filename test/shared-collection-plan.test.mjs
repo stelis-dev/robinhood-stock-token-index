@@ -7,17 +7,9 @@ import {
 } from "../collector/market-data-configuration.mjs";
 import { derivePoolId } from "../collector/pool-key.mjs";
 import { planSharedCollectionPhase } from "../collector/shared-collection-plan.mjs";
+import { marketDataConfigurationBytes } from "./market-data-fixtures.mjs";
 
 const minuteFloor = (value) => new Date(Math.floor(Date.parse(value) / 60_000) * 60_000).toISOString();
-
-function encoded(value) {
-  const sort = (candidate) => candidate !== null && typeof candidate === "object"
-    ? Array.isArray(candidate)
-      ? candidate.map(sort)
-      : Object.fromEntries(Object.keys(candidate).sort().map((key) => [key, sort(candidate[key])]))
-    : candidate;
-  return Buffer.from(`${JSON.stringify(sort(value), null, 2)}\n`, "utf8");
-}
 
 function baseState(base, currentUntil, { historyFrom } = {}) {
   const sourceFrom = {
@@ -81,7 +73,7 @@ test("current collection joins every new-base suffix to the overlapping shared q
   }]);
 });
 
-test("current backlog advances without creating a different boundary for uninitialized bases", async () => {
+test("current backlog initializes configured bases at the same coverage end", async () => {
   const { configuration } = await loadMarketDataConfiguration();
   const selectedBases = configuration.bases.slice(0, 2);
   const currentUntil = { blockNumber: "50000000", timestamp: "2026-08-26T23:00:00.000Z" };
@@ -92,9 +84,39 @@ test("current backlog advances without creating a different boundary for uniniti
     target,
   });
   assert.equal(plan.phase, "current");
-  assert.equal(plan.work.length, 2);
+  assert.equal(plan.work.filter((entry) => entry.kind === "current").length, selectedBases.length);
+  assert.equal(
+    plan.work.filter((entry) => entry.kind === "initial").length,
+    configuration.bases.length - selectedBases.length,
+  );
+  assert.ok(plan.work.every((entry) => entry.untilTimestamp === "2026-08-26T23:15:00.000Z"));
+  assert.deepEqual(plan.ranges, [{
+    fromTimestamp: currentUntil.timestamp,
+    untilTimestamp: "2026-08-26T23:15:00.000Z",
+    poolIds: configuration.poolIds,
+  }]);
+});
+
+test("a configured base waits for the first coverage end after its Initialize minute", async () => {
+  const admitted = await loadMarketDataConfiguration();
+  const configuration = structuredClone(admitted.configuration);
+  const missing = configuration.bases.at(-1);
+  missing.initialize = {
+    blockNumber: "50000500",
+    timestamp: "2026-08-26T23:30:00.000Z",
+  };
+  const selectedBases = configuration.bases.slice(0, -1);
+  const currentUntil = { blockNumber: "50000000", timestamp: "2026-08-26T23:00:00.000Z" };
+  const plan = planSharedCollectionPhase({
+    configuration,
+    state: selectedState(configuration, selectedBases, currentUntil),
+    target: { blockNumber: "50001000", timestamp: "2026-08-27T00:15:00.000Z" },
+  });
+  assert.equal(plan.phase, "current");
+  assert.equal(plan.work.length, selectedBases.length);
   assert.ok(plan.work.every((entry) => entry.kind === "current"));
   assert.ok(plan.work.every((entry) => entry.untilTimestamp === "2026-08-26T23:15:00.000Z"));
+  assert.ok(!plan.work.some((entry) => entry.baseCurrencyAddress === missing.baseCurrencyAddress));
 });
 
 test("overlapping history slices emit their common range once with the PoolId union", async () => {
@@ -164,7 +186,7 @@ test("a configured PoolId change cannot begin after the selected current boundar
   record.poolKey.fee += 1;
   record.poolId = derivePoolId(record.poolKey);
   record.initialize = { blockNumber: "50000001", timestamp: "2026-08-27T00:00:30.000Z" };
-  const changed = decodeMarketDataConfiguration(encoded(changedValue)).configuration;
+  const changed = decodeMarketDataConfiguration(marketDataConfigurationBytes(changedValue)).configuration;
   assert.throws(() => planSharedCollectionPhase({
     configuration: changed,
     state,

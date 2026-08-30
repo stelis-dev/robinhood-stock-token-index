@@ -2,6 +2,7 @@ import { CandleAccumulator } from "./candles.mjs";
 import { canonicalBytes, canonicalJson, sha256Hex } from "./canonical.mjs";
 import {
   decodeMarketDataConfiguration,
+  MarketDataConfigurationError,
   marketDataNumericChainId,
 } from "./market-data-configuration.mjs";
 import {
@@ -130,6 +131,26 @@ function configurationInput(admittedConfiguration) {
     throw new TypeError("Admitted market-data configuration identity is invalid.");
   }
   return decoded;
+}
+
+function validateNewBaseInitialBoundary(configuredBase, sourceFrom, until) {
+  const initializeMinute = formatUtcInstant(
+    Math.floor(parseUtcInstantSeconds(
+      configuredBase.initialize.timestamp,
+      "Initialize timestamp",
+    ) / minuteSeconds) * minuteSeconds,
+    "Initialize minute",
+  );
+  if (
+    sourceFrom.timestamp !== initializeMinute
+    || initializeMinute >= until.timestamp
+    || BigInt(sourceFrom.blockNumber) > BigInt(configuredBase.initialize.blockNumber)
+    || BigInt(configuredBase.initialize.blockNumber) >= BigInt(until.blockNumber)
+  ) {
+    throw new MarketDataConfigurationError(
+      `Base currency ${configuredBase.baseCurrencyAddress} Initialize fact is outside its initial coverage.`,
+    );
+  }
 }
 
 function sourceFromPool({ baseCurrencyAddress, decimals, poolId, poolKey }, configuration) {
@@ -351,6 +372,11 @@ async function prepareEndpoint({ rpc, configuration, state, repair, fixedFinaliz
         finalized,
         blockIdentities,
       ));
+      const until = boundaries.get(work.untilTimestamp);
+      if (until === undefined) {
+        throw rejectRpc("response_result_invalid", rpcMethods.getBlockByNumber);
+      }
+      validateNewBaseInitialBoundary(configuredBase, sourceFrom, until);
     } else {
       sourceFrom = boundaries.get(state.currentUntil.timestamp);
       if (sourceFrom === undefined) {

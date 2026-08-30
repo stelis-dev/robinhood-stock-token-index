@@ -2,6 +2,15 @@ function hash(value) {
   return `0x${BigInt(value).toString(16).padStart(64, "0")}`;
 }
 
+export function marketDataConfigurationBytes(value) {
+  const sort = (candidate) => candidate !== null && typeof candidate === "object"
+    ? Array.isArray(candidate)
+      ? candidate.map(sort)
+      : Object.fromEntries(Object.keys(candidate).sort().map((key) => [key, sort(candidate[key])]))
+    : candidate;
+  return Buffer.from(`${JSON.stringify(sort(value), null, 2)}\n`, "utf8");
+}
+
 function hex(value, bytes = 32) {
   return BigInt(value).toString(16).padStart(bytes * 2, "0");
 }

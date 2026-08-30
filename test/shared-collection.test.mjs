@@ -1,19 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadMarketDataConfiguration } from "../collector/market-data-configuration.mjs";
+import {
+  decodeMarketDataConfiguration,
+  loadMarketDataConfiguration,
+} from "../collector/market-data-configuration.mjs";
 import { RpcEndpointUnavailableError, RpcResponseRejectedError, rpcMethods } from "../collector/rpc-endpoint.mjs";
 import {
   executeSharedCollectionPhase,
   prepareSharedCollectionPhase,
 } from "../collector/shared-collection.mjs";
-import { marketDataBlockHash, marketDataSwapLog } from "./market-data-fixtures.mjs";
+import {
+  marketDataBlockHash,
+  marketDataConfigurationBytes,
+  marketDataSwapLog,
+} from "./market-data-fixtures.mjs";
 
 const minuteFloor = (value) => new Date(Math.floor(Date.parse(value) / 60_000) * 60_000).toISOString();
 
 class FakeSharedRpc {
   constructor({
     configuration,
+    configurationInitializeBoundaries = true,
     originBlock,
     originTimestamp,
     finalizedNumber,
@@ -33,14 +41,26 @@ class FakeSharedRpc {
     this.unavailableLogRequest = unavailableLogRequest;
     this.returnLogsOutsideFilter = returnLogsOutsideFilter;
     this.logRequests = [];
+    this.initializeBlocksByTimestamp = new Map();
+    this.initializeTimestampsByBlock = new Map();
+    if (configurationInitializeBoundaries) {
+      for (const base of configuration.bases) {
+        const timestamp = Math.floor(Date.parse(base.initialize.timestamp) / 60_000) * 60;
+        const block = BigInt(base.initialize.blockNumber);
+        const previous = this.initializeBlocksByTimestamp.get(timestamp);
+        if (previous === undefined || block < previous) this.initializeBlocksByTimestamp.set(timestamp, block);
+        this.initializeTimestampsByBlock.set(block.toString(), timestamp);
+      }
+    }
   }
 
   block(number) {
     const candidate = BigInt(number);
+    const exactTimestamp = this.initializeTimestampsByBlock.get(candidate.toString());
     return Object.freeze({
       number: candidate,
       hash: marketDataBlockHash(candidate),
-      timestampSeconds: this.originSeconds
+      timestampSeconds: exactTimestamp ?? this.originSeconds
         + Math.floor(Number(candidate - this.originBlock) * this.secondsPerBlock),
     });
   }
@@ -67,6 +87,8 @@ class FakeSharedRpc {
     if (maximumBlockHeader !== undefined && maximumBlockHeader.number !== high) {
       throw new Error("Fixture maximum block header is invalid.");
     }
+    const exact = this.initializeBlocksByTimestamp.get(timestamp);
+    if (exact !== undefined && exact >= low && exact <= high) return exact;
     if (this.block(high).timestampSeconds < timestamp) return high + 1n;
     while (low < high) {
       const middle = (low + high) >> 1n;
@@ -162,7 +184,7 @@ test("one undivided request covers all PoolIds before capacity-only PoolId split
   const { configuration } = admittedConfiguration;
   const originBlock = 50_000_000n;
   const currentUntil = { blockNumber: originBlock.toString(), timestamp: "2026-08-27T00:00:00.000Z" };
-  const finalizedNumber = originBlock + 1n;
+  const finalizedNumber = originBlock + 60n;
   const rpc = new FakeSharedRpc({
     configuration,
     originBlock,
@@ -189,7 +211,7 @@ test("one undivided request covers all PoolIds before capacity-only PoolId split
   assert.deepEqual(rpc.logRequests[0].poolIds, configuration.poolIds);
   assert.ok(rpc.logRequests.length > 1);
   assert.ok(completed.result.bases.every((base) => base.candles.length === 1));
-  assert.ok(completed.result.bases.every((base) => base.coverage.untilTimestamp === "2026-08-27T00:01:00.000Z"));
+  assert.ok(completed.result.bases.every((base) => base.coverage.untilTimestamp === "2026-08-27T00:15:00.000Z"));
 });
 
 test("endpoint fallback discards a partial history attempt and repeats the exact prepared ranges", async () => {
@@ -428,6 +450,7 @@ test("a new PoolId exposes the first block of its Initialize minute as sourceFro
   const secondsPerBlock = secondsIntoMinute / 100;
   const rpc = new FakeSharedRpc({
     configuration,
+    configurationInitializeBoundaries: false,
     originBlock: firstMinuteBlock,
     originTimestamp: initializeMinute,
     finalizedNumber: firstMinuteBlock + BigInt(Math.ceil(70 / secondsPerBlock)),
@@ -446,6 +469,40 @@ test("a new PoolId exposes the first block of its Initialize minute as sourceFro
     timestamp: initializeMinute,
   });
   assert.notEqual(source.sourceFrom.blockNumber, oldest.initialize.blockNumber);
+});
+
+test("a new base Initialize block must fit its exact initial block boundaries", async () => {
+  const admitted = await loadMarketDataConfiguration();
+  const originBlock = 50_000_000n;
+  const missingAddress = admitted.configuration.bases.at(-1).baseCurrencyAddress;
+  for (const blockNumber of [originBlock + 4n, originBlock + 15n]) {
+    const changedValue = structuredClone(admitted.value);
+    changedValue.baseCurrencies[missingAddress].initialize = {
+      blockNumber: blockNumber.toString(),
+      timestamp: "2026-08-27T00:05:30.000Z",
+    };
+    const changed = decodeMarketDataConfiguration(marketDataConfigurationBytes(changedValue));
+    const { configuration } = changed;
+    const rpc = new FakeSharedRpc({
+      configuration,
+      configurationInitializeBoundaries: false,
+      originBlock,
+      originTimestamp: "2026-08-27T00:00:00.000Z",
+      finalizedNumber: originBlock + 60n,
+      secondsPerBlock: 60,
+    });
+    const state = stateFor(
+      configuration,
+      configuration.bases.filter((base) => base.baseCurrencyAddress !== missingAddress),
+      { blockNumber: originBlock.toString(), timestamp: "2026-08-27T00:00:00.000Z" },
+    );
+    await assert.rejects(() => prepareSharedCollectionPhase({
+      admittedConfiguration: changed,
+      state,
+      rpcClients: [rpc],
+    }), /Initialize fact is outside its initial coverage/);
+    assert.equal(rpc.logRequests.length, 0);
+  }
 });
 
 test("execution rejects a different prior state even when it produces the same work ranges", async () => {

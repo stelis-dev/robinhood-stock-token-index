@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { encodeArtifact } from "../collector/canonical.mjs";
-import { loadMarketDataConfiguration } from "../collector/market-data-configuration.mjs";
+import {
+  decodeMarketDataConfiguration,
+  loadMarketDataConfiguration,
+} from "../collector/market-data-configuration.mjs";
 import { derivePoolId } from "../collector/pool-key.mjs";
 import {
   applyBaseStateResult,
@@ -14,7 +17,10 @@ import {
   createBaseDayCandidate,
   retainedCoverageBoundary,
 } from "../collector/market-data-recording.mjs";
-import { marketDataCandle } from "./market-data-fixtures.mjs";
+import {
+  marketDataCandle,
+  marketDataConfigurationBytes,
+} from "./market-data-fixtures.mjs";
 import { createMarketDataReader } from "../collector/market-data-reader.mjs";
 import {
   publishMarketDataRecording,
@@ -47,13 +53,14 @@ function result(base, kind, fromTimestamp, untilTimestamp, fromBlock, untilBlock
 }
 
 async function initialRecording({
+  admittedConfiguration = null,
   fromBlock = "50000000",
   fromTimestamp = "2026-08-27T00:00:00.000Z",
   untilBlock = "50001000",
   untilTimestamp = "2026-08-27T00:15:00.000Z",
 } = {}) {
-  const admittedConfiguration = await loadMarketDataConfiguration();
-  const { configuration } = admittedConfiguration;
+  const admitted = admittedConfiguration ?? await loadMarketDataConfiguration();
+  const { configuration } = admitted;
   const bases = configuration.bases.map((base) => result(
     base,
     "initial",
@@ -85,7 +92,7 @@ async function initialRecording({
   const target = { blockNumber: untilBlock, timestamp: untilTimestamp };
   const collectionResult = {
     bases,
-    configurationSha256: admittedConfiguration.sha256,
+    configurationSha256: admitted.sha256,
     finalizedBlock,
     phase: "current",
     ranges: [range],
@@ -93,7 +100,7 @@ async function initialRecording({
     target,
   };
   const preparedPhase = {
-    configurationSha256: admittedConfiguration.sha256,
+    configurationSha256: admitted.sha256,
     finalizedBlock,
     newSources,
     phase: "current",
@@ -101,11 +108,11 @@ async function initialRecording({
     target,
   };
   return {
-    admittedConfiguration,
+    admittedConfiguration: admitted,
     collectionResult,
     preparedPhase,
     recording: buildInitialMarketDataRecording({
-      admittedConfiguration,
+      admittedConfiguration: admitted,
       collectionResult,
       preparedPhase,
     }),
@@ -747,6 +754,106 @@ test("a later shared phase replaces only its changed logical closure and advance
   }).selection();
   assert.equal(selectedNext.root.publicationSequence, 2);
   assert.equal(selectedNext.projection.currentUntil.timestamp, untilTimestamp);
+});
+
+test("a backlog phase records newly configured bases at its common current coverage end", async () => {
+  const admittedConfiguration = await loadMarketDataConfiguration();
+  const retainedAddresses = new Set(admittedConfiguration.configuration.bases.slice(0, 9).map((base) => (
+    base.baseCurrencyAddress
+  )));
+  const previousValue = structuredClone(admittedConfiguration.value);
+  for (const address of Object.keys(previousValue.baseCurrencies)) {
+    if (!retainedAddresses.has(address)) delete previousValue.baseCurrencies[address];
+  }
+  const previousConfiguration = decodeMarketDataConfiguration(marketDataConfigurationBytes(previousValue));
+  const { recording: initial } = await initialRecording({ admittedConfiguration: previousConfiguration });
+  const store = new DirectoryStore({
+    maximumArtifactBytes: 10_000_000,
+    root: await mkdtemp(join(tmpdir(), "market-data-new-bases-")),
+  });
+  await publishMarketDataRecording({
+    maximumBytes: 10_000_000,
+    admittedConfiguration: previousConfiguration,
+    recording: initial,
+    store,
+  });
+
+  const marketDataReader = createMarketDataReader({
+    maximumBytes: 10_000_000,
+    configuration: admittedConfiguration.configuration,
+    store,
+  });
+  const selected = await marketDataReader.selection();
+  const fromTimestamp = initial.root.currentUntil.timestamp;
+  const untilTimestamp = "2026-08-27T00:30:00.000Z";
+  const untilBlock = "50002000";
+  const missing = admittedConfiguration.configuration.bases.filter((base) => !retainedAddresses.has(base.baseCurrencyAddress));
+  const bases = admittedConfiguration.configuration.bases.map((base) => result(
+    base,
+    retainedAddresses.has(base.baseCurrencyAddress) ? "current" : "initial",
+    fromTimestamp,
+    untilTimestamp,
+    initial.root.currentUntil.blockNumber,
+    untilBlock,
+  ));
+  const newSources = missing.map((base) => ({
+    baseCurrencyAddress: base.baseCurrencyAddress,
+    poolId: base.poolId,
+    sourceFrom: {
+      blockNumber: (BigInt(base.initialize.blockNumber) - 1n).toString(),
+      timestamp: new Date(Math.floor(Date.parse(base.initialize.timestamp) / 60_000) * 60_000).toISOString(),
+    },
+  }));
+  const range = {
+    fromBlock: initial.root.currentUntil.blockNumber,
+    fromTimestamp,
+    poolIds: admittedConfiguration.configuration.poolIds,
+    untilBlock,
+    untilTimestamp,
+  };
+  const recording = await buildNextMarketDataRecording({
+    admittedConfiguration,
+    collectionResult: {
+      bases,
+      configurationSha256: admittedConfiguration.sha256,
+      finalizedBlock: {
+        blockHash: `0x${"4".repeat(64)}`,
+        blockNumber: "50010001",
+        timestamp: "2026-08-27T01:30:01.000Z",
+      },
+      phase: "current",
+      ranges: [range],
+      status: "collected",
+      target: { blockNumber: "50010000", timestamp: "2026-08-27T01:30:00.000Z" },
+    },
+    marketDataReader,
+    preparedPhase: {
+      configurationSha256: admittedConfiguration.sha256,
+      newSources,
+    },
+    selected,
+    store,
+  });
+  await publishMarketDataRecording({
+    maximumBytes: 10_000_000,
+    admittedConfiguration,
+    recording,
+    store,
+  });
+
+  const verified = await verifyMarketDataRecording({ admittedConfiguration, store });
+  assert.equal(verified.status, "verified");
+  assert.equal(verified.baseCurrencyCount, admittedConfiguration.configuration.bases.length);
+  const selectedNext = await createMarketDataReader({
+    maximumBytes: 10_000_000,
+    configuration: admittedConfiguration.configuration,
+    store,
+  }).selection();
+  assert.equal(selectedNext.root.currentUntil.timestamp, untilTimestamp);
+  assert.equal(Object.keys(selectedNext.baseStates).length, admittedConfiguration.configuration.bases.length);
+  assert.ok(Object.values(selectedNext.baseStates).every((state) => (
+    state.poolPeriods.at(-1).untilTimestamp === untilTimestamp
+  )));
 });
 
 test("a new-month phase updates a derived interval owned by the preceding month", async () => {

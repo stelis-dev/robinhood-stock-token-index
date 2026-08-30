@@ -96,6 +96,15 @@ than detailed code, tests, measurements, external reviews, or former behavior.
 - Current advances only the global selected current boundary. History moves
   PoolId history boundaries backward. Repair replaces one exact recorded range
   and moves neither boundary. Current work precedes history.
+- A configured base currency with no selected state joins the first current
+  phase whose resulting coverage end is later than its Initialize minute.
+  Its initial suffix and overlapping existing current work share one query, and
+  current backlog cannot postpone a base satisfying the Initialize time and
+  block conditions or create a different current boundary. Resolved block
+  admission requires
+  `sourceFrom.blockNumber <= initialize.blockNumber < untilBlock` for that
+  exclusive coverage end. Only after publication does the common coverage end
+  become the selected root's `currentUntil`.
 - A collect command runs at most two independently durable phases against one
   fixed finalized block. Failure of the second phase cannot remove the first
   selected phase.

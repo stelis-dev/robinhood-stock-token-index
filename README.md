@@ -110,6 +110,14 @@ liquidity, fee, routing, or display order.
 One operation queries every PoolId applicable to the same finalized range
 together, validates every returned Swap, classifies by PoolId, and records
 continuous coverage and canonical `1m` candles by base-currency address.
+A configured base currency with no selected state joins the first current phase
+whose resulting coverage end is later than its Initialize minute. Its
+initial suffix shares every overlapping range with existing current work, so a
+current backlog cannot postpone a base satisfying the Initialize time and block
+conditions or create a separate current boundary. The resolved first block of
+the Initialize minute cannot follow the Initialize block, and the Initialize
+block must precede the phase's resolved exclusive ending block. The common
+coverage end becomes the selected root's `currentUntil` only after publication.
 
 The fixed stored resolutions are:
 

@@ -436,32 +436,31 @@ export function planSharedCollectionPhase({ configuration, state: stateValue, ta
     }
   }
 
-  const reachesTarget = state === null || currentUntil === target.timestamp || !hasCurrentGap;
-  if (reachesTarget) {
-    const retentionLowerBound = subtractUtcCalendarMonths(target.timestamp, 12);
-    for (const base of configuration.bases) {
-      if (state?.baseCurrencies[base.baseCurrencyAddress] !== undefined) continue;
-      const initializeMinute = floorMinuteTimestamp(base.initialize.timestamp);
-      if (
-        initializeMinute < target.timestamp
-        && BigInt(base.initialize.blockNumber) > BigInt(target.blockNumber)
-      ) {
-        reject(`Base currency ${base.baseCurrencyAddress} Initialize block exceeds its target.`);
-      }
-      const fromTimestamp = maximumTimestamp(
-        new Date(targetTime - maximumSliceMilliseconds).toISOString(),
-        startOfUtcDay(new Date(targetTime - 1).toISOString()),
-        initializeMinute,
-        retentionLowerBound,
-      );
-      addWork(work, {
-        baseCurrencyAddress: base.baseCurrencyAddress,
-        kind: "initial",
-        poolId: base.poolId,
-        fromTimestamp,
-        untilTimestamp: target.timestamp,
-      });
+  const initialUntil = hasCurrentGap ? currentUntil : target.timestamp;
+  const initialUntilTime = Date.parse(initialUntil);
+  const initialRetentionLowerBound = subtractUtcCalendarMonths(initialUntil, 12);
+  for (const base of configuration.bases) {
+    if (state?.baseCurrencies[base.baseCurrencyAddress] !== undefined) continue;
+    const initializeMinute = floorMinuteTimestamp(base.initialize.timestamp);
+    if (
+      initializeMinute < target.timestamp
+      && BigInt(base.initialize.blockNumber) > BigInt(target.blockNumber)
+    ) {
+      reject(`Base currency ${base.baseCurrencyAddress} Initialize block exceeds its target.`);
     }
+    const fromTimestamp = maximumTimestamp(
+      new Date(initialUntilTime - maximumSliceMilliseconds).toISOString(),
+      startOfUtcDay(new Date(initialUntilTime - 1).toISOString()),
+      initializeMinute,
+      initialRetentionLowerBound,
+    );
+    addWork(work, {
+      baseCurrencyAddress: base.baseCurrencyAddress,
+      kind: "initial",
+      poolId: base.poolId,
+      fromTimestamp,
+      untilTimestamp: initialUntil,
+    });
   }
 
   if (work.length !== 0) {
