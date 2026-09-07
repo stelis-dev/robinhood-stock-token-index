@@ -332,10 +332,10 @@ async function validateLocalSelectionTransition({ admittedConfiguration, maximum
   });
 }
 
-function proveListedIdentity(asset, identity, { allowStarter }) {
+function proveListedIdentity(asset, identity, { allowIncomplete }) {
   if (asset.assetName !== identity.assetName) throw new StoredDataIntegrityError();
-  if (asset.state === "starter") {
-    if (!allowStarter) throw new StoredDataIntegrityError();
+  if (asset.state === "incomplete") {
+    if (!allowIncomplete) throw new StoredDataIntegrityError();
     return;
   }
   if (asset.state !== "uploaded" || asset.bytes !== identity.bytes || asset.sha256 !== null && asset.sha256 !== identity.sha256) {
@@ -358,7 +358,7 @@ async function validateExactStorageMutation({ pending, recording, store }) {
       if (asset === undefined) missing += 1;
       else {
         if (pending.status !== "uploaded") throw new StoredDataIntegrityError();
-        proveListedIdentity(asset, identity, { allowStarter: true });
+        proveListedIdentity(asset, identity, { allowIncomplete: true });
       }
     }
     if (listed.length + missing > maximumMarketDataAssetsPerRelease) {
@@ -372,7 +372,7 @@ async function validateExactStorageMutation({ pending, recording, store }) {
   if (listedRoot === undefined) missingCatalogAssets += 1;
   else {
     if (pending.status !== "uploaded") throw new StoredDataIntegrityError();
-    proveListedIdentity(listedRoot, recording.publicationRecord.nextRoot, { allowStarter: true });
+    proveListedIdentity(listedRoot, recording.publicationRecord.nextRoot, { allowIncomplete: true });
   }
   const listedPublication = catalog.find((asset) => asset.assetName === marketDataPublicationAssetName);
   if (pending.status === "absent") {
@@ -390,10 +390,10 @@ export async function recoverMarketDataPublication({ admittedConfiguration, stor
   throwIfCancelled(signal);
   const pending = await store.readMarketDataPublication();
   if (pending.status === "absent") return Object.freeze({ status: "absent" });
-  if (pending.status === "starter") {
+  if (pending.status === "incomplete") {
     throwIfCancelled(signal);
-    await store.removeMarketDataPublicationStarter();
-    return Object.freeze({ status: "starter_removed" });
+    await store.removeIncompleteMarketDataPublication();
+    return Object.freeze({ status: "incomplete_removed" });
   }
   const record = decodePublication(pending.bytes, maximumBytes);
   const selected = await selectedRoot(admittedConfiguration.configuration, store, maximumBytes);
@@ -473,7 +473,7 @@ export async function publishMarketDataRecording({ admittedConfiguration, store,
   await validateLocalSelectionTransition({ admittedConfiguration, maximumBytes, previousSelected, previousSelection, recording, store });
   throwIfCancelled(signal);
   const publicationIdentity = publicationRecordAssetIdentity(recording.encodedPublicationRecord.gzipBytes);
-  if (pending.status === "starter") throw new Error("Pending publication starter must be recovered before collection.");
+  if (pending.status === "incomplete") throw new Error("Incomplete pending publication must be recovered before collection.");
   if (pending.status === "uploaded") {
     const pendingRecord = decodePublication(pending.bytes, maximumBytes);
     if (

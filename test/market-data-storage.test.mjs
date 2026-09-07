@@ -144,6 +144,22 @@ test("GitHub market-data Range reads retain the exact range across redirects and
     contradictoryLength.readMarketDataAsset(identity, { from: 12, until: 18 }),
     (error) => error instanceof StoredDataIntegrityError,
   );
+
+  const invalidRedirect = new GitHubReleaseStore({
+    fetchImplementation: async (target, init = {}) => (
+      new URL(target).hostname === "github.com"
+        ? new Response(null, { status: 302, headers: { location: "https://[" } })
+        : github.fetch(target, init)
+    ),
+    maximumArtifactBytes: 1_000_000,
+    repository: "owner/index",
+  });
+  await assert.rejects(
+    invalidRedirect.readMarketDataAsset(identity, { from: 12, until: 18 }),
+    (error) => error instanceof GitHubStorageError
+      && error.reason === "invalid_response"
+      && error.invalidResponseDetail === "redirect",
+  );
 });
 
 test("GitHub retry waits share one cumulative delay budget", async () => {
@@ -188,6 +204,71 @@ test("an uncertain market-data upload is reconciled without a duplicate mutation
   assert.equal(github.requests.filter((request) => (
     request.method === "POST" && new URL(request.target).hostname === "uploads.github.com"
   )).length, 1);
+});
+
+test("GitHub storage normalizes every admitted unfinished upload state", async () => {
+  const releaseTag = "market-data-index-s1";
+  const storeForState = (providerState) => new GitHubReleaseStore({
+    fetchImplementation: async (target) => {
+      const url = new URL(target);
+      if (url.pathname.includes("/releases/tags/")) {
+        return jsonResponse({ draft: false, id: 1, immutable: false, tag_name: releaseTag });
+      }
+      return jsonResponse([{
+        digest: null,
+        id: 2,
+        name: "index-incomplete.bin",
+        size: 1,
+        state: providerState,
+      }]);
+    },
+    maximumArtifactBytes: 2_000_000,
+    repository: "owner/index",
+  });
+  for (const providerState of ["open", "starter"]) {
+    assert.deepEqual(await storeForState(providerState).listMarketDataAssets(releaseTag), [{
+      assetName: "index-incomplete.bin",
+      bytes: 1,
+      sha256: null,
+      state: "incomplete",
+    }]);
+  }
+  await assert.rejects(storeForState("unknown").listMarketDataAssets(releaseTag), (error) => (
+    error instanceof GitHubStorageError
+      && error.reason === "invalid_response"
+      && error.invalidResponseDetail === "asset_metadata"
+      && error.message.includes("detail=asset_metadata")
+  ));
+});
+
+test("a non-empty unfinished upload is removed before the same asset is retried", async () => {
+  const bytes = Buffer.from("packed-market-data");
+  const identity = dataIdentity(bytes);
+  const github = new FakeGitHub();
+  let leaveIncompleteUpload = true;
+  const store = new GitHubReleaseStore({
+    fetchImplementation: async (target, init = {}) => {
+      if (leaveIncompleteUpload && init.method === "POST" && new URL(target).hostname === "uploads.github.com") {
+        const response = await github.fetch(target, init);
+        assert.equal(response.status, 201);
+        const asset = github.releases.get(identity.releaseTag).assets.get(identity.assetName);
+        asset.state = "starter";
+        asset.digest = null;
+        leaveIncompleteUpload = false;
+        return jsonResponse({ message: "Bad Gateway" }, 502);
+      }
+      return github.fetch(target, init);
+    },
+    maximumArtifactBytes: 1_000_000,
+    repository: "owner/index",
+    token: "test-token",
+    waitImplementation: async () => {},
+  });
+  assert.deepEqual(await store.writeMarketDataAsset(identity, bytes), bytes);
+  assert.equal(github.requests.filter((request) => (
+    request.method === "POST" && new URL(request.target).hostname === "uploads.github.com"
+  )).length, 2);
+  assert.equal(github.requests.some((request) => request.method === "DELETE"), true);
 });
 
 test("exact market-data deletion rejects contradictory remote identity", async () => {

@@ -15,6 +15,7 @@ const maximumRetryDelayMilliseconds = 60_000;
 const transientRetryDelayMilliseconds = 1_000;
 const rateLimitRetryDelayMilliseconds = 60_000;
 const contentRequestMethods = new Set(["DELETE", "PATCH", "POST", "PUT"]);
+const incompleteGitHubAssetStates = new Set(["open", "starter"]);
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 const githubFailureReasons = new Set([
   "access_denied",
@@ -27,6 +28,13 @@ const githubFailureReasons = new Set([
   "transient_http",
   "transport",
 ]);
+const githubInvalidResponseDetails = new Set([
+  "asset_list",
+  "asset_metadata",
+  "duplicate_asset_name",
+  "redirect",
+  "release_metadata",
+]);
 const githubOperations = new Set([
   "create_release",
   "delete_asset",
@@ -38,7 +46,7 @@ const githubOperations = new Set([
 ]);
 
 export class GitHubStorageError extends Error {
-  constructor(operation, reason, { retryable = false, retryDelayMilliseconds } = {}) {
+  constructor(operation, reason, { invalidResponseDetail, retryable = false, retryDelayMilliseconds } = {}) {
     if (!githubOperations.has(operation) || !githubFailureReasons.has(reason)) {
       throw new Error("GitHub storage failure classification is invalid.");
     }
@@ -46,10 +54,15 @@ export class GitHubStorageError extends Error {
     if (retryDelayMilliseconds !== undefined && (!Number.isSafeInteger(retryDelayMilliseconds) || retryDelayMilliseconds < 0)) {
       throw new Error("GitHub storage retry delay is invalid.");
     }
-    super(`GitHub storage ${operation} failed: ${reason}.`);
+    if (
+      invalidResponseDetail !== undefined
+      && (reason !== "invalid_response" || !githubInvalidResponseDetails.has(invalidResponseDetail))
+    ) throw new Error("GitHub storage response detail is invalid.");
+    super(`GitHub storage ${operation} failed: ${reason}${invalidResponseDetail === undefined ? "" : ` detail=${invalidResponseDetail}`}.`);
     this.name = "GitHubStorageError";
     this.operation = operation;
     this.reason = reason;
+    this.invalidResponseDetail = invalidResponseDetail;
     this.retryable = retryable;
     this.retryDelayMilliseconds = retryDelayMilliseconds;
   }
@@ -167,9 +180,9 @@ function validateAsset(value) {
     || typeof value?.digest === "string"
       && value.digest.startsWith("sha256:")
       && isSha256Hex(value.digest.slice("sha256:".length));
-  const stateIsValid = value?.state === "uploaded"
-    ? value.size > 0 && digestIsValid
-    : value?.state === "starter" && value.size === 0 && value.digest === null;
+  const state = value?.state === "uploaded"
+    ? "uploaded"
+    : incompleteGitHubAssetStates.has(value?.state) ? "incomplete" : null;
   if (
     value === null
     || typeof value !== "object"
@@ -179,11 +192,12 @@ function validateAsset(value) {
     || typeof value.name !== "string"
     || !Number.isSafeInteger(value.size)
     || value.size < 0
-    || !stateIsValid
+    || !digestIsValid
+    || state === null
   ) {
     throw new Error("GitHub release asset response is invalid.");
   }
-  return { id: value.id, name: value.name, size: value.size, state: value.state, digest: value.digest };
+  return { id: value.id, name: value.name, size: value.size, state, digest: value.digest };
 }
 
 function publicAssetUrl(repository, tag, name) {
@@ -421,9 +435,18 @@ export class GitHubReleaseStore {
         if ([301, 302, 303, 307, 308].includes(response.status)) {
           const location = response.headers?.get?.("location");
           await response.body?.cancel?.().catch(() => {});
-          if (typeof location !== "string" || redirects === 5) throw new GitHubStorageError("download_public", "invalid_response");
-          const redirected = new URL(location, target);
-          if (redirected.protocol !== "https:") throw new GitHubStorageError("download_public", "invalid_response");
+          if (typeof location !== "string" || redirects === 5) {
+            throw new GitHubStorageError("download_public", "invalid_response", { invalidResponseDetail: "redirect" });
+          }
+          let redirected;
+          try {
+            redirected = new URL(location, target);
+          } catch {
+            throw new GitHubStorageError("download_public", "invalid_response", { invalidResponseDetail: "redirect" });
+          }
+          if (redirected.protocol !== "https:") {
+            throw new GitHubStorageError("download_public", "invalid_response", { invalidResponseDetail: "redirect" });
+          }
           target = redirected.toString();
           continue;
         }
@@ -456,15 +479,15 @@ export class GitHubReleaseStore {
         if (bytes.byteLength !== expectedBytes) throw new StoredDataIntegrityError();
         return bytes;
       }
-      throw new GitHubStorageError("download_public", "invalid_response");
+      throw new GitHubStorageError("download_public", "invalid_response", { invalidResponseDetail: "redirect" });
     });
   }
 
-  #validateResponse(operation, action) {
+  #validateResponse(operation, invalidResponseDetail, action) {
     try {
       return action();
     } catch {
-      throw new GitHubStorageError(operation, "invalid_response");
+      throw new GitHubStorageError(operation, "invalid_response", { invalidResponseDetail });
     }
   }
 
@@ -476,7 +499,7 @@ export class GitHubReleaseStore {
     });
     const release = bytes === null
       ? null
-      : this.#validateResponse("get_release", () => validateRelease(parseJson(bytes, "GitHub release response"), tag));
+      : this.#validateResponse("get_release", "release_metadata", () => validateRelease(parseJson(bytes, "GitHub release response"), tag));
     this.#releases.set(tag, release);
     return release;
   }
@@ -498,6 +521,7 @@ export class GitHubReleaseStore {
         });
         const release = this.#validateResponse(
           "create_release",
+          "release_metadata",
           () => validateRelease(parseJson(bytes, "GitHub release creation response"), tag),
         );
         const mutable = requireMutableRelease(release);
@@ -521,11 +545,12 @@ export class GitHubReleaseStore {
       const bytes = await this.#apiRequest(`/repos/${this.repository}/releases/${releaseId}/assets?per_page=100&page=${page}`, {
         operation: "list_assets",
       });
-      const part = this.#validateResponse("list_assets", () => {
+      const values = this.#validateResponse("list_assets", "asset_list", () => {
         const values = parseJson(bytes, "GitHub release asset list");
         if (!Array.isArray(values)) throw new Error("GitHub release asset list is invalid.");
-        return values.map(validateAsset);
+        return values;
       });
+      const part = values.map((value) => this.#validateResponse("list_assets", "asset_metadata", () => validateAsset(value)));
       output.push(...part);
       if (output.length > maximumMarketDataAssetsPerRelease) throw new GitHubStorageError("list_assets", "storage_limit");
       if (part.length < 100) break;
@@ -533,7 +558,9 @@ export class GitHubReleaseStore {
     }
     const names = new Set();
     for (const asset of output) {
-      if (names.has(asset.name)) throw new GitHubStorageError("list_assets", "invalid_response");
+      if (names.has(asset.name)) {
+        throw new GitHubStorageError("list_assets", "invalid_response", { invalidResponseDetail: "duplicate_asset_name" });
+      }
       names.add(asset.name);
     }
     this.#assets.set(releaseId, output);
@@ -615,7 +642,7 @@ export class GitHubReleaseStore {
     const assets = await this.#refreshAssets(release.id);
     const asset = assets.find((candidate) => candidate.name === name);
     if (asset === undefined) return { status: "absent", assets };
-    if (asset.state === "starter") return { status: "starter", asset, assets };
+    if (asset.state === "incomplete") return { status: "incomplete", asset, assets };
     return {
       status: "uploaded",
       bytes: await this.#verifyImmutableAsset(release.id, asset, bytes),
@@ -629,7 +656,7 @@ export class GitHubReleaseStore {
     let assets = await this.#listAssets(release.id);
     let existing = assets.find((asset) => asset.name === name);
     if (existing?.state === "uploaded") return this.#verifyImmutableAsset(release.id, existing, bytes);
-    if (existing?.state === "starter") {
+    if (existing?.state === "incomplete") {
       await this.#deleteAsset(release.id, existing);
       assets = await this.#confirmAssetAbsent(release.id, name);
     }
@@ -639,7 +666,7 @@ export class GitHubReleaseStore {
     for (let attempt = 1; attempt <= maximumRequestAttempts; attempt += 1) {
       try {
         const uploadedBytes = await this.#uploadRequest(release.id, name, bytes);
-        const uploaded = this.#validateResponse("upload_asset", () => {
+        const uploaded = this.#validateResponse("upload_asset", "asset_metadata", () => {
           const value = validateAsset(parseJson(uploadedBytes, "GitHub asset upload response"));
           if (value.name !== name || value.size !== bytes.byteLength) {
             throw new Error("GitHub asset upload identity is invalid.");
@@ -654,7 +681,7 @@ export class GitHubReleaseStore {
         const reconciled = await this.#reconcileUpload(release, name, bytes);
         if (reconciled.status === "uploaded") return reconciled.bytes;
         assets = reconciled.assets;
-        if (reconciled.status === "starter") {
+        if (reconciled.status === "incomplete") {
           await this.#deleteAsset(release.id, reconciled.asset);
           assets = await this.#confirmAssetAbsent(release.id, name);
         }
@@ -708,7 +735,7 @@ export class GitHubReleaseStore {
     const { release, asset } = await this.#assetByName(tag, name);
     if (release === null || asset === null) return;
     requireMutableRelease(release, "delete_asset");
-    if (asset.state === "starter") {
+    if (asset.state === "incomplete") {
       if (!allowIncomplete) throw new StoredDataIntegrityError();
       await this.#deleteAsset(release.id, asset);
       await this.#confirmAssetAbsent(release.id, name);
@@ -733,7 +760,7 @@ export class GitHubReleaseStore {
   async readMarketDataPublication() {
     const { release, asset } = await this.#assetByName("market-data-catalog", marketDataPublicationAssetName);
     if (release === null || asset === null) return Object.freeze({ status: "absent" });
-    if (asset.state === "starter") return Object.freeze({ status: "starter" });
+    if (asset.state === "incomplete") return Object.freeze({ status: "incomplete" });
     const bytes = this.#token === undefined
       ? await this.#downloadPublic("market-data-catalog", marketDataPublicationAssetName)
       : await this.#readAdmittedUploadedAsset(release.id, asset);
@@ -753,12 +780,12 @@ export class GitHubReleaseStore {
     });
   }
 
-  async removeMarketDataPublicationStarter() {
+  async removeIncompleteMarketDataPublication() {
     this.#requireWriteToken();
     const { release, asset } = await this.#assetByName("market-data-catalog", marketDataPublicationAssetName);
     if (release === null || asset === null) return;
     requireMutableRelease(release, "delete_asset");
-    if (asset.state !== "starter") throw new StoredDataIntegrityError();
+    if (asset.state !== "incomplete") throw new StoredDataIntegrityError();
     await this.#deleteAsset(release.id, asset);
     await this.#confirmAssetAbsent(release.id, marketDataPublicationAssetName);
   }

@@ -582,7 +582,7 @@ async function assignReleaseShards({ family, packedAssets, replayAssets, store, 
           replay === undefined
           || replay.bytes !== packed.selectedAsset.bytes
           || replay.sha256 !== packed.selectedAsset.sha256
-          || existingAsset.state !== "starter" && (
+          || existingAsset.state !== "incomplete" && (
             existingAsset.state !== "uploaded"
             || existingAsset.bytes !== replay.bytes
             || existingAsset.sha256 !== null && existingAsset.sha256 !== replay.sha256

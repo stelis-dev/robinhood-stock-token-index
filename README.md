@@ -416,6 +416,13 @@ action repeats the fixed RPC collection and encoding. An existing remote asset
 is reused only when its complete bytes equal the independently regenerated
 bytes and the regenerated publication record matches exactly.
 
+GitHub can expose an unfinished upload as `starter` or `open` and can report a
+non-zero byte count before that upload is complete. The storage adapter
+normalizes either provider state to `incomplete`. Incomplete assets are never
+read or selected; only an exact pending publication may remove and replace one.
+A valid incomplete asset not referenced by the selected root does not
+invalidate that root or its complete referenced assets.
+
 ## Pin and read a public root
 
 The public catalog Release and its unauthenticated API endpoint are:

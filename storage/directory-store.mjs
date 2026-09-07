@@ -138,7 +138,7 @@ export class DirectoryStore {
     });
   }
 
-  async removeMarketDataPublicationStarter() {
+  async removeIncompleteMarketDataPublication() {
     await this.#prepareMutation();
     if (await readOptionalBoundedFile(
       marketDataPath(this.root, "market-data-catalog", marketDataPublicationAssetName),
